@@ -1,0 +1,78 @@
+# Standalone overlay builder. No CLI command, package hook or download is added.
+import std.fs as fs
+import std.path as path
+import std.io as io
+import manifest as schema
+import bundle as bundle
+import _native as native
+
+fn _number(value: int) -> str:
+    text = str(value)
+    if value < 0 or len(text) > 20:
+        raise "setup: footer offset out of range"
+    return "0" * (20 - len(text)) + text
+
+fn _copy(source: str, destination: stream):
+    with io.open(source, "r") as input:
+        io.copy(input, destination, 2147483648)
+
+fn build(template: str, configuration: str, payload_root: str, output: str):
+    root = path.resolve(payload_root)
+    data = schema.object(json_parse(read_text(configuration)))
+    if "files" in data or "template_size" in data:
+        raise "setup: builder generates files/template_size; do not provide them in configuration"
+    for key in data:
+        if key not in ["format", "id", "name", "version", "publisher", "architecture", "license", "command", "path_default", "desktop", "start_menu"]:
+            raise "setup: unsupported application configuration key '" + key + "'"
+    if fs.kind(template) != "file":
+        raise "setup: template must be a regular executable file"
+    files: list[json] = []
+    sources: list[str] = []
+    offset = fs.size(template)
+    data["template_size"] = json(offset)
+    data["template_sha256"] = json(native.digest(template))
+    # Traversal deliberately rejects links instead of silently omitting them.
+    pending = [root]
+    count = 0
+    while len(pending) > 0:
+        file = pop(pending)
+        count += 1
+        if count > 32768:
+            raise "setup: input tree exceeds 32768 entries"
+        kind = fs.kind(file)
+        if kind == "directory":
+            names = fs.entries(file, 32768)
+            for n in range(len(names) - 1, -1, -1):
+                append(pending, path.combine(file, names[n]))
+        elif kind == "file":
+            append(sources, file)
+        else:
+            raise "setup: payload contains a link/special file '" + file + "'"
+    for file in sources:
+        relative = replace(file[len(root) + 1:], "\\", "/")
+        schema.relative(relative)
+        size = fs.size(file)
+        append(files, json({"name": json(relative), "size": json(size), "offset": json(offset), "sha256": json(native.digest(file))}))
+        offset += size
+    data["files"] = json(files)
+    schema.decode(json(data))
+    text = json_dump(data)
+    if len(text) > 4194304:
+        raise "setup: manifest exceeds 4 MiB"
+    # Exclusive output prevents clobbering an existing package or user file.
+    with io.open(output, "x") as destination:
+        _copy(template, destination)
+        for file in sources:
+            _copy(file, destination)
+        io.write(destination, text)
+        io.flush(destination)
+    # Append footer only after the on-disk manifest has been hashed.
+    digest = native.digest(output, offset, len(text))
+    with io.open(output, "a") as destination:
+        io.write(destination, "WDSETUP1" + _number(offset) + _number(len(text)) + digest)
+        io.flush(destination)
+    built = bundle.load(output)
+    for entry in built.app.files:
+        if native.digest(output, entry.offset, entry.size) != entry.digest:
+            raise "setup: input changed while packaging; discard this unqualified output"
+    native.check(native.wood_setup_make_executable(output), "make bundle executable")

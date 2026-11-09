@@ -1,0 +1,16 @@
+# Independent scalar verification for examples/mesh_import.wd's fixed transform.
+import std.geometry as geo
+import std.num as num
+
+arguments = args()
+assert(len(arguments) == 2)
+original = geo.read_obj(arguments[0])
+result = geo.read_obj(arguments[1])
+assert(original.triangles == result.triangles)
+assert(num.shape(original.vertices) == num.shape(result.vertices))
+for vertex in range(num.shape(original.vertices)[0]):
+    assert(result.vertices[vertex,0] == 2.0*original.vertices[vertex,0]+1.0)
+    assert(result.vertices[vertex,1] == 2.0*original.vertices[vertex,1]+2.0)
+    assert(result.vertices[vertex,2] == 2.0*original.vertices[vertex,2]-3.0)
+assert(num.close(geo.area(result),4.0*geo.area(original)))
+print("native mesh workflow verified")

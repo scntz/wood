@@ -1,0 +1,24 @@
+import std.num as num
+
+fn fill(n: int, seed: float) -> array[float]:
+    values = num.zeros([n, n])
+    for i in range(n):
+        for j in range(n):
+            values[i, j] = float((i * 7 + j * 3) % 11) * seed
+    return values
+
+fn run(n: int) -> int:
+    left = fill(n, 0.5)
+    right = fill(n, 0.25)
+    product = num.zeros([n, n])
+    for i in range(n):
+        for k in range(n):
+            factor = left[i, k]
+            for j in range(n):
+                product[i, j] = product[i, j] + factor * right[k, j]
+    trace = 0.0
+    for i in range(n):
+        trace = trace + product[i, i]
+    return int(trace)
+
+print(run(int(args()[0])))

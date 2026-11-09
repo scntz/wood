@@ -1,0 +1,185 @@
+# Native expression contracts: side effects are deliberate and observable.
+fn marked(label: str, value: int) -> int:
+    write_text("trace.txt", read_text("trace.txt") + label)
+    return value
+
+fn gate(label: str, value: bool) -> bool:
+    write_text("trace.txt", read_text("trace.txt") + label)
+    return value
+
+fn bomb() -> int:
+    raise "unselected expression ran"
+
+def doubled(value: int) -> int:
+    return value * 2
+
+def identity(value: int) -> int:
+    return value
+
+record Box:
+    rows: list[list[int]]
+
+write_text("trace.txt", "")
+assert(marked("a", 0) < marked("b", 1) <= marked("c", 1) != marked("d", 2))
+assert(read_text("trace.txt") == "abcd")
+write_text("trace.txt", "")
+assert(not (marked("a", 2) < marked("b", 1) < bomb()))
+assert(read_text("trace.txt") == "ab")
+assert(0 < 1 in [1] != [2])
+assert(2 not in [1] == [1])
+assert(not (0.0 / 1.0 > 1.0 < bomb()))
+assert(not (0 < 1 > 3 < bomb()))
+write_text("trace.txt", "")
+choice = marked("yes", 1) if gate("cond", True) else bomb()
+assert(choice == 1 and read_text("trace.txt") == "condyes")
+assert((bomb() if False else 7) == 7)
+assert((1 if False else 2 if True else bomb()) == 2)
+assert((1 if True else 2.5) == 1.0)
+empty: list[int] = [] if True else [1]
+assert(len(empty) == 0)
+assert(doubled(3) == 6 and True and not False)
+assert((doubled if true else identity)(4) == 8)
+functions = [doubled if i % 2 == 0 else identity for i in range(3)]
+assert([function(3) for function in functions] == [6, 3, 6])
+assert([item for item in ([1] if true else [2]) if (true if item == 1 else false)] == [1])
+# Python spellings remain contextual so old legal identifiers still work.
+def = 9
+True = 11
+assert(def == 9 and True == 11)
+
+numbers = [1, 2, 3]
+alias = numbers
+numbers += numbers
+assert(numbers == [1, 2, 3, 1, 2, 3] and alias == [1, 2, 3])
+numbers *= 2
+assert(len(numbers) == 12 and alias == [1, 2, 3])
+assert([1, 2] + [3] == [1, 2, 3])
+assert(3 * [True] == [11, 11, 11])
+assert(([true, false] * 2)[::-1] == [false, true, false, true])
+assert("ab" * 3 == "ababab" and 2 * "ab" == "abab")
+assert("abc" * -9223372036854775808 == "")
+assert("" * 9223372036854775807 == "")
+empty_repeat: list[int] = [] * 9223372036854775807
+assert(len(empty_repeat) == 0)
+matrix = [[1]] * 3
+matrix_alias = matrix
+matrix[0][0] += 4
+assert(matrix == [[5], [1], [1]] and matrix_alias == [[1], [1], [1]])
+wrapped = Box([[10, 20]])
+wrapped.rows[0][0] += pop(wrapped.rows[0])
+assert(wrapped.rows == [[30]])
+numbers = [10, 20]
+write_text("trace.txt", "")
+numbers[marked("index", 0)] += marked("rhs", 5)
+assert(numbers == [15, 20] and read_text("trace.txt") == "indexrhs")
+numbers[0] += pop(numbers)
+assert(numbers == [35])
+try:
+    numbers[0] += pop(numbers)
+    assert(false)
+except err:
+    assert(err.code == "R4006")
+assert(len(numbers) == 0)
+write_text("trace.txt", "")
+try:
+    numbers[marked("index", 0)] += marked("rhs", 5)
+    assert(false)
+except err:
+    assert(err.code == "R4006")
+assert(read_text("trace.txt") == "index")
+mapping = {"value": 3}
+mapping["value"] *= 2
+assert(mapping["value"] == 6)
+try:
+    mapping["missing"] += marked("rhs", 5)
+    assert(false)
+except err:
+    assert(err.code == "R4011")
+assert(read_text("trace.txt") == "index")
+maximum = 9223372036854775807
+try:
+    maximum += 1
+    assert(false)
+except err:
+    assert(err.code == "R4001")
+assert(maximum == 9223372036854775807)
+fraction = 5.0
+fraction /= 2
+assert(fraction == 2.5)
+value = -7
+value //= 3
+assert(value == -3)
+value %= 2
+value <<= 4
+value |= 3
+value ^= 1
+value &= 31
+value >>= 1
+value -= 1
+assert(value == 8)
+for too_large in ["str", "list"]:
+    try:
+        if too_large == "str":
+            text = "xx" * 9223372036854775807
+        else:
+            items = [1, 2] * 9223372036854775807
+        assert(false)
+    except err:
+        assert(err.code == "R4003")
+
+sequence = [0, 1, 2, 3, 4, 5]
+assert(sequence[:] == sequence and sequence[::] == sequence)
+assert(sequence[1:5:2] == [1, 3])
+assert(sequence[::-1] == [5, 4, 3, 2, 1, 0])
+assert(sequence[:-1:-1] == empty)
+assert(sequence[5:0:-2] == [5, 3, 1])
+assert(sequence[-9223372036854775808:9223372036854775807] == sequence)
+assert(sequence[9223372036854775807:-9223372036854775808:-1] == sequence[::-1])
+assert(sequence[::9223372036854775807] == [0])
+assert(sequence[::-9223372036854775808] == [5])
+assert(empty[::-1] == empty)
+assert("abcdef"[1:5:2] == "bd" and "abcdef"[::-1] == "fedcba")
+assert("a\0b"[::-1] == "b\0a")
+assert(len("á"[::-1]) == 2)
+copy = sequence[:]
+copy[0] = 99
+assert(sequence[0] == 0)
+write_text("trace.txt", "")
+assert(sequence[marked("start", 1):marked("stop", 5):marked("step", 2)] == [1, 3])
+assert(read_text("trace.txt") == "startstopstep")
+try:
+    sequence[::0]
+    assert(false)
+except err:
+    assert(err.code == "R4005")
+
+outer = 99
+squares = [outer * outer for outer in range(7) if outer % 2 == 0]
+assert(squares == [0, 4, 16, 36] and outer == 99)
+assert([x for x in [1, 2] for x in [x + 10]] == [11, 12])
+assert([[a + b for b in range(a)] for a in range(4)] == [[], [1], [2, 3], [3, 4, 5]])
+assert([a * 10 + b for a in range(3) if a > 0 for b in range(a) if b % 2 == 0] == [10, 20])
+assert([doubled(i) if i % 2 == 0 else i for i in range(4)] == [0, 1, 4, 3])
+assert([char for char in "a\0b"] == ["a", "\0", "b"])
+duplicates = {i % 2: i for i in range(5)}
+assert(keys(duplicates) == [0, 1] and duplicates == {0: 4, 1: 3})
+assert([key for key in duplicates] == [0, 1])
+typed: list[float] = [i for i in range(3)]
+assert(typed == [0.0, 1.0, 2.0])
+nested_empty: dict[str, list[int]] = {str(i): [] for i in range(3)}
+append(nested_empty["0"], 5)
+assert(nested_empty["1"] == empty)
+source = [1, 2, 3]
+assert([pop(source) for ignored in source] == [3, 2, 1])
+assert(len(source) == 0)
+write_text("trace.txt", "")
+ordered = {marked("k", i): marked("v", i) for i in range(3) if gate("f", i > 0)}
+assert(ordered == {1: 1, 2: 2} and read_text("trace.txt") == "ffkvfkv")
+assert([i for i in range(9223372036854775806, 9223372036854775807, 2)] == [9223372036854775806])
+assert([i for i in range(-9223372036854775807, -9223372036854775808, -2)] == [-9223372036854775807])
+try:
+    [i for i in range(1, 2, 0)]
+    assert(false)
+except err:
+    assert(err.code == "R4005")
+print("native expressive language passed")

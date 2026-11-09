@@ -1,0 +1,261 @@
+# Hosted bootstrap frontend. No filesystem, process, JSON or foreign calls here.
+record Position:
+    offset: int
+    line: int
+    column: int
+
+record Token:
+    kind: str
+    text: str
+    offset: int
+    line: int
+    column: int
+
+record Problem:
+    code: str
+    message: str
+    position: Position
+
+record Result:
+    tokens: list[Token]
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+
+record Delimiter:
+    opening: str
+    position: Position
+
+fn rejected(code: str, message: str, position: Position) -> Result:
+    return Result([],code,message,position.offset,position.line,position.column)
+
+fn digit(c: str) -> bool:
+    return c >= "0" and c <= "9" and len(c) == 1
+
+fn alpha(c: str) -> bool:
+    return len(c) == 1 and ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_")
+
+record Scanner:
+    source: str
+    offset: int
+    line: int
+    column: int
+    line_start: bool
+    logical_content: bool
+    indents: list[int]
+    delimiters: list[Delimiter]
+    tokens: list[Token]
+    problem: Problem | None
+    max_tokens: int
+
+    # Internal mut receivers avoid copying the scanner/source at every byte.
+    fn position(mut self) -> Position:
+        return Position(self.offset,self.line,self.column)
+
+    fn peek(mut self, distance: int = 0) -> str:
+        if self.offset + distance >= len(self.source):
+            return ""
+        return self.source[self.offset + distance]
+
+    fn advance(mut self):
+        self.offset += 1
+        self.column += 1
+
+    fn emit(mut self, kind: str, text: str, position: Position):
+        if self.problem is None:
+            if len(self.tokens) >= self.max_tokens:
+                self.problem = Problem("B1002","token budget exceeded",position)
+            else:
+                append(self.tokens,Token(kind,text,position.offset,position.line,position.column))
+
+    fn scan(mut self) -> Result:
+        keywords = {"import":"Import","from":"From","as":"As","try":"Try","except":"Except","raise":"Raise","fn":"Fn","if":"If","elif":"Elif","else":"Else","while":"While","for":"For","in":"In","return":"Return","break":"Break","continue":"Continue","pass":"Pass","true":"True","false":"False","and":"And","or":"Or","not":"Not"}
+        singles = {"(":"LParen",")":"RParen","[":"LBracket","]":"RBracket","{":"LBrace","}":"RBrace",".":"Dot",",":"Comma",":":"Colon","+":"Plus","-":"Minus","*":"Star","/":"Slash","%":"Percent","&":"BitAnd","|":"BitOr","^":"BitXor","~":"BitNot","=":"Equal","<":"Less",">":"Greater"}
+        doubles = {"<<":"ShiftLeft",">>":"ShiftRight","->":"Arrow","=>":"FatArrow","//":"FloorDiv","==":"EqualEqual","!=":"BangEqual","<=":"LessEqual",">=":"GreaterEqual"}
+        augmented = {"<<=":"<<",">>=":">>","//=":"//","+=":"+","-=":"-","*=":"*","/=":"/","%=":"%","&=":"&","|=":"|","^=":"^"}
+        closing = {")":"(","]":"[","}":"{"}
+        escapes = {"n":"\n","r":"\r","t":"\t","0":"\0","\\":"\\","'":"'",'"':'"'}
+        if self.source[:3] == byte_string(239) + byte_string(187) + byte_string(191):
+            self.offset = 3
+        while self.offset < len(self.source) and self.problem is None:
+            if self.line_start:
+                beginning = self.position()
+                spaces = 0
+                while self.peek() == " ":
+                    self.advance()
+                    spaces += 1
+                if self.peek() == "\t":
+                    return rejected("E1001","tabs are not allowed outside strings; use spaces",self.position())
+                if self.offset == len(self.source):
+                    break
+                c = self.peek()
+                if len(self.delimiters) == 0 and c != "#" and c != "\r" and c != "\n":
+                    if spaces > self.indents[-1]:
+                        if len(self.indents) >= 256:
+                            return rejected("E1002","indentation nesting exceeds 255 levels",self.position())
+                        append(self.indents,spaces)
+                        self.emit("Indent","",beginning)
+                    else:
+                        while spaces < self.indents[-1] and self.problem is None:
+                            pop(self.indents)
+                            self.emit("Dedent","",beginning)
+                        if self.problem is None and spaces != self.indents[-1]:
+                            return rejected("E1002","dedent does not match an outer indentation level",self.position())
+                self.line_start = false
+                if self.problem is not None:
+                    break
+            c = self.peek()
+            if c == " ":
+                self.advance()
+                continue
+            if c == "\t":
+                return rejected("E1001","tabs are not allowed outside strings; use spaces",self.position())
+            if c == "#":
+                while self.offset < len(self.source) and self.peek() != "\r" and self.peek() != "\n":
+                    self.advance()
+                continue
+            if c == "\r" or c == "\n":
+                position = self.position()
+                if c == "\r" and self.peek(1) == "\n":
+                    self.offset += 1
+                self.offset += 1
+                self.line += 1
+                self.column = 1
+                self.line_start = true
+                if len(self.delimiters) == 0 and self.logical_content:
+                    self.emit("Newline","",position)
+                    self.logical_content = false
+                continue
+            position = self.position()
+            self.logical_content = true
+            if alpha(c):
+                start = self.offset
+                while alpha(self.peek()) or digit(self.peek()):
+                    self.advance()
+                word = self.source[start:self.offset]
+                kind = "Identifier"
+                if word in keywords:
+                    kind = keywords[word]
+                self.emit(kind,word,position)
+                continue
+            if digit(c):
+                start = self.offset
+                while digit(self.peek()):
+                    self.advance()
+                floating = false
+                if self.peek() == ".":
+                    floating = true
+                    self.advance()
+                    if not digit(self.peek()):
+                        return rejected("E1003","expected digits after decimal point",self.position())
+                    while digit(self.peek()):
+                        self.advance()
+                if self.peek() == "e" or self.peek() == "E":
+                    floating = true
+                    self.advance()
+                    if self.peek() == "+" or self.peek() == "-":
+                        self.advance()
+                    if not digit(self.peek()):
+                        return rejected("E1003","expected digits in exponent",self.position())
+                    while digit(self.peek()):
+                        self.advance()
+                if alpha(self.peek()):
+                    return rejected("E1003","invalid suffix on numeric literal",self.position())
+                kind = "Float" if floating else "Integer"
+                self.emit(kind,self.source[start:self.offset],position)
+                continue
+            if c == "'" or c == '"':
+                quote = c
+                self.advance()
+                segment = self.offset
+                parts: list[str] = []
+                while self.offset < len(self.source) and self.peek() != quote:
+                    c = self.peek()
+                    if c == "\r" or c == "\n":
+                        return rejected("E1004","unterminated string literal",position)
+                    if c == "\\":
+                        append(parts,self.source[segment:self.offset])
+                        self.advance()
+                        if self.offset == len(self.source):
+                            return rejected("E1004","unterminated string escape",position)
+                        c = self.peek()
+                        if c not in escapes:
+                            return rejected("E1005","unknown string escape",self.position())
+                        append(parts,escapes[c])
+                        self.advance()
+                        segment = self.offset
+                    else:
+                        if byte_value(c) < 32:
+                            return rejected("E1005","control character in string; use an escape",self.position())
+                        self.advance()
+                if self.offset == len(self.source):
+                    return rejected("E1004","unterminated string literal",position)
+                append(parts,self.source[segment:self.offset])
+                self.advance()
+                self.emit("String",join(parts,""),position)
+                continue
+            triple = self.source[self.offset:self.offset+3]
+            pair = self.source[self.offset:self.offset+2]
+            if len(triple) == 3 and triple in augmented:
+                self.advance()
+                self.advance()
+                self.advance()
+                self.emit("Augment",augmented[triple],position)
+                continue
+            if pair in augmented:
+                self.advance()
+                self.advance()
+                self.emit("Augment",augmented[pair],position)
+                continue
+            if pair in doubles:
+                self.advance()
+                self.advance()
+                self.emit(doubles[pair],pair,position)
+                continue
+            # Preserve E1007 for ordinary '@' mistakes. Only the explicit import
+            # provider spelling introduces the optional profile's token.
+            if c == "@" and len(self.tokens) >= 2 and self.tokens[-2].kind == "Import" and self.tokens[-1].kind == "Identifier" and self.tokens[-1].text == "python":
+                self.advance()
+                self.emit("At",c,position)
+                continue
+            if c not in singles:
+                hints = {"!":"; wood spells this 'not'",";":"; statements end at the end of the line","?":"; wood has no ternary operator, so write 'a if condition else b'"}
+                return rejected("E1007","unexpected character outside string or comment"+(hints[c] if c in hints else ""),position)
+            if c in "([{":
+                append(self.delimiters,Delimiter(c,position))
+                if len(self.delimiters) > 256:
+                    message = "parenthesis nesting exceeds 256 levels" if c == "(" else "delimiter nesting exceeds 256 levels"
+                    return rejected("E1006",message,position)
+            elif c in closing:
+                if len(self.delimiters) == 0 or self.delimiters[-1].opening != closing[c]:
+                    name = "parenthesis" if c == ")" else ("bracket" if c == "]" else "brace")
+                    return rejected("E1006","unmatched closing " + name,position)
+                pop(self.delimiters)
+            self.advance()
+            self.emit(singles[c],c,position)
+        if self.problem is not None:
+            problem = unwrap(self.problem)
+            return rejected(problem.code,problem.message,problem.position)
+        if len(self.delimiters) != 0:
+            return rejected("E1006","unclosed parenthesis or bracket",self.delimiters[-1].position)
+        position = self.position()
+        if self.logical_content:
+            self.emit("Newline","",position)
+        while len(self.indents) > 1:
+            pop(self.indents)
+            self.emit("Dedent","",position)
+        self.emit("Eof","",position)
+        if self.problem is not None:
+            problem = unwrap(self.problem)
+            return rejected(problem.code,problem.message,problem.position)
+        return Result(self.tokens,"","",position.offset,position.line,position.column)
+
+fn lex(source: str, max_bytes: int = 16777216, max_tokens: int = 262144) -> Result:
+    if max_bytes < 0 or max_bytes > 16777216 or max_tokens < 1 or max_tokens > 1048576:
+        return rejected("B1001","invalid lexer resource budget",Position(0,1,1))
+    if len(source) > max_bytes:
+        return rejected("B1001","source byte budget exceeded",Position(0,1,1))
+    scanner = Scanner(source,0,1,1,true,false,[0],[],[],None,max_tokens)
+    return scanner.scan()

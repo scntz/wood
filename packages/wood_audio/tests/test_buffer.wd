@@ -1,0 +1,20 @@
+import buffer as audio
+sine = audio.tone(440.0, 0.01, 8000)
+assert(audio.frames(sine) == 80)
+assert(audio.peak(sine) <= 0.5)
+assert(audio.peak(audio.normalize(sine)) > 0.99)
+mixed = audio.mix(audio.silence(8000, 1, 10), audio.silence(8000, 1, 20))
+assert(audio.frames(mixed) == 20)
+assert(audio.resample(sine, 4000).rate == 4000)
+assert(audio.frames(audio.resample(sine, 4000)) == 40)
+assert(audio.to_mono(audio.silence(8000, 2, 5)).channels == 1)
+assert(audio.frames(audio.concat(sine, sine)) == 160)
+faded = audio.fade(audio.Buffer(8000, 1, [1.0 for i in range(100)]), 0.002)
+assert(faded.samples[0] == 0.0)
+assert(faded.samples[50] == 1.0)
+failed = false
+try:
+    audio.mix(audio.silence(8000, 1, 1), audio.silence(4000, 1, 1))
+except err:
+    failed = true
+assert(failed)

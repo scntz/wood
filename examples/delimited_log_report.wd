@@ -1,0 +1,53 @@
+# Bounded native log summarizer. Each input line is LEVEL|category|message.
+import std.io as io
+
+record Event:
+    level: str
+    category: str
+    message: str
+
+record Summary:
+    records: int
+    message_bytes: int
+    levels: dict[str,int]
+    categories: dict[str,int]
+    preview: list[str]
+
+fn parse_event(line: str) -> Event:
+    fields = split(strip(line), "|")
+    if len(fields) != 3:
+        raise "expected LEVEL|category|message"
+    level = fields[0]
+    if level != "INFO" and level != "WARN" and level != "ERROR":
+        raise "level must be INFO, WARN or ERROR"
+    if fields[1] == "" or fields[2] == "":
+        raise "category and message must be nonempty"
+    return Event(level, fields[1], fields[2])
+
+fn format_event(event: Event, index: int) -> str:
+    return "[" + str(index) + "] " + event.level + " " + event.category + ": " + event.message
+
+fn summarize(path: str) -> Summary:
+    report = Summary(0, 0, {"INFO":0, "WARN":0, "ERROR":0}, {}, [])
+    consumed = 0
+    with io.open(path, "r") as source:
+        while true:
+            line = io.line(source, 4096)
+            if line == "":
+                break
+            consumed += len(line)
+            if consumed > 8388608 or report.records >= 100000:
+                raise "log exceeds 8 MiB or 100000 records"
+            event = parse_event(line)
+            report.records += 1
+            report.message_bytes += len(event.message)
+            report.levels[event.level] += 1
+            report.categories[event.category] = get(report.categories, event.category, 0) + 1
+            if len(report.preview) < 3:
+                append(report.preview, format_event(event, report.records))
+    return report
+
+arguments = args()
+if len(arguments) != 1:
+    raise "usage: delimited_log_report INPUT.log"
+print(json_dump(summarize(arguments[0])))

@@ -1,0 +1,563 @@
+# Bidirectional typing for the call-independent expression language. All IDs in
+# annotations belong to pool; syntax links remain in tree. Unsupported families
+# are rejected, never treated as successfully checked expressions.
+import syntax as ast
+import type_system as ts
+import signatures as sig
+import sources as src
+import lexer as lx
+
+fn numeric(kind: str) -> bool:
+    return kind in ["Int","Float"]
+
+# Wood's builtins are functions, so someone reaching for a method needs the spelling that exists.
+fn builtin_call_hint(name: str) -> str:
+    spellings = {"append":"append(items, value)","pop":"pop(items)","split":"split(text, separator)","join":"join(items, separator)","strip":"strip(text)","replace":"replace(text, old, new)","startswith":"starts_with(text, prefix)","starts_with":"starts_with(text, prefix)","endswith":"ends_with(text, suffix)","ends_with":"ends_with(text, suffix)","find":"find(text, needle)","keys":"keys(items)","values":"values(items)","get":"get(items, key, fallback)","remove":"remove(items, key)","len":"len(value)","length":"len(value)","size":"len(value)","count":"len(value)"}
+    if name in spellings:
+        return "; call it as "+spellings[name]
+    return ""
+
+fn similar(name: str, candidate: str) -> bool:
+    left = split(name,".")
+    right = split(candidate,".")
+    if join(left[:-1],".") != join(right[:-1],".") or len(left) != len(right):
+        return false
+    name = left[-1]
+    candidate = right[-1]
+    if len(name) < 3 or len(name) > 64 or len(candidate) < 3 or len(candidate) > 64 or name == candidate:
+        return false
+    if len(name) == len(candidate):
+        differences: list[int] = []
+        for index in range(len(name)):
+            if name[index] != candidate[index]:
+                append(differences,index)
+        if len(differences) == 1:
+            return true
+        return len(differences) == 2 and differences[1] == differences[0]+1 and name[differences[0]] == candidate[differences[1]] and name[differences[1]] == candidate[differences[0]]
+    short = name
+    long = candidate
+    if len(short) > len(long):
+        short = candidate
+        long = name
+    if len(long) != len(short)+1:
+        return false
+    index = 0
+    while index < len(short) and short[index] == long[index]:
+        index += 1
+    return short[index:] == long[index+1:]
+
+record Checker:
+    tree: ast.Tree
+    pool: ts.Pool
+    names: dict[str,int]
+    declarations: list[sig.Declaration]
+    types: list[int]
+    symbols: list[int]
+    problem: src.Diagnostic | None
+    file: str
+    source: int
+    current: lx.Token
+    depth: int
+    visits: int
+    limit: int
+    record_parameters: dict[int,list[str]]
+    requests: bool
+    requested: int
+    requested_expected: int
+    symbol_index: dict[int,int]
+
+    fn member_problem(self, value: int, name: str, names: list[str]) -> str:
+        # names holds fields, and methods written as name().
+        close: list[str] = []
+        for candidate in names:
+            if similar(name,split(candidate,"(")[0]):
+                append(close,candidate)
+        hint = ""
+        if len(close) == 1:
+            hint = "; did you mean '"+split(close[0],"(")[0]+"'?"
+        elif len(names) > 0 and len(names) <= 12:
+            hint = "; it has "+join(names,", ")
+        return self.pool.display(value)+" has no field or method '"+name+"'"+hint
+
+    fn declaration_of(self, symbol: int) -> int:
+        # A hint from the integrated analyzer avoids scanning every declaration per member access.
+        if symbol in self.symbol_index:
+            index = self.symbol_index[symbol]
+            if index < len(self.declarations) and self.declarations[index].symbol == symbol:
+                return index
+        for index in range(len(self.declarations)):
+            if self.declarations[index].symbol == symbol:
+                return index
+        return -1
+
+    fn fail(mut self, code: str, message: str, token: lx.Token):
+        self.problem = src.located(code,message,self.file,self.source,token)
+        raise "bootstrap expression rejection"
+
+    fn require(mut self, actual: int, expected: int, token: lx.Token):
+        if not self.pool.assignable(expected,actual):
+            wanted = self.pool.display(expected)
+            received = self.pool.display(actual)
+            detail = ""
+            if wanted == received:
+                detail = "; these types contain distinct nominal record declarations"
+            self.fail("E3002","expected "+wanted+", got "+received+detail,token)
+
+    fn resolved(mut self, value: int, token: lx.Token):
+        pending = [value]
+        while len(pending) > 0:
+            node = self.pool.types[pop(pending)]
+            if node.kind in ["Unknown","Named","Parameter","Projection","Signature"]:
+                self.fail("B3303","expression binding requires a resolved concrete type",token)
+            if node.element >= 0:
+                append(pending,node.element)
+            if node.key >= 0:
+                append(pending,node.key)
+            for item in node.parameters:
+                append(pending,item)
+
+    fn field_type(mut self, record_type: ts.Type, field: int) -> int:
+        if len(record_type.parameters) == 0:
+            return field
+        if record_type.declaration not in self.record_parameters or len(self.record_parameters[record_type.declaration]) != len(record_type.parameters):
+            self.fail("B3303","generic record fields require a concrete declaration context",self.current)
+        arguments: dict[str,int] = {}
+        names = self.record_parameters[record_type.declaration]
+        for index in range(len(names)):
+            arguments[names[index]] = record_type.parameters[index]
+        result = self.pool.substitute(field,arguments)
+        pending = [result]
+        while len(pending) > 0:
+            node = self.pool.types[pop(pending)]
+            if node.kind in ["Parameter","Projection","Signature"]:
+                self.fail("B3303","generic record field requires specialization analysis",self.current)
+            if node.element >= 0:
+                append(pending,node.element)
+            if node.key >= 0:
+                append(pending,node.key)
+            for item in node.parameters:
+                append(pending,item)
+        return result
+
+    fn comparable(mut self, value: int) -> bool:
+        # Iterative and cycle-safe for nominal records with indirect recursion.
+        pending = [value]
+        seen: dict[int,bool] = {}
+        while len(pending) > 0:
+            item = pop(pending)
+            if item in seen:
+                continue
+            seen[item] = true
+            node = self.pool.types[item]
+            if node.kind in ["Closure","Callable","Cursor","Range","PythonObject"]:
+                return false
+            if node.element >= 0:
+                append(pending,node.element)
+            if node.kind == "Tuple":
+                for parameter in node.parameters:
+                    append(pending,parameter)
+            if node.kind == "Record":
+                found = self.declaration_of(node.declaration)
+                if found >= 0:
+                    for parameter in self.declarations[found].parameters:
+                        append(pending,self.field_type(node,parameter.type))
+        return true
+
+    fn operator_type(mut self, op: str, a: int, b: int, token: lx.Token) -> int:
+        left = self.pool.types[a]
+        right = self.pool.types[b]
+        integer = self.pool.intern("Int")
+        boolean = self.pool.intern("Bool")
+        if (left.kind == "Array" or right.kind == "Array") and op in ["+","-","*","/"]:
+            x = left.kind
+            y = right.kind
+            if x == "Array":
+                x = self.pool.types[left.element].kind
+            if y == "Array":
+                y = self.pool.types[right.element].kind
+            if not numeric(x) or not numeric(y):
+                self.fail("E3031","array arithmetic requires numeric arrays or scalars",token)
+            kind = "Int"
+            if op == "/" or x == "Float" or y == "Float":
+                kind = "Float"
+            return self.pool.intern("Array",element=self.pool.intern(kind))
+        if op in ["==","!="] and ((left.kind == "None" and right.kind == "Optional") or (right.kind == "None" and left.kind == "Optional")):
+            return boolean
+        if op in ["==","!="] and (not self.comparable(a) or not self.comparable(b)):
+            self.fail("E3028","closure, callable and cursor values do not support equality",token)
+        if op in ["is","is not"]:
+            if not ((left.kind == "None" and right.kind in ["None","Optional"]) or (right.kind == "None" and left.kind == "Optional")):
+                self.fail("E3002","identity tests support only optional values and None",token)
+            return boolean
+        if op in ["==","!="] and (left.kind in ["Optional","None"] or right.kind in ["Optional","None"]):
+            if not self.pool.assignable(a,b) and not self.pool.assignable(b,a):
+                self.fail("E3002","optional equality requires compatible value types",token)
+            return boolean
+        if op in ["&","|","^","<<",">>"]:
+            self.require(a,integer,token)
+            self.require(b,integer,token)
+            return integer
+        if op in ["in","not in"]:
+            if right.kind == "Dict":
+                self.require(a,right.key,token)
+            elif right.kind == "List":
+                if not self.comparable(right.element):
+                    self.fail("E3028","membership requires comparable list items",token)
+                self.require(a,right.element,token)
+            elif right.kind == "Str":
+                self.require(a,self.pool.intern("Str"),token)
+            else:
+                self.fail("E3002","membership requires a dictionary, list, or string on the right",token)
+            return boolean
+        if op in ["and","or"]:
+            self.require(a,boolean,token)
+            self.require(b,boolean,token)
+            return boolean
+        if op in ["==","!=","<","<=",">",">="]:
+            if left.kind == "Void" or right.kind == "Void" or not ((numeric(left.kind) and numeric(right.kind)) or a == b):
+                self.fail("E3002","comparison requires compatible value types",token)
+            if left.kind in ["Bool","Error","Json","List","Array","Dict","Record","Function","Tuple","None","Optional","Stream","Database","Statement","Transaction","TlsContext","Task"] and op not in ["==","!="]:
+                self.fail("E3002","this value type supports only == and != comparisons",token)
+            return boolean
+        if op == "+" and left.kind == "Str" and right.kind == "Str":
+            return a
+        if op == "+" and left.kind == "List" and a == b:
+            return a
+        if op == "*" and left.kind in ["Str","List"] and right.kind == "Int":
+            return a
+        if op == "*" and left.kind == "Int" and right.kind in ["Str","List"]:
+            return b
+        if not numeric(left.kind) or not numeric(right.kind):
+            hint = ""
+            if op == "+" and (left.kind == "Str" or right.kind == "Str"):
+                hint = "; convert with str(value) first"
+            self.fail("E3002","operator '"+op+"' cannot combine "+self.pool.display(a)+" and "+self.pool.display(b)+hint,token)
+        if op in ["//","%"]:
+            self.require(a,integer,token)
+            self.require(b,integer,token)
+            return integer
+        if op == "/" or left.kind == "Float" or right.kind == "Float":
+            return self.pool.intern("Float")
+        return integer
+
+    fn empty(self, value: int) -> bool:
+        expr = self.tree.expressions[value]
+        return expr.kind in ["List","Dict"] and len(expr.children) == 0
+
+    fn operands(mut self, left: int, right: int, op: str, expected: int = 0) -> tuple[int,int]:
+        if op in ["in","not in"]:
+            b = self.expression(right)
+            node = self.pool.types[b]
+            hint = 0
+            if node.kind == "Dict":
+                hint = node.key
+            elif node.kind == "List":
+                hint = node.element
+            return (self.expression(left,hint),b)
+        if self.empty(left) and expected == 0 and op != "*":
+            b = self.expression(right)
+            return (self.expression(left,b),b)
+        hint = 0
+        if self.pool.types[expected].kind in ["List","Dict","Tuple"]:
+            hint = expected
+        a = self.expression(left,hint)
+        if self.pool.types[a].kind in ["List","Dict","Tuple"]:
+            hint = a
+        return (a,self.expression(right,hint))
+
+    fn containers(mut self, value: int, expected: int) -> int:
+        expr = self.tree.expressions[value]
+        hint = self.pool.types[expected]
+        if expr.kind == "Tuple":
+            if hint.kind == "Tuple" and len(hint.parameters) != len(expr.children):
+                self.fail("E3002","tuple annotation has a different arity",expr.token)
+            parameters: list[int] = []
+            for index in range(len(expr.children)):
+                item = 0
+                if hint.kind == "Tuple":
+                    item = hint.parameters[index]
+                child = expr.children[index]
+                actual = self.expression(child,item)
+                if self.pool.types[actual].kind == "Void":
+                    self.fail("E3002","tuple elements cannot be void",self.tree.expressions[child].token)
+                if item != 0:
+                    self.require(actual,item,self.tree.expressions[child].token)
+                    actual = item
+                append(parameters,actual)
+            return self.pool.intern("Tuple",parameters=parameters)
+        element = 0
+        key = 0
+        if hint.kind == expr.kind:
+            element = hint.element
+            key = hint.key
+        if expr.kind == "List":
+            if len(expr.children) == 0 and element == 0:
+                self.fail("E3014","empty list requires an element type; use an annotation such as list[int]",expr.token)
+            for child in expr.children:
+                actual = self.expression(child,element)
+                if self.pool.types[actual].kind == "Void":
+                    self.fail("E3002","list elements cannot be void",self.tree.expressions[child].token)
+                if element == 0:
+                    element = actual
+                elif hint.kind != "List" and self.pool.types[element].kind == "Int" and self.pool.types[actual].kind == "Float":
+                    element = actual
+                else:
+                    self.require(actual,element,self.tree.expressions[child].token)
+            return self.pool.intern("List",element=element)
+        if len(expr.children) == 0 and key == 0:
+            self.fail("E3014","empty dictionary requires contextual dict[K, V] types",expr.token)
+        for index in range(0,len(expr.children),2):
+            k = expr.children[index]
+            v = expr.children[index+1]
+            actual_key = self.expression(k,key)
+            actual_value = self.expression(v,element)
+            if key == 0:
+                key = actual_key
+            else:
+                self.require(actual_key,key,self.tree.expressions[k].token)
+            if element == 0:
+                element = actual_value
+            elif hint.kind != "Dict" and self.pool.types[element].kind == "Int" and self.pool.types[actual_value].kind == "Float":
+                element = actual_value
+            else:
+                self.require(actual_value,element,self.tree.expressions[v].token)
+            if self.pool.types[actual_value].kind == "Void":
+                self.fail("E3002","dictionary values cannot be void",self.tree.expressions[v].token)
+        if self.pool.types[key].kind not in ["Int","Str","Bool"]:
+            self.fail("E3020","dictionary keys must be int, str, or bool",expr.token)
+        return self.pool.intern("Dict",element=element,key=key)
+
+    fn index(mut self, value: int) -> int:
+        expr = self.tree.expressions[value]
+        base = self.expression(expr.children[0])
+        node = self.pool.types[base]
+        child = expr.children[1]
+        token = self.tree.expressions[child].token
+        if node.kind == "Tuple":
+            self.require(self.expression(child),self.pool.intern("Int"),token)
+            item = self.tree.expressions[child]
+            negative = false
+            if item.kind == "Unary" and item.token.text in ["+","-"]:
+                negative = item.token.text == "-"
+                item = self.tree.expressions[item.children[0]]
+            if item.kind != "Integer":
+                self.fail("E3025","heterogeneous tuple index must be an integer literal",token)
+            magnitude = -1
+            try:
+                magnitude = int(item.token.text)
+            except err:
+                self.fail("E3025","tuple index is out of bounds",token)
+            position = magnitude
+            if negative and magnitude != 0:
+                position = len(node.parameters)-magnitude
+            if position < 0 or position >= len(node.parameters):
+                self.fail("E3025","tuple index is out of bounds",token)
+            self.symbols[value] = position
+            return node.parameters[position]
+        if node.kind == "Array":
+            index_type = self.expression(child)
+            item = self.pool.types[index_type]
+            valid = item.kind == "Int"
+            if item.kind == "Tuple" and len(item.parameters) > 0 and len(item.parameters) <= 8:
+                valid = true
+                for parameter in item.parameters:
+                    if self.pool.types[parameter].kind != "Int":
+                        valid = false
+            if not valid:
+                self.fail("E3031","array indexes require integers, one for each axis",expr.token)
+            return node.element
+        expected = self.pool.intern("Int")
+        if node.kind == "Dict":
+            expected = node.key
+        self.require(self.expression(child),expected,token)
+        if node.kind in ["List","Dict"]:
+            return node.element
+        if node.kind == "Str":
+            return base
+        self.fail("E3002","indexing requires a list or string",expr.token)
+        return 0
+
+    fn infer(mut self, value: int, expected: int) -> int:
+        expr = self.tree.expressions[value]
+        kind = expr.kind
+        token = expr.token
+        text = token.text
+        # The integrated body analyzer supplies lexical bindings and calls.
+        # Suspend before these operations; completed child facts survive replay.
+        # Isolated users retain the original strict kernel behavior by default.
+        if self.requests and kind in ["Name","Member","Call","Invoke","Closure","ListComprehension","DictComprehension"]:
+            self.requested = value
+            self.requested_expected = expected
+            raise "bootstrap expression request"
+        if kind == "Integer":
+            canonical = ""
+            try:
+                canonical = str(int(text))
+            except err:
+                self.fail("E3006","integer literal is outside the signed 64-bit range",token)
+            # An equal assignment can detach the entire shared expression arena.
+            # Validate first, but preserve storage when its value is canonical.
+            if text != canonical:
+                self.tree.expressions[value].token.text = canonical
+            return self.pool.intern("Int")
+        if kind == "Float":
+            try:
+                float(text)
+            except err:
+                self.fail("E3006","float literal is outside the finite binary64 range",token)
+            return self.pool.intern("Float")
+        literals = {"String":"Str","Bool":"Bool","None":"None"}
+        if kind in literals:
+            return self.pool.intern(literals[kind])
+        if kind == "Name":
+            if text in self.names:
+                self.resolved(self.names[text],token)
+                return self.names[text]
+            if text in ["None","True","False"]:
+                self.tree.expressions[value].kind = "Bool"
+                self.tree.expressions[value].token.text = "false"
+                if text == "None":
+                    self.tree.expressions[value].kind = "None"
+                    self.tree.expressions[value].token.text = "None"
+                    return self.pool.intern("None")
+                if text == "True":
+                    self.tree.expressions[value].token.text = "true"
+                return self.pool.intern("Bool")
+            matches: list[str] = []
+            for name in self.names:
+                if similar(text,name):
+                    append(matches,name)
+            suffix = ""
+            if len(matches) == 1:
+                suffix = "; did you mean '"+matches[0]+"'?"
+            self.fail("E3007","undefined variable '"+text+"'"+suffix,token)
+        if kind in ["Tuple","List","Dict"]:
+            return self.containers(value,expected)
+        if kind == "Unary":
+            operand = self.tree.expressions[expr.children[0]]
+            # Preserve the magnitude spelling and special backend marker.
+            if text == "-" and operand.kind == "Integer" and strip_leading_zeroes(operand.token.text) == "9223372036854775808":
+                self.types[expr.children[0]] = self.pool.intern("Int")
+                self.symbols[value] = 1
+                return self.pool.intern("Int")
+            actual = self.expression(expr.children[0])
+            if text == "~":
+                self.require(actual,self.pool.intern("Int"),token)
+            elif text == "not":
+                self.require(actual,self.pool.intern("Bool"),token)
+            elif not numeric(self.pool.types[actual].kind) and self.pool.types[actual].kind != "Array":
+                self.fail("E3002","unary '"+text+"' requires a number",token)
+            return actual
+        if kind == "Binary":
+            pair = self.operands(expr.children[0],expr.children[1],text,expected)
+            return self.operator_type(text,pair[0],pair[1],token)
+        if kind == "CompareChain":
+            pair = self.operands(expr.children[0],expr.children[1],expr.operators[0])
+            self.operator_type(expr.operators[0],pair[0],pair[1],token)
+            previous = pair[1]
+            for index in range(1,len(expr.operators)):
+                hint = 0
+                if self.pool.types[previous].kind in ["List","Dict","Tuple"]:
+                    hint = previous
+                actual = self.expression(expr.children[index+1],hint)
+                self.operator_type(expr.operators[index],previous,actual,self.tree.expressions[expr.children[index]].token)
+                previous = actual
+            return self.pool.intern("Bool")
+        if kind == "Conditional":
+            self.require(self.expression(expr.children[1]),self.pool.intern("Bool"),self.tree.expressions[expr.children[1]].token)
+            pair = self.operands(expr.children[0],expr.children[2],"conditional",expected)
+            a = pair[0]
+            b = pair[1]
+            left = self.pool.types[a]
+            right = self.pool.types[b]
+            if left.kind == "Void" or right.kind == "Void":
+                self.fail("E3002","conditional branches must produce values",token)
+            if numeric(left.kind) and numeric(right.kind):
+                if left.kind == "Float" or right.kind == "Float":
+                    return self.pool.intern("Float")
+                return a
+            if left.kind == "None" and right.kind != "None":
+                return self.pool.intern("Optional",element=b)
+            if right.kind == "None" and left.kind != "None":
+                return self.pool.intern("Optional",element=a)
+            if left.kind == "Optional" and self.pool.assignable(a,b):
+                return a
+            if right.kind == "Optional" and self.pool.assignable(b,a):
+                return b
+            if a != b:
+                self.fail("E3002","conditional branches require compatible value types",token)
+            return a
+        if kind == "Index":
+            return self.index(value)
+        if kind == "Slice":
+            actual = self.expression(expr.children[0])
+            if self.pool.types[actual].kind not in ["List","Str","Array"]:
+                self.fail("E3002","slicing requires a list or string",token)
+            for index in range(1,len(expr.children)):
+                if expr.children[index] >= 0:
+                    self.require(self.expression(expr.children[index]),self.pool.intern("Int"),self.tree.expressions[expr.children[index]].token)
+            return actual
+        if kind == "Member":
+            base_type = self.expression(expr.children[0])
+            base = self.pool.types[base_type]
+            if base.kind == "Record":
+                found = self.declaration_of(base.declaration)
+                if found >= 0:
+                    parameters = self.declarations[found].parameters
+                    for index in range(len(parameters)):
+                        field = parameters[index]
+                        if field.name == text:
+                            self.symbols[value] = index
+                            return self.field_type(base,field.type)
+                fields: list[str] = []
+                if found >= 0:
+                    for parameter in self.declarations[found].parameters:
+                        append(fields,parameter.name)
+                self.fail("E3016",self.member_problem(base_type,text,fields),token)
+            if base.kind != "Error":
+                self.fail("E3016",self.pool.display(base_type)+" has no field or method '"+text+"'"+builtin_call_hint(text),token)
+            if text in ["code","message","file"]:
+                return self.pool.intern("Str")
+            if text in ["line","column"]:
+                return self.pool.intern("Int")
+            self.fail("E3016","unknown error field '"+text+"'",token)
+        if kind == "TypeApply":
+            self.fail("E3024","type applications require a record constructor call",token)
+        self.fail("B3303","expression family '"+kind+"' requires body/call analysis",token)
+        return 0
+
+    fn expression(mut self, value: int, expected: int = 0) -> int:
+        expr = self.tree.expressions[value]
+        self.current = expr.token
+        if self.types[value] != 0:
+            return self.types[value]
+        self.visits += 1
+        if self.visits > self.limit:
+            self.fail("B3302","expression visit budget exceeded",expr.token)
+        self.depth += 1
+        if self.depth > 256:
+            self.fail("E2002","expression nesting exceeds 256 levels",expr.token)
+        if self.pool.types[expected].kind == "Optional":
+            expected = self.pool.types[expected].element
+        actual = self.infer(value,expected)
+        if not self.pool.depth_valid(actual):
+            self.fail("E2002","type nesting exceeds 64 levels",expr.token)
+        self.types[value] = actual
+        self.depth -= 1
+        return actual
+
+fn strip_leading_zeroes(text: str) -> str:
+    start = 0
+    while start < len(text)-1 and text[start] == "0":
+        start += 1
+    return text[start:]
+
+fn checker(tree: ast.Tree, pool: ts.Pool, names: dict[str,int] = {}, declarations: list[sig.Declaration] = [], file: str = "", source: int = 0, limit: int = 1048576, record_parameters: dict[int,list[str]] = {}, tables: bool = true) -> Checker:
+    types: list[int] = []
+    symbols: list[int] = []
+    # A caller that supplies its own tables must not pay for these on every function it enters.
+    if tables:
+        for item in tree.expressions:
+            append(types,0)
+            append(symbols,0)
+    return Checker(tree,pool,names,declarations,types,symbols,None,file,source,src.origin(),0,0,limit,record_parameters,false,-1,0,{})

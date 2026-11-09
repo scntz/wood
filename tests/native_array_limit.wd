@@ -1,0 +1,4 @@
+# Qualified MSVC/libstdc++ vector ceilings differ at this boundary. The gate
+# compares uncaught failure categories; it never attempts a usable allocation.
+import std.num as num
+num.zeros(1152921504606846976)

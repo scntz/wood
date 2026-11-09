@@ -1,0 +1,35 @@
+# Shared source identity and diagnostics for multi-module frontend stages.
+import lexer as lx
+import std.io as io
+
+record Diagnostic:
+    code: str
+    message: str
+    file: str
+    source: int
+    offset: int
+    line: int
+    column: int
+
+fn success() -> Diagnostic:
+    return Diagnostic("","","",0,0,0,0)
+
+fn located(code: str, message: str, file: str, source: int, token: lx.Token) -> Diagnostic:
+    return Diagnostic(code,message,file,source,token.offset,token.line,token.column)
+
+fn origin() -> lx.Token:
+    return lx.Token("","",0,1,1)
+
+fn read(path: str, limit: int) -> str:
+    content = ""
+    # Bounded reads preserve binary bytes and close on every exit.
+    try:
+        with io.open(path,"r") as input:
+            content = io.read_all(input,limit)
+    except err:
+        if err.message == "stream exceeds byte limit":
+            raise "file exceeds size limit: " + path
+        if err.code == "R4016":
+            raise "cannot read '" + path + "'"
+        raise err
+    return content

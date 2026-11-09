@@ -1,0 +1,82 @@
+import image as img
+import scene as scene
+import std.geometry as geo
+import std.linalg as la
+import std.num as num
+
+# Two unit squares facing the camera: red at z = 0 and blue in front of it, offset to the right.
+fn square(x: float, z: float) -> list[list[float]]:
+    return [[x-1.0, -1.0, z], [x+1.0, -1.0, z], [x+1.0, 1.0, z], [x-1.0, 1.0, z]]
+
+fn mesh_of(points: list[list[float]]) -> geo.Mesh:
+    flat: list[float] = []
+    for point in points:
+        for value in point:
+            append(flat, value)
+    faces: list[int] = []
+    for i in range(0, len(points), 4):
+        for corner in [0, 1, 2, 0, 2, 3]:
+            append(faces, i+corner)
+    count = len(points)
+    return geo.Mesh(num.reshape(num.from_list(flat), (count, 3)), num.reshape(num.from_list(faces), (len(faces)//3, 3)))
+
+fn same(a: img.Color, b: img.Color) -> bool:
+    return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a
+
+white = img.rgb(255, 255, 255)
+black = img.rgb(0, 0, 0)
+head_on = scene.camera(la.Vec3(0.0, 0.0, 5.0), la.Vec3(0.0, 0.0, 0.0), 45.0)
+flat = scene.Style(white, black, la.Vec3(0.0, 0.0, -1.0), 0.2)
+
+# Geometry lands where perspective says: half-width 1 at distance 5 and 45 degrees.
+one = scene.render(mesh_of(square(0.0, 0.0)), 200, 200, head_on, flat)
+assert(one.width == 200 and one.height == 200)
+assert(same(img.get(one, 100, 100), white))
+assert(same(img.get(one, 3, 3), black))
+edge = int(100.0+1.0/5.0*100.0/0.41421356237309503)
+assert(same(img.get(one, edge-2, 100), white))
+assert(same(img.get(one, edge+2, 100), black))
+
+# The depth buffer decides, in either drawing order.
+front = square(0.5, 1.0)
+back = square(-0.5, 0.0)
+for points in [front+back, back+front]:
+    pair = scene.render(mesh_of(points), 100, 100, scene.camera(la.Vec3(0.0, 0.0, 5.0), la.Vec3(0.0, 0.0, 0.0), 45.0), scene.Style(white, black, la.Vec3(0.0, 0.0, -1.0), 1.0))
+    assert(same(img.get(pair, 50, 50), white))
+
+# A surface lit from the side is darker, and never darker than the ambient share.
+side = scene.Style(white, black, la.Vec3(-1.0, 0.0, 0.0), 0.2)
+dim = scene.render(mesh_of(square(0.0, 0.0)), 50, 50, head_on, side)
+assert(img.get(dim, 25, 25).r == 51)
+
+# Behind the camera nothing draws, and framing finds the mesh at any scale.
+empty = scene.render(mesh_of(square(0.0, 10.0)), 40, 40, head_on, flat)
+assert(same(img.get(empty, 20, 20), black))
+big = geo.torus(24, 12, 2000.0, 500.0)
+framed = scene.render(big, 80, 60, scene.framing(big), scene.style())
+background = scene.style().background
+drawn = 0
+for y in range(60):
+    for x in range(80):
+        if not same(img.get(framed, x, y), background):
+            drawn = drawn+1
+assert(drawn > 300 and drawn < 4800)
+assert(same(img.get(framed, 0, 0), background))
+
+# Rendering is deterministic.
+again = scene.render(big, 80, 60, scene.framing(big), scene.style())
+assert(num.to_list(again.pixels) == num.to_list(framed.pixels))
+
+# Invalid requests fail clearly.
+for bad in [0.0, 180.0, -1.0]:
+    try:
+        scene.render(big, 10, 10, scene.camera(la.Vec3(0.0, 0.0, 5.0), la.Vec3(0.0, 0.0, 0.0), bad), scene.style())
+        assert(false)
+    except err:
+        assert(find(err.message, "field of view") >= 0)
+try:
+    scene.render(big, 10, 10, scene.camera(la.Vec3(1.0, 1.0, 1.0), la.Vec3(1.0, 1.0, 1.0)), scene.style())
+    assert(false)
+except err:
+    assert(find(err.message, "must differ") >= 0)
+print("scene ok")

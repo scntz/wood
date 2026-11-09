@@ -1,0 +1,19 @@
+# Blocking public operations over nonblocking native TCP sockets. Timeouts are
+# per operation; host resolution follows the OS resolver's separate policy.
+fn connect(host: str, number: int, timeout_ms: int) -> stream:
+    return tcp_connect(host, number, timeout_ms)
+
+fn listen(address: str, number: int, timeout_ms: int) -> stream:
+    return tcp_listen(address, number, timeout_ms)
+
+fn accept(listener: stream) -> stream:
+    return tcp_accept(listener)
+
+fn port(socket: stream) -> int:
+    return tcp_port(socket)
+
+fn set_timeout(socket: stream, timeout_ms: int):
+    stream_timeout(socket, timeout_ms)
+
+fn shutdown_write(socket: stream):
+    tcp_shutdown_write(socket)

@@ -1,0 +1,130 @@
+# Native tool orchestration shares the normal driver, checked frontend and OS
+# process/publication policies. There is no C++ fallback or shell evaluation.
+import driver_cli as cli
+import driver_host as host
+import checked_program as ir
+import emit_llvm as llvm
+import project as project
+import sources as src
+import std.path as path
+import std.fs as fs
+
+record Config:
+    root: str
+    target: str
+    directory: str
+    linker: str
+    wsl: str
+
+fn configuration(options: cli.Options, root: str, windows: bool) -> Config:
+    home = path.resolve(options.native_home if options.native_home != "" else root)
+    file = path.combine(home,"native.json")
+    if fs.kind(file) != "file":
+        raise "LLVM assets are not installed; use --native-home with an installed native asset directory"
+    data = project.object(json_parse(src.read(file,1048576)))
+    for key in ["format","runtime_abi","target","llvm_dir","linker","llvm_wsl"]:
+        if key not in data:
+            raise "native asset configuration lacks '"+key+"'"
+    target = "windows-x86_64" if windows else "linux-x86_64"
+    if json_int(data["format"]) != 1 or json_int(data["runtime_abi"]) != 4 or project.string(data["target"]) != target:
+        raise "native asset format, target or ABI mismatch (expected ABI 4 for "+target+")"
+    directory = options.llvm_dir if options.llvm_dir != "" else project.string(data["llvm_dir"])
+    linker = options.linker if options.linker != "" else project.string(data["linker"])
+    wsl = options.llvm_wsl if options.llvm_wsl != "" else project.string(data["llvm_wsl"])
+    if wsl != "" and not windows:
+        raise "--llvm-wsl is only valid on Windows"
+    if linker == "":
+        linker = "link.exe" if windows else "ld"
+    return Config(home,target,directory,linker,wsl)
+
+fn emit(config: Config, checked: ir.Result, machine: bool) -> llvm.Result:
+    root = path.combine(config.root,"native")
+    runtime = src.read(path.combine(root,config.target+".ll"),16777216)+"\n"+src.read(path.combine(root,"core.ll"),16777216)
+    if machine:
+        runtime = replace(runtime,"@wd.json_errors = private constant i1 false","@wd.json_errors = private constant i1 true")
+    return llvm.emit(checked,runtime)
+
+fn tool(config: Config, name: str, arguments: list[str]) -> list[str]:
+    if config.wsl != "":
+        mapped: list[str] = []
+        for value in arguments:
+            if len(value) >= 3 and value[1] == ":" and value[2] in ["/","\\"]:
+                drive = value[0]
+                upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                position = find(upper,drive)
+                if position >= 0:
+                    drive = "abcdefghijklmnopqrstuvwxyz"[position]
+                value = "/mnt/"+drive+"/"+replace(value[3:],"\\","/")
+            append(mapped,value)
+        executable = config.directory+"/"+name if config.directory != "" else name
+        return ["wsl.exe","-d",config.wsl,"--exec",executable]+mapped
+    executable = name+(".exe" if config.target == "windows-x86_64" else "")
+    if config.directory != "":
+        executable = path.combine(config.directory,executable)
+    return [executable]+arguments
+
+fn missing_tool(program: str) -> str:
+    advice = "wood needs LLVM 19 and GNU ld. On Debian 13, run: sudo apt install llvm-19 binutils, then add LLVM to your PATH: export PATH=\"/usr/lib/llvm-19/bin:$PATH\". To use tools elsewhere, pass --llvm-dir and --linker."
+    if len(program) > 4 and program[len(program)-4:] == ".exe":
+        advice = "The LLVM tools ship with wood, so this installation may be damaged. Reinstall it, or select other tools with --llvm-dir and --linker."
+    return "__WOOD_DRIVER__D5002:cannot run '"+program+"'. "+advice
+
+fn step(options: cli.Options, arguments: list[str], log: str, label: str):
+    status = 127
+    try:
+        status = host.process(arguments,log,options.timeout,options.limit,false)
+    except err:
+        # Windows reports a program that cannot start here. Linux reports exit 127 below.
+        if find(err.message,"cannot start native compiler") < 0:
+            raise err
+    if status == 127:
+        raise missing_tool(arguments[0])
+    if status != 0:
+        text = src.read(log,options.limit)
+        raise "__WOOD_DRIVER__D5002:"+label+" failed (exit "+str(status)+"): "+text
+
+fn build(options: cli.Options, config: Config, generated: str, output: str, execution_log: str) -> int:
+    directory = host.temporary(path.parent(output) if output != "" else "")
+    status = 2
+    try:
+        input = path.combine(directory,"program.ll")
+        write_text(input,generated)
+        if options.command == "emit-llvm":
+            host.publish(input,output)
+            status = 0
+        else:
+            runtime = path.combine(config.root,"native/managed.o")
+            if fs.kind(runtime) != "file":
+                raise "native ABI-4 runtime object is not installed"
+            log = path.combine(directory,"compiler.log")
+            step(options,tool(config,"opt",["-passes=verify","-disable-output",input]),log,"LLVM verification")
+            if options.optimize:
+                optimized = path.combine(directory,"optimized.ll")
+                step(options,tool(config,"opt",["-passes=default<O2>","-S",input,"-o",optimized]),log,"LLVM optimization")
+                input = optimized
+            object = path.combine(directory,"program.o")
+            windows = config.target == "windows-x86_64"
+            triple = "x86_64-pc-windows-msvc" if windows else "x86_64-unknown-linux-gnu"
+            step(options,tool(config,"llc",["-filetype=obj","-mtriple="+triple,"-O="+("2" if options.optimize else "0"),input,"-o",object]),log,"LLVM code generation")
+            executable = path.combine(directory,"program.exe" if windows else "program")
+            command: list[str] = []
+            if windows:
+                command = [config.linker,"/nologo","/Brepro","/OPT:NOICF","/nodefaultlib","/entry:mainCRTStartup","/subsystem:console","/machine:x64","/stack:8388608","/out:"+executable,object,runtime]+options.libraries+["kernel32.lib"]
+            else:
+                command = [config.linker,"-static","--build-id=none","-e","_start",object,runtime]+options.libraries+["-o",executable]
+                if find(generated,"\n@wd.native.system_libraries = private constant i8 1\n") >= 0:
+                    # SQLite and subsequent optional C services need glibc's
+                    # initialized loader/TLS. The compiler and ordinary native
+                    # applications keep the independent static entry above.
+                    command = [config.linker,"--build-id=none","-e","_start_hosted","--dynamic-linker","/lib64/ld-linux-x86-64.so.2",object,runtime]+options.libraries+["--no-as-needed","-l:libc.so.6","-o",executable]
+            step(options,command,log,"native linking")
+            if options.command == "build":
+                host.publish(executable,output)
+                status = 0
+            else:
+                status = host.process([executable]+options.program_args,execution_log,options.timeout,options.limit)
+    except err:
+        host.release(directory)
+        raise err
+    host.release(directory)
+    return status

@@ -1,0 +1,20 @@
+import std.io as io
+import std.fs as fs
+
+fn identity(n: int) -> int:
+    return n
+closure = fn(n: int) => n+1
+erased: callable(int) -> int = closure
+cursor = iter([1,2])
+assert(str([identity]) == "[<function>]")
+assert(str((closure,erased,cursor,range(2))) == "(<closure>, <callable>, <cursor>, <range>)")
+numbers = array_full(2,1.5)
+assert(str([numbers]) == "["+str(numbers)+"]")
+path = "native-format-check.tmp"
+stream = io.open(path,"x")
+assert(str(stream) == "<stream:open>")
+assert(str([stream]) == "[<stream:open>]")
+io.close(stream)
+assert(str((stream,)) == "(<stream:closed>,)")
+assert(fs.remove(path))
+print("native resource formatting passed")

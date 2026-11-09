@@ -1,0 +1,8 @@
+# Distribution shim only. The qualified Wood compiler remains byte-for-byte
+# unchanged; the OS adapter supplies relocatable child-only tools/LIB settings.
+extern fn wood_setup_launch_compiler() -> int
+status = wood_setup_launch_compiler()
+if status < 0:
+    print("wood: cannot start bundled native compiler (Windows error " + str(-status) + ")")
+    exit(2)
+exit(status)

@@ -1,0 +1,152 @@
+# Parses text that is still being typed, using the one real parser. Each error's line is
+# replaced in place, so line numbers never move and the rest of the file stays analyzable.
+import parser as parser
+import syntax as ast
+
+record Problem:
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+
+record Recovered:
+    text: str
+    tree: ast.Tree
+    problems: list[Problem]
+    names: list[str]
+
+fn indent_of(line: str) -> int:
+    count = 0
+    for byte in line:
+        if byte != " " and byte != "\t":
+            break
+        count += 1
+    return count
+
+fn blank(line: str) -> bool:
+    text = strip(line)
+    return text == "" or starts_with(text,"#")
+
+fn word_at(text: str, start: int) -> str:
+    end = start
+    while end < len(text):
+        code = byte_value(text[end])
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95 or code >= 128):
+            break
+        end += 1
+    return text[start:end]
+
+fn after_word(text: str, word: str) -> str:
+    # The name following a keyword, such as the x in "for x in".
+    if starts_with(text,word+" "):
+        return word_at(strip(text[len(word):]),0)
+    return ""
+
+fn declared_names(line: str) -> list[str]:
+    # What a replaced line would have declared, so later uses are not reported as undefined.
+    text = strip(line)
+    result: list[str] = []
+    for keyword in ["fn","record","for"]:
+        name = after_word(text,keyword)
+        if name != "":
+            append(result,name)
+    if starts_with(text,"extern fn "):
+        append(result,word_at(strip(text[10:]),0))
+    if starts_with(text,"with ") or starts_with(text,"except "):
+        position = find(text," as ")
+        if position >= 0:
+            append(result,word_at(strip(text[position+4:]),0))
+    name = word_at(text,0)
+    rest = strip(text[len(name):])
+    if name != "" and (starts_with(rest,"=") or starts_with(rest,":")) and not starts_with(rest,"=="):
+        append(result,name)
+    return result
+
+fn top_level_block(lines: list[str], index: int) -> tuple[int,int]:
+    start = index
+    while start > 0 and (blank(lines[start]) or indent_of(lines[start]) > 0):
+        start -= 1
+    stop = start+1
+    while stop < len(lines) and (blank(lines[stop]) or indent_of(lines[stop]) > 0):
+        stop += 1
+    return (start,stop)
+
+fn next_code_line(lines: list[str], index: int) -> int:
+    position = index+1
+    while position < len(lines) and blank(lines[position]):
+        position += 1
+    return position
+
+fn previous_code_line(lines: list[str], index: int) -> int:
+    position = index-1
+    while position >= 0 and blank(lines[position]):
+        position -= 1
+    return position
+
+fn pad(count: int) -> str:
+    return join([" " for i in range(count)],"")
+
+fn recover(text: str, max_nodes: int = 262144) -> Recovered:
+    lines = split(text,"\n")
+    problems: list[Problem] = []
+    names: list[str] = []
+    replaced: dict[int,bool] = {}
+    current = text
+    attempt = 0
+    while attempt < 32:
+        parsed = parser.parse(current,max_nodes)
+        if parsed.code == "":
+            return Recovered(current,parsed.tree,problems,names)
+        index = parsed.line-1
+        if index >= len(lines):
+            index = len(lines)-1
+        while index > 0 and strip(lines[index]) == "":
+            index -= 1
+        if index not in replaced:
+            append(problems,Problem(parsed.code,parsed.message,parsed.offset,parsed.line,parsed.column))
+        message = parsed.message
+        indentation = "indent" in message or "block" in message
+        if index in replaced:
+            # Replacing the line was not enough: give up on its whole declaration.
+            bounds = top_level_block(lines,index)
+            for position in range(bounds[0],bounds[1]):
+                for name in declared_names(lines[position]):
+                    append(names,name)
+                lines[position] = ""
+                replaced[position] = true
+        elif indentation and index > 0 and indent_of(lines[index]) <= indent_of(lines[previous_code_line(lines,index)]):
+            # A header with no body: the header is what has to go.
+            previous = previous_code_line(lines,index)
+            for name in declared_names(lines[previous]):
+                append(names,name)
+            lines[previous] = pad(indent_of(lines[previous]))+"pass" if indent_of(lines[previous]) > 0 else ""
+            replaced[previous] = true
+        elif indentation:
+            for name in declared_names(lines[index]):
+                append(names,name)
+            lines[index] = ""
+            replaced[index] = true
+        else:
+            for name in declared_names(lines[index]):
+                append(names,name)
+            indent = indent_of(lines[index])
+            following = next_code_line(lines,index)
+            header = following < len(lines) and indent_of(lines[following]) > indent
+            if header and indent == 0:
+                # A broken declaration header: its body would make no sense on its own.
+                bounds = top_level_block(lines,index)
+                for position in range(bounds[0],bounds[1]):
+                    lines[position] = ""
+                    replaced[position] = true
+            elif header:
+                lines[index] = pad(indent)+"if True:"
+                replaced[index] = true
+            else:
+                lines[index] = pad(indent)+"pass" if indent > 0 else ""
+                replaced[index] = true
+        current = join(lines,"\n")
+        attempt += 1
+    # Nothing useful survived. Symbols are simply absent until the text parses again.
+    empty = parser.parse("",max_nodes)
+    return Recovered("",empty.tree,problems,names)

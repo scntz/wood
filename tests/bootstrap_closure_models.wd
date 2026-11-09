@@ -1,0 +1,33 @@
+# Definition-module names and generic inferred protocol methods.
+import std.iter as it
+
+record Label:
+    value:str
+
+fn prefix(value:str)->str:
+    return "library:"+value
+
+fn factory[T](value:T):
+    return fn()=>value
+
+fn labels[S](source:S):
+    return it.collect(it.map(source,fn(value)=>Label(prefix(str(value)))))
+
+record Numbers:
+    current:int
+    stop:int
+    fn next(mut self):
+        if self.current==self.stop:
+            empty:step[int]=finished()
+            return empty
+        result=self.current
+        self.current+=1
+        return yielded(result)
+
+record Sequence:
+    stop:int
+    fn iter(self):
+        return Numbers(0,self.stop)
+
+fn apply[S,F](source:S,callback:F(S.Item))->list[F.Result]:
+    return it.collect(it.map(source,callback))

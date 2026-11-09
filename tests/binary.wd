@@ -1,0 +1,68 @@
+import std.binary as binary
+
+assert(1 + 2 << 3 & 31 ^ 4 | 8 == 28)
+assert(~0 == -1 and ~-1 == 0)
+assert((-1 >> 63) == -1 and (9223372036854775807 >> 63) == 0)
+assert((-1 << 63) == -9223372036854775808)
+assert((-9223372036854775808 >> 63) == -1)
+assert((-7 >> 1) == -4)
+assert(binary.pack_uint(4660, 2, "big") == byte_string(18) + byte_string(52))
+assert(binary.pack_int(-2, 2, "little") == byte_string(254) + byte_string(255))
+for order in ["little", "big"]:
+    for width in range(1, 9):
+        assert(binary.unpack_int(binary.pack_int(-1, width, order), order) == -1)
+        assert(binary.unpack_int(binary.pack_int(0, width, order), order) == 0)
+        if width < 8:
+            maximum = (1 << (width * 8 - 1)) - 1
+            minimum = -maximum - 1
+            assert(binary.unpack_int(binary.pack_int(maximum, width, order), order) == maximum)
+            assert(binary.unpack_int(binary.pack_int(minimum, width, order), order) == minimum)
+    for value in [-9223372036854775808, 9223372036854775807, -123456789, 123456789]:
+        assert(binary.unpack_int(binary.pack_int(value, 8, order), order) == value)
+    for value in range(65536):
+        assert(binary.unpack_uint(binary.pack_uint(value, 2, order), order) == value)
+    for invalid in [[128, 1], [-129, 1], [32768, 2], [-32769, 2]]:
+        try:
+            binary.pack_int(invalid[0], invalid[1], order)
+            assert(false)
+        except err:
+            assert(err.code == "R4010")
+for count in [-1, 64, 9223372036854775807]:
+    try:
+        1 << count
+        assert(false)
+    except err:
+        assert(err.code == "R4014")
+    try:
+        1 >> count
+        assert(false)
+    except err:
+        assert(err.code == "R4014")
+for value in [1, -2, 9223372036854775807]:
+    try:
+        value << 63
+        assert(false)
+    except err:
+        assert(err.code == "R4001")
+for invalid_width in [0, 9]:
+    try:
+        binary.pack_int(1, invalid_width, "big")
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+try:
+    binary.pack_uint(-1, 8, "big")
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+try:
+    binary.unpack_uint(byte_string(255) + byte_string(0) + byte_string(0) + byte_string(0) + byte_string(0) + byte_string(0) + byte_string(0) + byte_string(0), "big")
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+try:
+    binary.pack_uint(1, 1, "native")
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+print("binary ok")

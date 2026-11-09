@@ -1,0 +1,17 @@
+fn run(limit: int) -> int:
+    composite: list[bool] = []
+    for i in range(limit + 1):
+        append(composite, false)
+    count = 0
+    prime = 2
+    while prime <= limit:
+        if not composite[prime]:
+            count = count + 1
+            multiple = prime * prime
+            while multiple <= limit:
+                composite[multiple] = true
+                multiple = multiple + prime
+        prime = prime + 1
+    return count
+
+print(run(int(args()[0])))

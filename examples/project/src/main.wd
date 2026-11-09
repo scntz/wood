@@ -1,0 +1,14 @@
+from report import summarize
+
+fn main():
+    if len(args()) != 2:
+        eprint("usage: report_app input.txt output.txt")
+        exit(2)
+    try:
+        result = summarize(read_text(args()[0]))
+        write_text(args()[1], result)
+    except err:
+        eprint(err.code + ": " + err.message)
+        exit(1)
+
+main()

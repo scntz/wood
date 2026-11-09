@@ -1,0 +1,44 @@
+import buffer as audio
+import std.env as env
+import wav as wav
+
+# Altered files must decode or raise an ordinary error, with no crash and no unbounded allocation.
+# WOOD_FUZZ_ITERATIONS runs longer than the default regression pass.
+record Random:
+    state: int
+
+    fn below(mut self, bound: int) -> int:
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        return (self.state >> 8) % bound
+
+    fn mutate(mut self, source: str) -> str:
+        text = source
+        for round in range(1 + self.below(3)):
+            at = self.below(len(text) + 1)
+            choice = self.below(4)
+            if choice == 0 and at < len(text):
+                text = text[:at] + byte_string(self.below(256)) + text[at+1:]
+            elif choice == 1:
+                text = text[:at] + text[at+1+self.below(8):]
+            elif choice == 2 and at + 4 <= len(text):
+                text = text[:at] + byte_string(255) + byte_string(255) + byte_string(255) + byte_string(127) + text[at+4:]
+            else:
+                text = text[:at]
+        return text
+
+sound = wav.encode(audio.tone(440.0, 0.01, 8000), 16)
+random = Random(20261103)
+iterations = 1000
+configured = env.get("WOOD_FUZZ_ITERATIONS")
+if configured != None:
+    iterations = int(unwrap(configured))
+accepted = 0
+rejected = 0
+for i in range(iterations):
+    try:
+        wav.decode(random.mutate(sound))
+        accepted += 1
+    except err:
+        rejected += 1
+assert(accepted + rejected == iterations)
+assert(rejected > 0)

@@ -1,0 +1,12 @@
+import std.task as tasks
+fn line(message: json) -> json:
+    return json(read_line())
+jobs = [tasks.spawn(line,json_null()) for i in range(8)]
+actual: dict[str,int] = {}
+for job in jobs:
+    with job as owned:
+        text = json_str(tasks.wait(owned,10000))
+        actual[text] = get(actual,text,0)+1
+assert(actual == {str(i):1 for i in range(8)})
+assert(eof())
+print("native concurrent stdin passed")

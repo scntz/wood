@@ -1,0 +1,61 @@
+import std.iter as it
+
+record Words:
+    words: list[str]
+    index: int
+    fn next(mut self) -> step[str]:
+        if self.index == len(self.words):
+            return finished()
+        word = self.words[self.index]
+        self.index += 1
+        return yielded(word)
+
+cursor = Words(["first long payload", "second long payload"], 0)
+steps: list[step[str]] = []
+for word in cursor:
+    append(steps, yielded(word))
+assert(cursor.index == 0)
+assert(steps == [yielded("first long payload"), yielded("second long payload")])
+assert([word for word in cursor if len(word) > 0] == ["first long payload", "second long payload"])
+assert(step_value(next(cursor)) == "first long payload")
+assert([word for word in cursor] == ["second long payload"])
+assert(step_value(next(cursor)) == "second long payload")
+assert(not has_item(next(cursor)))
+
+for source in [range(9223372036854775806,9223372036854775807,2), range(-9223372036854775807,-9223372036854775808,-2)]:
+    walking = iter(source)
+    assert(has_item(next(walking)))
+    assert(not has_item(next(walking)))
+    assert(not has_item(next(walking)))
+assert(it.collect(range(0,-9223372036854775808,-9223372036854775808)) == [0])
+assert(it.collect(range(-9223372036854775808,9223372036854775807,9223372036854775807)) == [-9223372036854775808,-1,9223372036854775806])
+empty: list[str] = []
+assert(it.collect(iter(empty)) == [])
+assert(it.collect(iter("a\0b")) == ["a", "\0", "b"])
+labels = {"a long dictionary key first": 1, "a long dictionary key second": 2}
+keys_cursor = iter(labels)
+labels = {}
+assert(it.collect(keys_cursor) == ["a long dictionary key first", "a long dictionary key second"])
+assert(str(keys_cursor) == "<cursor>")
+assert(str(range(3)) == "<range>")
+
+maybe: str | None = None
+present = yielded(maybe)
+assert(has_item(present) and step_value(present) is None)
+optional_step: step[str | None] | None = present
+assert(present == optional_step and optional_step == present)
+absent: step[str | None] = finished()
+assert(not has_item(absent) and present != absent)
+also_absent: step[str | None] = finished()
+assert(absent == also_absent)
+try:
+    step_value(absent)
+    assert(false)
+except err:
+    assert(err.code == "R4024")
+
+for ignored in range(100):
+    pipeline = it.take(it.map(it.filter(range(200), fn(x) => x % 3 == 0), fn(x) => str(x)), 4)
+    assert(it.collect(pipeline) == ["0", "3", "6", "9"])
+    assert(it.collect(it.zip(pipeline,pipeline)) == [("0","0"),("3","3"),("6","6"),("9","9")])
+print("native iterator ownership passed")

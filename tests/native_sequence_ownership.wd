@@ -1,0 +1,40 @@
+import std.num as num
+
+record Row:
+    label: str
+    children: list[int]
+    grid: array[int]
+
+fn rows(count: int) -> list[Row]:
+    result: list[Row] = []
+    for index in range(count):
+        append(result, Row("owned-payload-"+str(index), [index,index+1], num.ints((2,2),index)))
+    return result
+
+fn escaping(count: int) -> Row:
+    values = rows(count)
+    result = pop(values)
+    values = []
+    return result
+
+for count in [1,2,3,4,7,8,16,31,32,64,128,129,256]:
+    values = rows(count)
+    snapshot = values
+    values[0].children[0] = -7
+    values[0].grid[0,0] = -9
+    values[0].label = "changed"
+    assert(snapshot[0].children[0] == 0 and snapshot[0].grid[0,0] == 0)
+    assert(snapshot[0].label == "owned-payload-0")
+    last = pop(values)
+    assert(len(snapshot) == count and len(values) == count-1)
+    if count > 1:
+        assert(last.children == [count-1,count])
+        assert(last.grid[1,1] == count-1 and last.label == "owned-payload-"+str(count-1))
+    for index in range(count):
+        assert(snapshot[index].label == "owned-payload-"+str(index))
+        assert(snapshot[index].children == [index,index+1])
+        assert(snapshot[index].grid[1,1] == index)
+    survivor = escaping(count)
+    assert(survivor.label == "owned-payload-"+str(count-1))
+    assert(survivor.children == [count-1,count] and survivor.grid[0,1] == count-1)
+print("native sequence ownership passed")

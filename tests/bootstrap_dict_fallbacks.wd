@@ -1,0 +1,27 @@
+# Builtin defaults must have the dictionary value type before C++ template
+# deduction, while retaining left-to-right evaluation and snapshot semantics.
+options: dict[str,int | None] = {"present":7}
+assert(get(options,"absent",None) is None)
+assert(get(options,"present",None) == 7)
+assert(get(options,"absent",4) == 4)
+numbers: dict[str,float] = {}
+assert(get(numbers,"absent",2) == 2.0)
+optional_numbers: dict[str,float | None] = {}
+assert(get(optional_numbers,"absent",2) == 2.0)
+assert(get(optional_numbers,"absent",None) is None)
+record Box[T]:
+    value: T
+boxes: dict[str,Box[int] | None] = {}
+assert(get(boxes,"absent",None) is None)
+assert(unwrap(get(boxes,"absent",Box(9))).value == 9)
+lists: dict[str,list[int]] = {}
+assert(get(lists,"absent",[]) == [])
+record State:
+    values: dict[str,int | None]
+    fn rewrite(mut self) -> int | None:
+        self.values["present"] = 99
+        return None
+state = State(options)
+assert(get(state.values,"present",state.rewrite()) == 7)
+assert(state.values["present"] == 99 and options["present"] == 7)
+print("native dictionary fallback conversions passed")

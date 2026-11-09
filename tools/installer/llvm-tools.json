@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "version": "19.1.7",
+  "source": "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/clang%2Bllvm-19.1.7-x86_64-pc-windows-msvc.tar.xz",
+  "archive_sha256": "b4557b4f012161f56a2f5d9e877ab9635cafd7a08f7affe14829bd60c9d357f0",
+  "files": {
+    "opt.exe": "c2a46497a8a8468231aa0c6ad17a24c0de400746ad60a738aed08eccf2e9af35",
+    "llc.exe": "2bc2ed95015bb4aa8e4c6c9c786781ab6b755e14d28c8298a8b8e0cc4335c74b",
+    "lld-link.exe": "5db15319c74b694483a7c1f8b6a31e9d468c5d4243c700656cbc9f6d6754f9f4"
+  }
+}

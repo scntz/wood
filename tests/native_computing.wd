@@ -1,0 +1,136 @@
+import std.num as num
+import std.iter as it
+import std.linalg as la
+import std.geometry as geo
+
+a = num.reshape(num.from_list([1.0,2.0,3.0,4.0,5.0,6.0]), (2,3))
+assert(a[1,2] == 6.0 and a[-1,-1] == 6.0)
+assert(num.shape(a) == [2,3] and len(a) == 6)
+b = a
+b[0,0] = 9.0
+assert(a[0,0] == 1.0 and b[0,0] == 9.0)
+view = num.transpose(a)
+assert(num.shape(view) == [3,2] and view[2,1] == 6.0)
+assert(not num.contiguous(view))
+view[2,1] = 8.0
+assert(a[1,2] == 6.0 and view[2,1] == 8.0)
+assert(num.contiguous(view))
+assert(num.to_list(num.flatten(num.transpose(a))) == [1.0,4.0,2.0,5.0,3.0,6.0])
+v = num.from_list([1,2,3,4])
+assert(num.to_list(v[::-1]) == [4,3,2,1])
+reverse = v[::-1]
+v[0] = 42
+assert(reverse[-1] == 1)
+assert(num.to_list(num.from_list([1,2,3]) * 2 + 1) == [3,5,7])
+assert(num.to_list(10 - num.from_list([1,2])) == [9,8])
+assert(num.to_list(-num.from_list([1,2])) == [-1,-2])
+assert(num.to_list(num.floats(num.from_list([1,2]))) == [1.0,2.0])
+assert(num.to_list(num.integers(num.from_list([1.9,-2.9]))) == [1,-2])
+try:
+    num.integers(num.full(2,1e300))
+    assert(false)
+except err:
+    assert(err.code == "R4003")
+assert(num.to_list(num.from_list([2,4]) / 2) == [1.0,2.0])
+assert(num.sum(num.from_list([10000000000000000.0,1.0,-10000000000000000.0])) == 1.0)
+assert(num.dot(num.from_list([1,2,3]),num.from_list([4,5,6])) == 32)
+product = num.matmul(a, num.transpose(a))
+assert(num.shape(product) == [2,2])
+assert(product[0,0] == 14.0 and product[0,1] == 32.0 and product[1,1] == 77.0)
+assert(it.collect(a) == [1.0,2.0,3.0,4.0,5.0,6.0])
+assert([value + 1 for value in num.from_list([1,2])] == [2,3])
+assert(num.close(num.sin(0.0),0.0) and num.cos(0.0) == 1.0)
+
+fn blend(left: array[float], right: array[float]):
+    return left * 2.0 + right
+source = num.ones(4)
+assert(num.to_list(blend(source,source)) == [3.0,3.0,3.0,3.0])
+assert(num.to_list(source) == [1.0,1.0,1.0,1.0])
+
+record Holder:
+    values: array[float]
+    fn replace(mut self) -> int:
+        self.values = num.full(2,9.0)
+        return 0
+holder = Holder(num.from_list([1.0,2.0]))
+assert(holder.values[holder.replace()] == 1.0)
+assert(holder.values[0] == 9.0)
+
+overflow = num.from_list([9223372036854775807,0])
+try:
+    changed = overflow + 1
+    assert(false)
+except err:
+    assert(err.code == "R4001" and overflow[0] == 9223372036854775807)
+try:
+    changed = source / 0
+    assert(false)
+except err:
+    assert(err.code == "R4002" and source[0] == 1.0)
+
+assert(la.Vec3(1.0,0.0,0.0).cross(la.Vec3(0.0,1.0,0.0)) == la.Vec3(0.0,0.0,1.0))
+assert(num.close(la.Vec3(3.0,4.0,0.0).length(),5.0))
+assert(num.close(la.Vec3(1e-300,0.0,0.0).normalized().x,1.0))
+points = num.reshape(num.from_list([1.0,2.0,3.0,0.0,0.0,0.0]), (2,3))
+shifted = la.transform_points(points,la.translation(4.0,5.0,6.0))
+assert(shifted[0,0] == 5.0 and shifted[1,2] == 6.0)
+assert(points[0,0] == 1.0)
+assert(la.transform_points(points,la.identity(4)) == points)
+assert(num.contiguous(shifted))
+assert(str(num.zeros(0)) == "array(shape=[0], values=[])")
+fn capture_factory():
+    state = num.ones(2)
+    fn read[mut state]():
+        return state * 2.0
+    return read
+captured = capture_factory()
+assert(captured()[0] == 2.0 and captured()[0] == 2.0)
+fn recover(values: array[int]) -> array[int]:
+    try:
+        return values + 1
+    except err:
+        assert(values[0] == 9223372036854775807)
+    return values
+assert(recover(overflow) == overflow)
+for size in range(1,8):
+    coefficients = num.zeros((size,size))
+    expected = num.zeros((size,2))
+    for row in range(size):
+        expected[row,0] = float(row+1)
+        expected[row,1] = float(2-row)
+        for column in range(size):
+            coefficients[row,column] = float((row*7+column*3)%5) * 0.1
+        coefficients[row,row] += float(size+1)
+    rhs = num.matmul(coefficients,expected)
+    solution = la.solve(coefficients,rhs)
+    for row in range(size):
+        for column in range(2):
+            assert(num.close(solution[row,column],expected[row,column]))
+    assert(num.matmul(coefficients,expected) == rhs)
+
+swap = num.reshape(num.from_list([0.0,1.0,1.0,0.0]),(2,2))
+assert(la.solve(swap,num.reshape(num.from_list([2.0,1.0]),(2,1)))[0,0] == 1.0)
+try:
+    la.solve(num.zeros((2,2)),num.ones((2,1)))
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+try:
+    num.matmul(num.ones((2,3)),num.ones((2,3)))
+    assert(false)
+except err:
+    assert(err.code == "R4026")
+
+mesh = geo.torus(16,12)
+geo.validate(mesh)
+assert(num.shape(mesh.vertices) == [192,3] and num.shape(mesh.triangles) == [384,3])
+box = geo.bounds(mesh)
+assert(num.close(box[0].x,-2.5) and num.close(box[1].y,0.5))
+normals = geo.normals(mesh)
+for index in range(num.shape(normals)[0]):
+    assert(num.close(geo.point(normals,index).length(),1.0))
+    u = 6.283185307179586*float(index//12)/16.0
+    center = la.Vec3(2.0*num.cos(u),0.0,2.0*num.sin(u))
+    assert(geo.point(normals,index).dot(geo.point(mesh.vertices,index).minus(center)) > 0.0)
+assert(geo.area(mesh) > 35.0 and geo.area(mesh) < 40.0)
+print("native computing passed")

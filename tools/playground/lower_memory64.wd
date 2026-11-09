@@ -1,0 +1,376 @@
+# Rewrites a linked wasm64 module so it runs in ordinary 32-bit memory: every browser runs
+# it, while pointers stay 64-bit values and all runtime layouts stay as qualified.
+# usage: lower_memory64 INPUT.wasm OUTPUT.wasm
+
+record Reader:
+    data: str
+    at: int
+
+    fn byte(mut self) -> int:
+        value = byte_value(self.data[self.at])
+        self.at = self.at+1
+        return value
+
+    fn uleb(mut self) -> int:
+        result = 0
+        shift = 0
+        value = self.byte()
+        while value & 128 != 0:
+            result = result | ((value & 127) << shift)
+            shift = shift+7
+            value = self.byte()
+        return result | ((value & 127) << shift)
+
+    fn skip_leb(mut self):
+        while self.byte() & 128 != 0:
+            pass
+
+fn uleb(value: int) -> str:
+    pieces: list[str] = []
+    while value > 127:
+        append(pieces,byte_string((value & 127) | 128))
+        value = value >> 7
+    append(pieces,byte_string(value))
+    return join(pieces,"")
+
+fn sleb(value: int) -> str:
+    pieces: list[str] = []
+    low = value & 127
+    value = value >> 7
+    while not ((value == 0 and low & 64 == 0) or (value == -1 and low & 64 != 0)):
+        append(pieces,byte_string(low | 128))
+        low = value & 127
+        value = value >> 7
+    append(pieces,byte_string(low))
+    return join(pieces,"")
+
+fn sleb_value(reader: Reader) -> tuple[int,int]:
+    result = 0
+    shift = 0
+    at = reader.at
+    value = byte_value(reader.data[at])
+    at = at+1
+    while value & 128 != 0:
+        result = result | ((value & 127) << shift)
+        shift = shift+7
+        value = byte_value(reader.data[at])
+        at = at+1
+    result = result | ((value & 127) << shift)
+    shift = shift+7
+    if value & 64 != 0 and shift < 64:
+        result = result | (-1 << shift)
+    return (result,at)
+
+fn section(id: int, body: str) -> str:
+    return byte_string(id)+uleb(len(body))+body
+
+# Limits lose the 64-bit flag and keep their values.
+fn limits(reader: Reader) -> tuple[str,int]:
+    flags = byte_value(reader.data[reader.at])
+    at = reader.at+1
+    copy = Reader(reader.data,at)
+    low = copy.uleb()
+    text = byte_string(flags & 1)+uleb(low)
+    if flags & 1 != 0:
+        high = copy.uleb()
+        text = text+uleb(high if high < 65536 else 65536)
+    return (text,copy.at)
+
+fn memory_section(body: str) -> str:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    out = uleb(count)
+    for i in range(count):
+        item = limits(reader)
+        out = out+item[0]
+        reader.at = item[1]
+    return out
+
+# Tables narrow the same way: the linker gives a 64-bit module a 64-bit table.
+fn table_section(body: str) -> tuple[str,bool]:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    out = uleb(count)
+    wide = false
+    for i in range(count):
+        out = out+body[reader.at:reader.at+1]
+        reader.at = reader.at+1
+        if byte_value(body[reader.at]) & 4 != 0:
+            wide = true
+        item = limits(reader)
+        out = out+item[0]
+        reader.at = item[1]
+    return (out,wide)
+
+fn import_section(body: str) -> str:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    pieces: list[str] = [uleb(count)]
+    for i in range(count):
+        start = reader.at
+        size = reader.uleb()
+        reader.at = reader.at+size
+        size = reader.uleb()
+        reader.at = reader.at+size
+        append(pieces,body[start:reader.at])
+        kind = reader.byte()
+        append(pieces,byte_string(kind))
+        if kind == 0:
+            append(pieces,uleb(reader.uleb()))
+        elif kind == 1:
+            append(pieces,body[reader.at:reader.at+1])
+            reader.at = reader.at+1
+            flags = byte_value(body[reader.at])
+            start = reader.at
+            reader.at = reader.at+1
+            reader.skip_leb()
+            if flags & 1 != 0:
+                reader.skip_leb()
+            append(pieces,body[start:reader.at])
+        elif kind == 2:
+            item = limits(reader)
+            append(pieces,item[0])
+            reader.at = item[1]
+        else:
+            append(pieces,body[reader.at:reader.at+2])
+            reader.at = reader.at+2
+    return join(pieces,"")
+
+# An active segment's offset expression becomes i32.const. Only constants are linked here.
+fn data_section(body: str) -> str:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    pieces: list[str] = [uleb(count)]
+    for i in range(count):
+        flags = reader.uleb()
+        append(pieces,uleb(flags))
+        if flags == 1:
+            size = reader.uleb()
+            append(pieces,uleb(size)+body[reader.at:reader.at+size])
+            reader.at = reader.at+size
+        else:
+            if flags != 0:
+                raise "unexpected data segment kind"
+            if reader.byte() != 66:
+                raise "unexpected data segment offset"
+            value = sleb_value(reader)
+            reader.at = value[1]
+            if reader.byte() != 11:
+                raise "unexpected data segment offset end"
+            append(pieces,byte_string(65)+sleb(value[0])+byte_string(11))
+            size = reader.uleb()
+            append(pieces,uleb(size)+body[reader.at:reader.at+size])
+            reader.at = reader.at+size
+    return join(pieces,"")
+
+fn element_section(body: str) -> str:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    pieces: list[str] = [uleb(count)]
+    for i in range(count):
+        flags = reader.uleb()
+        if flags != 0:
+            raise "unexpected element segment kind"
+        append(pieces,uleb(flags))
+        reader.at = reader.at+1
+        value = sleb_value(reader)
+        reader.at = value[1]
+        if reader.byte() != 11:
+            raise "unexpected element offset end"
+        append(pieces,byte_string(65)+sleb(value[0])+byte_string(11))
+        total = reader.uleb()
+        start = reader.at
+        for j in range(total):
+            reader.skip_leb()
+        append(pieces,uleb(total)+body[start:reader.at])
+    return join(pieces,"")
+
+# Every load and store wraps its address. A store's value sits above the address, so it
+# rests in a scratch local of its own type while the address narrows.
+record Body:
+    pieces: list[str]
+    extra: list[int]
+    first: int
+    scratch: dict[int,int]
+
+    fn local_for(mut self, valtype: int) -> int:
+        if valtype in self.scratch:
+            return self.scratch[valtype]
+        index = self.first+len(self.extra)
+        append(self.extra,valtype)
+        self.scratch[valtype] = index
+        return index
+
+fn function_body(reader: Reader, end: int, parameters: int, bytes: list[str], wide_table: bool) -> str:
+    groups = reader.uleb()
+    start = reader.at
+    declared = parameters
+    for i in range(groups):
+        declared = declared+reader.uleb()
+        reader.at = reader.at+1
+    header_end = reader.at
+    body = Body([],[],declared,{})
+    run = reader.at
+    while reader.at < end:
+        op = reader.byte()
+        if op >= 40 and op <= 53:
+            append(body.pieces,reader.data[run:reader.at-1])
+            append(body.pieces,bytes[167])
+            append(body.pieces,bytes[op])
+            run = reader.at
+            reader.skip_leb()
+            reader.skip_leb()
+        elif op >= 54 and op <= 62:
+            valtype = 127
+            if op == 55 or op == 60 or op == 61 or op == 62:
+                valtype = 126
+            elif op == 56:
+                valtype = 125
+            elif op == 57:
+                valtype = 124
+            scratch = body.local_for(valtype)
+            append(body.pieces,reader.data[run:reader.at-1])
+            append(body.pieces,bytes[33]+uleb(scratch)+bytes[167]+bytes[32]+uleb(scratch)+bytes[op])
+            run = reader.at
+            reader.skip_leb()
+            reader.skip_leb()
+        elif op == 63:
+            append(body.pieces,reader.data[run:reader.at-1])
+            append(body.pieces,bytes[63]+bytes[0]+bytes[173])
+            reader.at = reader.at+1
+            run = reader.at
+        elif op == 64:
+            append(body.pieces,reader.data[run:reader.at-1])
+            append(body.pieces,bytes[167]+bytes[64]+bytes[0]+bytes[172])
+            reader.at = reader.at+1
+            run = reader.at
+        elif op == 2 or op == 3 or op == 4:
+            reader.skip_leb()
+        elif op == 12 or op == 13 or op == 16 or op == 32 or op == 33 or op == 34 or op == 35 or op == 36:
+            reader.skip_leb()
+        elif op == 14:
+            total = reader.uleb()
+            for i in range(total+1):
+                reader.skip_leb()
+        elif op == 17:
+            if wide_table:
+                append(body.pieces,reader.data[run:reader.at-1])
+                append(body.pieces,bytes[167]+bytes[17])
+                run = reader.at
+            reader.skip_leb()
+            reader.skip_leb()
+        elif op == 65 or op == 66:
+            reader.skip_leb()
+        elif op == 67:
+            reader.at = reader.at+4
+        elif op == 68:
+            reader.at = reader.at+8
+        elif op == 252:
+            sub = reader.uleb()
+            if sub > 7:
+                raise "unexpected bulk or table instruction"
+        elif op == 28 or (op >= 37 and op <= 39) or op == 208 or op == 210 or op == 254 or op == 253:
+            raise "unexpected instruction "+str(op)
+    append(body.pieces,reader.data[run:end])
+    groups_text: list[str] = []
+    for valtype in body.extra:
+        append(groups_text,uleb(1)+bytes[valtype])
+    content = uleb(groups+len(body.extra))+reader.data[start:header_end]+join(groups_text,"")+join(body.pieces,"")
+    return uleb(len(content))+content
+
+fn parameter_counts(body: str) -> list[int]:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    result: list[int] = []
+    for i in range(count):
+        if reader.byte() != 96:
+            raise "unexpected type form"
+        parameters = reader.uleb()
+        reader.at = reader.at+parameters
+        results = reader.uleb()
+        reader.at = reader.at+results
+        append(result,parameters)
+    return result
+
+fn imported_functions(body: str) -> int:
+    reader = Reader(body,0)
+    count = reader.uleb()
+    total = 0
+    for i in range(count):
+        size = reader.uleb()
+        reader.at = reader.at+size
+        size = reader.uleb()
+        reader.at = reader.at+size
+        kind = reader.byte()
+        if kind == 0:
+            total = total+1
+            reader.skip_leb()
+        elif kind == 1:
+            reader.at = reader.at+1
+            flags = reader.byte()
+            reader.skip_leb()
+            if flags & 1 != 0:
+                reader.skip_leb()
+        elif kind == 2:
+            flags = reader.byte()
+            reader.skip_leb()
+            if flags & 1 != 0:
+                reader.skip_leb()
+        else:
+            reader.at = reader.at+2
+    return total
+
+arguments = args()
+if len(arguments) != 2:
+    eprint("usage: lower_memory64 INPUT.wasm OUTPUT.wasm")
+    exit(2)
+bytes: list[str] = []
+for i in range(256):
+    append(bytes,byte_string(i))
+source = read_text(arguments[0])
+if source[:8] != byte_string(0)+"asm"+byte_string(1)+byte_string(0)+byte_string(0)+byte_string(0):
+    raise "not a WebAssembly module"
+reader = Reader(source,8)
+output: list[str] = [source[:8]]
+counts: list[int] = []
+functions: list[int] = []
+wide_table = false
+while reader.at < len(source):
+    kind = reader.byte()
+    size = reader.uleb()
+    body = source[reader.at:reader.at+size]
+    reader.at = reader.at+size
+    if kind == 1:
+        counts = parameter_counts(body)
+        append(output,section(kind,body))
+    elif kind == 2:
+        append(output,section(kind,import_section(body)))
+    elif kind == 3:
+        items = Reader(body,0)
+        total = items.uleb()
+        for i in range(total):
+            append(functions,items.uleb())
+        append(output,section(kind,body))
+    elif kind == 4:
+        item = table_section(body)
+        wide_table = item[1]
+        append(output,section(kind,item[0]))
+    elif kind == 5:
+        append(output,section(kind,memory_section(body)))
+    elif kind == 9:
+        append(output,section(kind,element_section(body)))
+    elif kind == 11:
+        append(output,section(kind,data_section(body)))
+    elif kind == 10:
+        code = Reader(body,0)
+        total = code.uleb()
+        pieces: list[str] = [uleb(total)]
+        for i in range(total):
+            length = code.uleb()
+            end = code.at+length
+            append(pieces,function_body(code,end,counts[functions[i]],bytes,wide_table))
+            code.at = end
+        append(output,section(kind,join(pieces,"")))
+    else:
+        append(output,section(kind,body))
+write_text(arguments[1],join(output,""))

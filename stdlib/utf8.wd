@@ -1,0 +1,84 @@
+# Strict Unicode scalar encoding/decoding. Strings themselves remain byte values.
+fn _invalid(offset: int):
+    raise "invalid UTF-8 at byte offset " + str(offset)
+
+fn decode(text: str) -> list[int]:
+    points: list[int] = []
+    i = 0
+    while i < len(text):
+        start = i
+        first = byte_value(text[i])
+        i = i + 1
+        point = first
+        remaining = 0
+        minimum = 0
+        if first < 128:
+            pass
+        elif first >= 194 and first <= 223:
+            point = first - 192
+            remaining = 1
+            minimum = 128
+        elif first >= 224 and first <= 239:
+            point = first - 224
+            remaining = 2
+            minimum = 2048
+        elif first >= 240 and first <= 244:
+            point = first - 240
+            remaining = 3
+            minimum = 65536
+        else:
+            _invalid(start)
+        for continuation in range(remaining):
+            if i >= len(text):
+                _invalid(start)
+            byte = byte_value(text[i])
+            if byte < 128 or byte > 191:
+                _invalid(i)
+            point = point * 64 + byte - 128
+            i = i + 1
+        if point < minimum or point > 1114111 or (point >= 55296 and point <= 57343):
+            _invalid(start)
+        append(points, point)
+    return points
+
+fn encode(points: list[int]) -> str:
+    pieces: list[str] = []
+    for point in points:
+        if point < 0 or point > 1114111 or (point >= 55296 and point <= 57343):
+            raise "invalid Unicode scalar: " + str(point)
+        if point < 128:
+            append(pieces, byte_string(point))
+        elif point < 2048:
+            append(pieces, byte_string(192 + point // 64))
+            append(pieces, byte_string(128 + point % 64))
+        elif point < 65536:
+            append(pieces, byte_string(224 + point // 4096))
+            append(pieces, byte_string(128 + (point // 64) % 64))
+            append(pieces, byte_string(128 + point % 64))
+        else:
+            append(pieces, byte_string(240 + point // 262144))
+            append(pieces, byte_string(128 + (point // 4096) % 64))
+            append(pieces, byte_string(128 + (point // 64) % 64))
+            append(pieces, byte_string(128 + point % 64))
+    return join(pieces, "")
+
+fn is_valid(text: str) -> bool:
+    try:
+        decode(text)
+        return true
+    except err:
+        if err.code == "R4010":
+            return false
+        raise err
+
+fn length(text: str) -> int:
+    return len(decode(text))
+
+fn characters(text: str) -> list[str]:
+    result: list[str] = []
+    for point in decode(text):
+        append(result, encode([point]))
+    return result
+
+fn slice_text(text: str, start: int, stop: int) -> str:
+    return encode(slice(decode(text), start, stop))

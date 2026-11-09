@@ -1,0 +1,38 @@
+# Where compile time goes, phase by phase. Developer tool: wood run this file -- INPUT
+import project as project
+import modules as mod
+import bindings as bind
+import signatures as sig
+import body_semantics as semantic
+import frontend as frontend
+import emit_llvm as emit
+import sources as src
+import std.time as time
+import std.io as io
+
+fn elapsed(start: float) -> str:
+    return str(int((time.monotonic()-start)*1000.0))
+
+fn main():
+    input = args()[0]
+    bundle = json_dict(json_parse(src.read(args()[1],16777216)))
+    standards: dict[str,str] = {}
+    for name in bundle:
+        standards[name] = json_str(bundle[name])
+    start = time.monotonic()
+    configured = project.resolve(input)
+    print("project  "+elapsed(start))
+    start = time.monotonic()
+    loaded = mod.load(configured.entry,configured.packages,standards)
+    print("load     "+elapsed(start)+"  modules "+str(len(loaded.compilation.modules)))
+    start = time.monotonic()
+    bound = bind.bind(loaded.compilation)
+    print("bind     "+elapsed(start))
+    start = time.monotonic()
+    signed = sig.resolve(loaded.compilation,bound)
+    print("sign     "+elapsed(start)+"  declarations "+str(len(signed.declarations)))
+    start = time.monotonic()
+    checked = semantic.analyze(frontend.Result(configured.packages,loaded.compilation,bound,src.success()))
+    print("analyze  "+elapsed(start)+" (includes sign)  "+checked.diagnostic.message)
+
+main()

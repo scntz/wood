@@ -1,0 +1,179 @@
+# Windows-only adapter. Values cross the existing scalar/borrowed-buffer C ABI.
+import std.num as num
+import std.task as task
+from ._native import wood_gui_run,wood_gui_show,wood_gui_control,wood_gui_set_text,wood_gui_text,wood_gui_move,wood_gui_post,wood_gui_wait,wood_gui_payload,wood_gui_context,wood_gui_list_add,wood_gui_list_clear,wood_gui_list_selected,wood_gui_list_select,wood_gui_checked,wood_gui_set_checked,wood_gui_set_image,wood_gui_menu,wood_gui_message,wood_gui_file_dialog
+
+fn _check(status: int, operation: str) -> int:
+    if status >= 0:
+        return status
+    if status <= -1000000:
+        raise operation + ": Windows error " + str(-status - 1000000)
+    messages = { -1: "window is no longer active", -2: "GUI mutation requires the owning thread",
+                 -3: "invalid control, dimensions or buffer", -4: "invalid text", -5: "GUI resource budget exceeded",
+                 -6: "event wait cancelled", -7: "only one GUI lifecycle may be active" }
+    raise operation + ": " + get(messages, status, "invalid native result")
+
+fn _live() -> int:
+    task.checkpoint()
+    return 1
+
+fn _string(bytes: array[int], count: int) -> str:
+    if count < 0 or count > len(bytes):
+        raise "invalid native GUI byte count"
+    return join([byte_string(bytes[i]) for i in range(count)], "")
+
+record Event:
+    kind: str
+    control: int
+    x: int
+    y: int
+    payload: str
+
+record Window:
+    _id: int
+
+    fn token(self) -> int:
+        return self._id
+
+    fn show(self):
+        _check(wood_gui_show(self._id), "show window")
+
+    fn context(self) -> str:
+        empty = num.ints(0)
+        count = _check(wood_gui_context(self._id, empty), "measure application context")
+        if count > 1048576:
+            raise "native GUI context exceeds 1 MiB"
+        bytes = num.ints(count)
+        actual = _check(wood_gui_context(self._id, bytes), "read application context")
+        return _string(bytes, actual)
+
+    fn label(self, control: int, text: str, x: int, y: int, width: int, height: int = 24):
+        _check(wood_gui_control(self._id, control, 1, text, x, y, width, height, 0), "create label")
+
+    fn button(self, control: int, text: str, x: int, y: int, width: int, height: int = 30):
+        _check(wood_gui_control(self._id, control, 2, text, x, y, width, height, 0), "create button")
+
+    fn entry(self, control: int, text: str, x: int, y: int, width: int, height: int = 28):
+        _check(wood_gui_control(self._id, control, 3, text, x, y, width, height, 0), "create input")
+
+    fn textarea(self, control: int, text: str, x: int, y: int, width: int, height: int, readonly: bool = false):
+        _check(wood_gui_control(self._id, control, 4, text, x, y, width, height, 1 if readonly else 0), "create text area")
+
+    fn set_text(self, control: int, text: str):
+        _check(wood_gui_set_text(self._id, control, text), "set control text")
+
+    fn text(self, control: int) -> str:
+        empty = num.ints(0)
+        count = _check(wood_gui_text(self._id, control, empty), "measure control text")
+        if count > 1048576:
+            raise "native GUI text exceeds 1 MiB"
+        if count == 0:
+            return ""
+        bytes = num.ints(count)
+        actual = _check(wood_gui_text(self._id, control, bytes), "read control text")
+        return _string(bytes, actual)
+
+    fn move(self, control: int, x: int, y: int, width: int, height: int):
+        _check(wood_gui_move(self._id, control, x, y, width, height), "move control")
+
+    fn listbox(self, control: int, x: int, y: int, width: int, height: int):
+        _check(wood_gui_control(self._id, control, 5, "", x, y, width, height, 0), "create list")
+
+    fn list_add(self, control: int, text: str) -> int:
+        return _check(wood_gui_list_add(self._id, control, text), "add list item")
+
+    fn list_clear(self, control: int):
+        _check(wood_gui_list_clear(self._id, control), "clear list")
+
+    fn selected(self, control: int) -> int:
+        # The selected row, or -1 when nothing is selected.
+        return _check(wood_gui_list_selected(self._id, control), "read list selection")-1
+
+    fn select(self, control: int, index: int):
+        _check(wood_gui_list_select(self._id, control, index), "set list selection")
+
+    fn checkbox(self, control: int, text: str, x: int, y: int, width: int, height: int = 24):
+        _check(wood_gui_control(self._id, control, 6, text, x, y, width, height, 0), "create check box")
+
+    fn checked(self, control: int) -> bool:
+        return _check(wood_gui_checked(self._id, control), "read check box") == 1
+
+    fn set_checked(self, control: int, value: bool):
+        _check(wood_gui_set_checked(self._id, control, 1 if value else 0), "set check box")
+
+    fn image(self, control: int, x: int, y: int, width: int, height: int):
+        _check(wood_gui_control(self._id, control, 7, "", x, y, width, height, 0), "create image")
+
+    fn set_image(self, control: int, pixels: array[int], width: int, height: int):
+        # Four array elements per pixel: red, green, blue and alpha, from 0 to 255.
+        _check(wood_gui_set_image(self._id, control, pixels, width, height), "show image")
+
+    fn menu(self, name: str, control: int, text: str):
+        # Choosing the item produces a "menu" event with this control number.
+        _check(wood_gui_menu(self._id, name, control, text), "add menu item")
+
+    fn alert(self, title: str, text: str):
+        _check(wood_gui_message(self._id, title, text, 0), "show message")
+
+    fn error(self, title: str, text: str):
+        _check(wood_gui_message(self._id, title, text, 1), "show error")
+
+    fn confirm(self, title: str, text: str) -> bool:
+        return _check(wood_gui_message(self._id, title, text, 2), "ask question") == 1
+
+    fn _file(self, save: int, title: str, filter: str) -> str:
+        bytes = num.ints(65536)
+        count = _check(wood_gui_file_dialog(self._id, save, title, filter, bytes), "show file dialog")
+        return _string(bytes, count)
+
+    fn open_file(self, title: str, filter: str = "All files|*.*") -> str:
+        # The chosen path, or an empty string when cancelled. Filters pair a label and a pattern.
+        return self._file(0, title, filter)
+
+    fn save_file(self, title: str, filter: str = "All files|*.*") -> str:
+        return self._file(1, title, filter)
+
+    fn wait(self) -> Event:
+        fields = num.ints(4)
+        _check(wood_gui_wait(self._id, _live, fields), "wait for GUI event")
+        names = ["close", "click", "change", "resize", "key", "mouse", "message", "select", "menu"]
+        kind = fields[0]
+        if kind < 1 or kind > len(names):
+            raise "invalid native GUI event"
+        empty = num.ints(0)
+        count = _check(wood_gui_payload(self._id, empty), "measure event payload")
+        if count > 1048576:
+            raise "native GUI event exceeds 1 MiB"
+        bytes = num.ints(count)
+        actual = _check(wood_gui_payload(self._id, bytes), "read event payload")
+        return Event(names[kind-1], fields[1], fields[2], fields[3], _string(bytes, actual))
+
+record Column:
+    x: int
+    y: int
+    width: int
+    gap: int
+
+    fn label(mut self, window: Window, control: int, text: str, height: int = 24):
+        next = self.y + height + self.gap
+        window.label(control, text, self.x, self.y, self.width, height)
+        self.y = next
+
+    fn button(mut self, window: Window, control: int, text: str, height: int = 30):
+        next = self.y + height + self.gap
+        window.button(control, text, self.x, self.y, self.width, height)
+        self.y = next
+
+    fn entry(mut self, window: Window, control: int, text: str, height: int = 28):
+        next = self.y + height + self.gap
+        window.entry(control, text, self.x, self.y, self.width, height)
+        self.y = next
+
+fn run(title: str, width: int, height: int, context: str, body: fn(int) -> int) -> int:
+    task.checkpoint()
+    result = num.ints(1)
+    _check(wood_gui_run(title, width, height, context, body, result), "run window")
+    return result[0]
+
+fn post(window: int, topic: int, payload: str = "") -> bool:
+    return _check(wood_gui_post(window, topic, payload), "post GUI message") == 1

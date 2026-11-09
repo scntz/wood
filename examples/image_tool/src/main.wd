@@ -1,0 +1,42 @@
+# Image processing with wood@image.
+#   image_tool draw OUTPUT                       Render a generated test card
+#   image_tool OPERATION INPUT OUTPUT [W H]      gray | invert | flip | crop | resize
+#   image_tool info INPUT
+import image.image as img
+import image.codecs as codecs
+
+fn card() -> img.Image:
+    canvas = img.filled(160, 100, img.rgb(244, 241, 234))
+    canvas = img.fill_rect(canvas, 12, 12, 60, 76, img.rgb(120, 78, 44))
+    canvas = img.fill_circle(canvas, 116, 50, 30, img.rgb(46, 110, 80))
+    canvas = img.draw_line(canvas, 0, 99, 159, 0, img.rgb(20, 20, 20))
+    return canvas
+
+arguments = args()
+if len(arguments) == 2 and arguments[0] == "draw":
+    codecs.save(arguments[1], card())
+    print("wrote "+arguments[1])
+elif len(arguments) == 2 and arguments[0] == "info":
+    picture = codecs.load(arguments[1])
+    print(str(picture.width)+"x"+str(picture.height))
+elif len(arguments) >= 3:
+    operation = arguments[0]
+    picture = codecs.load(arguments[1])
+    if operation == "gray":
+        picture = img.grayscale(picture)
+    elif operation == "invert":
+        picture = img.invert(picture)
+    elif operation == "flip":
+        picture = img.flip_horizontal(picture)
+    elif operation == "crop" and len(arguments) == 5:
+        picture = img.crop(picture, 0, 0, int(arguments[3]), int(arguments[4]))
+    elif operation == "resize" and len(arguments) == 5:
+        picture = img.resize(picture, int(arguments[3]), int(arguments[4]))
+    else:
+        eprint("unknown operation: "+operation)
+        exit(2)
+    codecs.save(arguments[2], picture)
+    print(operation+": "+arguments[1]+" -> "+arguments[2]+" ("+str(picture.width)+"x"+str(picture.height)+")")
+else:
+    eprint("usage: image_tool draw OUTPUT | info INPUT | gray|invert|flip|crop|resize INPUT OUTPUT [W H]")
+    exit(2)

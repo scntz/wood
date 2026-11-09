@@ -1,0 +1,38 @@
+import std.num as num
+
+record Payload:
+    text: str
+    values: array[int]
+
+fn array_tuple() -> tuple[array[int]]:
+    return (num.from_list([7,8,9]),)
+fn text_tuple() -> tuple[str]:
+    return ("temporary tuple text with heap allocated storage",)
+fn payload_tuple() -> tuple[Payload]:
+    return (Payload("temporary tuple text with heap allocated storage",num.from_list([7,8,9])),)
+fn nested() -> tuple[tuple[Payload]]:
+    return (payload_tuple(),)
+
+for index in range(100):
+    assert(array_tuple()[0][index % 3] == 7 + index % 3)
+    assert(text_tuple()[0][0] == "t")
+    assert(text_tuple()[0][1:4] == "emp")
+    assert(slice(text_tuple()[0],1,4) == "emp")
+    assert(len(text_tuple()[0]) == 48)
+    assert(payload_tuple()[0].values[index % 3] == 7 + index % 3)
+    assert(payload_tuple()[0].text[0] == "t")
+    assert(payload_tuple()[0].text[:4] == "temp")
+    assert(slice(payload_tuple()[0].text,0,4) == "temp")
+    assert(len(payload_tuple()[0].text) == 48)
+    assert(nested()[0][0].values[0] == 7)
+    assert(nested()[0][0].text[0] == "t")
+    assert(slice(nested()[0][0].text,0,4) == "temp")
+
+# A selected value must also remain alive when it escapes the tuple expression.
+view = array_tuple()[0][::-1]
+assert(num.to_list(view) == [9,8,7])
+parts = [text_tuple()[0],payload_tuple()[0].text]
+assert(parts[0] == parts[1])
+owned = payload_tuple()[0]
+assert(owned.values[1] == 8 and len(owned.text) == 48)
+print("native hosted borrowing lifetimes passed")

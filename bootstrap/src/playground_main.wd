@@ -1,0 +1,33 @@
+# The compiler entry behind the browser playground: the same checked frontend and LLVM
+# lowering as native builds, with a WebAssembly module as the result. Hosted natively it
+# also prepares the compiler's own IR for the WebAssembly build, and tests the lowering.
+import body_semantics as semantic
+import emit_llvm as llvm
+import emit_wasm as wasm
+import project as project
+import project_trust as trust
+import sources as src
+
+arguments = args()
+if len(arguments) != 5 and len(arguments) != 7:
+    eprint("usage: wood-playground llvm STDLIB.json RUNTIME_DIRECTORY INPUT OUTPUT.ll")
+    eprint("       wood-playground wasm STDLIB.json RUNTIME_DIRECTORY INPUT OUTPUT.wasm MEMORY_BASE TABLE_BASE")
+    exit(2)
+standards: dict[str,str] = {}
+bundle = project.object(json_parse(src.read(arguments[1],16777216)))
+for name in bundle:
+    standards[name] = project.string(bundle[name])
+program = semantic.analyze(trust.load(arguments[3],standards,false))
+if program.diagnostic.code != "":
+    eprint(json_dump(program.diagnostic))
+    exit(2 if program.diagnostic.code == "D5001" else 1)
+runtime = src.read(arguments[2]+"/wasm64-browser.ll",16777216)+"\n"+src.read(arguments[2]+"/core.ll",16777216)
+result = llvm.emit(program,runtime)
+if result.diagnostic.code != "":
+    eprint(json_dump(result.diagnostic))
+    exit(1)
+if arguments[0] == "llvm":
+    write_text(arguments[4],result.text)
+else:
+    module = wasm.lower(result.text,runtime,int(arguments[5]),int(arguments[6]))
+    write_text(arguments[4],module.bytes)

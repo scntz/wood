@@ -1,0 +1,74 @@
+import image as img
+import codecs as codecs
+
+fn hex_bytes(text: str) -> str:
+    digits = "0123456789abcdef"
+    pieces: list[str] = []
+    for i in range(0, len(text), 2):
+        high = 0
+        low = 0
+        for d in range(16):
+            if digits[d] == text[i]:
+                high = d
+            if digits[d] == text[i+1]:
+                low = d
+        append(pieces, byte_string(high*16+low))
+    return join(pieces, "")
+
+red = img.rgb(255, 0, 0)
+canvas = img.filled(4, 3, img.rgb(10, 20, 30))
+assert(img.get(canvas, 3, 2).b == 30)
+canvas = img.fill_rect(canvas, 1, 1, 2, 1, red)
+assert(img.get(canvas, 1, 1).r == 255)
+assert(img.get(canvas, 0, 0).r == 10)
+assert(img.get(img.invert(canvas), 0, 0).r == 245)
+assert(img.get(img.grayscale(canvas), 1, 1).r == 76)
+assert(img.get(img.flip_horizontal(canvas), 2, 1).r == 255)
+assert(img.get(img.flip_vertical(canvas), 1, 1).r == 255)
+assert(img.crop(canvas, 1, 1, 2, 2).width == 2)
+assert(img.get(img.crop(canvas, 1, 1, 2, 2), 0, 0).r == 255)
+assert(img.resize(canvas, 8, 6).height == 6)
+assert(img.get(img.draw_line(img.new(5, 5), 0, 0, 4, 4, red), 2, 2).r == 255)
+assert(img.get(img.fill_circle(img.new(9, 9), 4, 4, 2, red), 4, 4).r == 255)
+# Round trips through each codec.
+back = codecs.decode_png(codecs.encode_png(canvas))
+assert(back.width == 4 and back.height == 3)
+for i in range(48):
+    assert(back.pixels[i] == canvas.pixels[i])
+bmp = codecs.decode_bmp(codecs.encode_bmp(canvas))
+assert(img.get(bmp, 1, 1).r == 255 and img.get(bmp, 0, 0).b == 30)
+assert(starts_with(codecs.encode_ppm(canvas), "P6\n4 3\n255\n"))
+# Produced by real zlib: 2x2 RGB with Sub and Up filters and fixed Huffman codes.
+crafted = codecs.decode_png(hex_bytes("89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a73000000134944415478da6364646266646464026126260000a6001660bbfae60000000049454e44ae426082"))
+assert(img.get(crafted, 0, 0).g == 2)
+assert(img.get(crafted, 1, 0).b == 4)
+assert(img.get(crafted, 0, 1).r == 2)
+assert(img.get(crafted, 1, 1).b == 6)
+# Hostile input is rejected rather than trusted.
+for bad in ["", "BM", "BMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]:
+    failed = false
+    try:
+        codecs.decode_bmp(bad)
+    except err:
+        failed = true
+    assert(failed)
+valid = codecs.encode_png(canvas)
+for bad in ["", "not a png", valid[:40], valid[:len(valid)-20]+"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"]:
+    failed = false
+    try:
+        codecs.decode_png(bad)
+    except err:
+        failed = true
+    assert(failed)
+failed = false
+try:
+    img.new(0, 1)
+except err:
+    failed = true
+assert(failed)
+failed = false
+try:
+    img.crop(canvas, 3, 3, 5, 5)
+except err:
+    failed = true
+assert(failed)

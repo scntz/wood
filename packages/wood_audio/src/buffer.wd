@@ -1,0 +1,106 @@
+# Interleaved floating-point audio, nominally in -1.0..1.0.
+import std.num as num
+
+record Buffer:
+    rate: int
+    channels: int
+    samples: list[float]
+
+fn _check(rate: int, channels: int):
+    if rate < 1 or rate > 768000 or channels < 1 or channels > 8:
+        raise "unsupported audio format"
+
+fn silence(rate: int, channels: int, count: int) -> Buffer:
+    _check(rate, channels)
+    return Buffer(rate, channels, [0.0 for i in range(count*channels)])
+
+fn tone(frequency: float, seconds: float, rate: int = 44100, amplitude: float = 0.5) -> Buffer:
+    _check(rate, 1)
+    count = int(seconds*float(rate))
+    step = 6.283185307179586*frequency/float(rate)
+    return Buffer(rate, 1, [amplitude*num.sin(step*float(i)) for i in range(count)])
+
+fn frames(buffer: Buffer) -> int:
+    return len(buffer.samples)//buffer.channels
+
+fn duration(buffer: Buffer) -> float:
+    return float(frames(buffer))/float(buffer.rate)
+
+fn gain(buffer: Buffer, factor: float) -> Buffer:
+    return Buffer(buffer.rate, buffer.channels, [sample*factor for sample in buffer.samples])
+
+fn clamp(buffer: Buffer) -> Buffer:
+    return Buffer(buffer.rate, buffer.channels, [1.0 if sample > 1.0 else (-1.0 if sample < -1.0 else sample) for sample in buffer.samples])
+
+fn peak(buffer: Buffer) -> float:
+    best = 0.0
+    for sample in buffer.samples:
+        size = sample if sample >= 0.0 else -sample
+        if size > best:
+            best = size
+    return best
+
+fn normalize(buffer: Buffer, target: float = 1.0) -> Buffer:
+    level = peak(buffer)
+    return buffer if level == 0.0 else gain(buffer, target/level)
+
+fn mix(left: Buffer, right: Buffer) -> Buffer:
+    # The shorter input is padded with silence; the result is not clamped.
+    if left.rate != right.rate or left.channels != right.channels:
+        raise "mix requires matching sample rates and channel counts"
+    size = len(left.samples) if len(left.samples) > len(right.samples) else len(right.samples)
+    result: list[float] = []
+    for i in range(size):
+        a = left.samples[i] if i < len(left.samples) else 0.0
+        b = right.samples[i] if i < len(right.samples) else 0.0
+        append(result, a+b)
+    return Buffer(left.rate, left.channels, result)
+
+fn concat(left: Buffer, right: Buffer) -> Buffer:
+    if left.rate != right.rate or left.channels != right.channels:
+        raise "concat requires matching sample rates and channel counts"
+    return Buffer(left.rate, left.channels, left.samples+right.samples)
+
+fn fade(buffer: Buffer, seconds: float) -> Buffer:
+    # Linear fade-in and fade-out over the given length of each end.
+    count = frames(buffer)
+    length = int(seconds*float(buffer.rate))
+    if length*2 > count:
+        length = count//2
+    result = buffer.samples
+    for frame in range(length):
+        factor = float(frame)/float(length)
+        for channel in range(buffer.channels):
+            head = frame*buffer.channels+channel
+            tail = (count-1-frame)*buffer.channels+channel
+            result[head] = result[head]*factor
+            result[tail] = result[tail]*factor
+    return Buffer(buffer.rate, buffer.channels, result)
+
+fn to_mono(buffer: Buffer) -> Buffer:
+    result: list[float] = []
+    for frame in range(frames(buffer)):
+        total = 0.0
+        for channel in range(buffer.channels):
+            total += buffer.samples[frame*buffer.channels+channel]
+        append(result, total/float(buffer.channels))
+    return Buffer(buffer.rate, 1, result)
+
+fn resample(buffer: Buffer, rate: int) -> Buffer:
+    # Linear interpolation: adequate for utilities, not mastering quality.
+    _check(rate, buffer.channels)
+    count = frames(buffer)
+    if count == 0 or rate == buffer.rate:
+        return Buffer(rate, buffer.channels, buffer.samples)
+    target = count*rate//buffer.rate
+    result: list[float] = []
+    for frame in range(target):
+        position = float(frame)*float(buffer.rate)/float(rate)
+        first = int(position)
+        second = first+1 if first+1 < count else first
+        part = position-float(first)
+        for channel in range(buffer.channels):
+            a = buffer.samples[first*buffer.channels+channel]
+            b = buffer.samples[second*buffer.channels+channel]
+            append(result, a+(b-a)*part)
+    return Buffer(rate, buffer.channels, result)

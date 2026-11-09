@@ -1,0 +1,118 @@
+# Shared C++/LLVM ownership corpus: local sockets, no external services.
+import std.net as net
+import std.io as io
+import std.task as tasks
+import std.tls as tls
+
+fn buffered(peer: stream, message: json) -> json:
+    assert(io.read_exact(peer, 6) == "a\0bEND")
+    assert(io.read(peer, 1) == "")
+    io.write(peer, json_str(message))
+    net.shutdown_write(peer)
+    return json(6)
+
+fn reject(peer: stream, message: json) -> json:
+    raise "io worker original failure"
+
+fn cancel_read(peer: stream, message: json) -> json:
+    io.write(peer, "ready")
+    io.read(peer, 1)
+    return message
+
+fn identity(peer: stream, message: json) -> json:
+    io.write(peer, json_str(message))
+    return message
+
+fn nested(peer: stream, message: json) -> json:
+    alias = peer
+    with tasks.spawn_io(identity, peer, message) as job:
+        assert(io.closed(alias))
+        return tasks.wait(job, 30000)
+
+fn tls_client(message: json) -> json:
+    config = json_dict(message)
+    with tls.connect("localhost", json_int(config["port"]), json_str(config["ca"]), 30000) as peer:
+        io.write(peer, "header\na\0bEND")
+        assert(io.read_exact(peer, 5) == "reply")
+    return json(true)
+
+fn tls_buffered(peer: stream, message: json) -> json:
+    assert(io.read_exact(peer, 6) == "a\0bEND")
+    io.write(peer, "reply")
+    return message
+
+with net.listen("127.0.0.1", 0, 30000) as listener:
+    # An unsupported resource is rejected before consuming any sender aliases.
+    alias = listener
+    try:
+        tasks.spawn_io(identity, listener, json("unused"))
+        assert(false)
+    except err:
+        assert(err.code == "R4016" and not io.closed(alias))
+    with net.connect("127.0.0.1", net.port(listener), 30000) as client:
+        with net.accept(listener) as peer:
+            io.write(client, "header\na\0bEND")
+            net.shutdown_write(client)
+            assert(io.line(peer, 100) == "header\n")
+            aliases = [peer, peer]
+            with tasks.spawn_io(buffered, peer, json("reply")) as job:
+                assert(io.closed(peer) and io.closed(aliases[0]) and io.closed(aliases[1]))
+                assert(io.read_all(client, 10) == "reply")
+                assert(json_int(tasks.wait(job, 30000)) == 6)
+                assert(tasks.wait(job, 30000) == json(6))
+    for mode in ["failure", "cancel", "scope"]:
+        with net.connect("127.0.0.1", net.port(listener), 30000) as client:
+            with net.accept(listener) as peer:
+                if mode == "failure":
+                    with tasks.spawn_io(reject, peer, json_null()) as job:
+                        for attempt in range(2):
+                            try:
+                                tasks.wait(job, 30000)
+                                assert(false)
+                            except err:
+                                assert(err.code == "R4010" and err.message == "io worker original failure")
+                                assert(err.line == 15 and err.column == 5)
+                    assert(io.read(client, 1) == "")
+                elif mode == "cancel":
+                    with tasks.spawn_io(cancel_read, peer, json_null()) as job:
+                        assert(io.read_exact(client, 5) == "ready")
+                        tasks.cancel(job)
+                        try:
+                            tasks.wait(job, 30000)
+                            assert(false)
+                        except err:
+                            assert(err.code == "R4022" and err.message == "socket operation cancelled")
+                    assert(io.read(client, 1) == "")
+                else:
+                    try:
+                        with tasks.spawn_io(cancel_read, peer, json_null()) as job:
+                            assert(io.read_exact(client, 5) == "ready")
+                            raise "scope exit"
+                    except err:
+                        assert(err.message == "scope exit")
+                    assert(io.read(client, 1) == "")
+    # Bounded deterministic payload variation and nested ownership transfer.
+    seed = 1729
+    for index in range(48):
+        seed = (seed*48271)%2147483647
+        text = "a\0"+str(seed)+"!"*(seed%31)
+        with net.connect("127.0.0.1", net.port(listener), 30000) as client:
+            with net.accept(listener) as peer:
+                with tasks.spawn_io(nested, peer, json(text)) as job:
+                    assert(io.read_all(client, 100) == text)
+                    assert(tasks.wait(job, 30000) == json(text))
+
+fixtures = args()[0]
+with tls.server(fixtures+"/server-chain.pem", fixtures+"/server-key.pem") as context:
+    with net.listen("127.0.0.1", 0, 30000) as listener:
+        with tasks.spawn(tls_client, json({"port": json(net.port(listener)), "ca": json(fixtures+"/ca.pem")})) as client:
+            with net.accept(listener) as raw:
+                with tls.accept(raw, context) as peer:
+                    assert(io.line(peer, 100) == "header\n")
+                    alias = peer
+                    with tasks.spawn_io(tls_buffered, peer, json(42)) as job:
+                        assert(io.closed(alias))
+                        tls.close(context)
+                        assert(tasks.wait(job, 30000) == json(42))
+            assert(json_bool(tasks.wait(client, 30000)))
+print("native spawn_io lifecycle passed")

@@ -1,0 +1,79 @@
+import modules as mod
+import bindings as bind
+import project as project
+import sources as src
+import parser as parser
+import std.path as path
+import std.fs as fs
+
+fn unit(file: str, text: str, edges: list[mod.Edge]) -> mod.Unit:
+    parsed = parser.parse(text)
+    assert(parsed.code == "")
+    return mod.Unit(file,text,0,parsed.tree,edges)
+
+assert(project.identifier("alpha_9") and not project.identifier("9bad"))
+assert(project.version("1.2.30") and not project.version("01.2.3") and not project.version("1.2.3."))
+assert(path.is_absolute(path.absolute(".")))
+assert(not path.is_absolute("relative.wd"))
+assert(path.within(".","."))
+canonical = path.resolve(".")
+assert(path.identity(canonical) == path.identity(path.combine(canonical,".")))
+assert(path.resolve("not-created-child",true) == path.resolve(path.combine(canonical,"not-created-child"),true))
+try:
+    path.resolve("bad"+byte_string(0))
+    assert(false)
+except err:
+    assert(err.code == "R4008")
+
+entry = unit("main.wd","import lib as api\nfrom lib import Item as Box\nfn main():\n  pass\n",[mod.Edge(0,1),mod.Edge(1,1)])
+library = unit("lib.wd","fn value():\n  return 1\nrecord Item:\n  count: int\nfn _private():\n  pass\n",[])
+bound = bind.bind(mod.Compilation([entry,library],0))
+assert(bound.diagnostic.code == "")
+assert(len(bound.symbols) == 4 and bound.next_symbol == 5)
+assert(bound.environments[0].names["main"] == 1)
+assert(bound.environments[0].names["api.value"] == 2)
+assert(bound.environments[0].names["api.Item"] == 3)
+assert(bound.environments[0].names["Box"] == 3)
+assert("api._private" not in bound.environments[0].names)
+assert(bound.environments[0].namespaces == ["api"])
+saved = bound
+bound.environments[0].names["main"] = 99
+assert(saved.environments[0].names["main"] == 1)
+
+bad = unit("bad.wd","from lib import _private\n",[mod.Edge(0,1)])
+result = bind.bind(mod.Compilation([bad,library],0))
+assert(result.diagnostic.code == "E3104" and result.diagnostic.column == 17)
+assert(len(result.environments) == 0 and len(result.symbols) == 0)
+duplicate = unit("dup.wd","fn x():\n  pass\nrecord x:\n  pass\n",[])
+assert(bind.bind(mod.Compilation([duplicate],0)).diagnostic.code == "E3001")
+
+root = project.Package(canonical,canonical,"","","","",{})
+assert(mod.load("missing.wd",[],{}).diagnostic.code == "B3101")
+assert(mod.load("missing.wd",[root],{},mod.Limits(0,1,1,2)).diagnostic.code == "B3101")
+root.dependencies["bad"] = 2
+assert(mod.load("missing.wd",[root],{}).diagnostic.code == "B3101")
+if len(args()) > 0:
+    directory = args()[0]
+    fs.make_dirs(directory)
+    file = path.combine(directory,"main.wd")
+    write_text(file,"import std.test\n")
+    directory = path.resolve(directory)
+    package = project.Package(directory,directory,file,"","","",{})
+    standards = {"std.test":"fn value():\n  return 1\n"}
+    loaded = mod.load(file,[package],standards)
+    assert(loaded.diagnostic.code == "" and len(loaded.compilation.modules) == 2)
+    assert(loaded.compilation.modules[0].imports[0].target == 1)
+    assert(mod.load(file,[package],standards,mod.Limits(1,128,10000,100)).diagnostic.code == "E3106")
+    assert(mod.load(file,[package],standards,mod.Limits(10,1,10000,100)).diagnostic.code == "E3106")
+    assert(mod.load(file,[package],standards,mod.Limits(10,10,0,100)).diagnostic.code == "E3106")
+    assert(mod.load(file,[package],standards,mod.Limits(10,10,10000,2)).diagnostic.code == "B2002")
+    standards["std.test"] = "import local\n"
+    assert(mod.load(file,[package],standards).diagnostic.code == "E3106")
+    standards["std.test"] = "import std.test\n"
+    assert(mod.load(file,[package],standards).diagnostic.code == "E3102")
+    standards["std.test"] = "x=1\n"
+    assert(mod.load(file,[package],standards).diagnostic.code == "E3103")
+    standards["std.test"] = "@"
+    failure = mod.load(file,[package],standards).diagnostic
+    assert(failure.code == "E1007" and failure.source == 1 and failure.file == "<std.test>")
+print("bootstrap module unit checks passed")

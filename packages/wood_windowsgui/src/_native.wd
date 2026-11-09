@@ -1,0 +1,21 @@
+# Internal adapter ABI, not the application API. Calls are synchronous.
+extern fn wood_gui_run(title: str, width: int, height: int, context: str, body: fn(int) -> int, mut output: array[int]) -> int
+extern fn wood_gui_show(window: int) -> int
+extern fn wood_gui_control(window: int, control: int, kind: int, text: str, x: int, y: int, width: int, height: int, readonly: int) -> int
+extern fn wood_gui_set_text(window: int, control: int, text: str) -> int
+extern fn wood_gui_list_add(window: int, control: int, text: str) -> int
+extern fn wood_gui_list_clear(window: int, control: int) -> int
+extern fn wood_gui_list_selected(window: int, control: int) -> int
+extern fn wood_gui_list_select(window: int, control: int, index: int) -> int
+extern fn wood_gui_checked(window: int, control: int) -> int
+extern fn wood_gui_set_checked(window: int, control: int, value: int) -> int
+extern fn wood_gui_set_image(window: int, control: int, pixels: array[int], width: int, height: int) -> int
+extern fn wood_gui_menu(window: int, menu: str, control: int, text: str) -> int
+extern fn wood_gui_message(window: int, title: str, text: str, kind: int) -> int
+extern fn wood_gui_file_dialog(window: int, save: int, title: str, filter: str, mut output: array[int]) -> int
+extern fn wood_gui_text(window: int, control: int, mut output: array[int]) -> int
+extern fn wood_gui_move(window: int, control: int, x: int, y: int, width: int, height: int) -> int
+extern fn wood_gui_post(window: int, topic: int, payload: str) -> int
+extern fn wood_gui_wait(window: int, live: fn() -> int, mut output: array[int]) -> int
+extern fn wood_gui_payload(window: int, mut output: array[int]) -> int
+extern fn wood_gui_context(window: int, mut output: array[int]) -> int

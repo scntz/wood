@@ -1,0 +1,95 @@
+# Native SQLite, with explicit lifetime, parameter binding, and result budgets.
+fn open(path: str, timeout_ms: int) -> database:
+    return db_open(path, timeout_ms)
+
+fn close(connection: database):
+    db_close(connection)
+
+fn closed(connection: database) -> bool:
+    return db_closed(connection)
+
+fn version() -> str:
+    return db_version()
+
+fn prepare(connection: database, sql: str) -> statement:
+    return db_prepare(connection, sql)
+
+fn begin(connection: database) -> transaction:
+    return db_begin(connection)
+
+fn commit(scope: transaction):
+    db_commit(scope)
+
+fn rollback(scope: transaction):
+    db_rollback(scope)
+
+fn changes(connection: database) -> int:
+    return db_changes(connection)
+
+fn last_id(connection: database) -> int:
+    return db_last_id(connection)
+
+fn _bind(cursor: statement, parameters: list[json]):
+    index = 1
+    for value in parameters:
+        kind = json_kind(value)
+        if kind == "null":
+            stmt_bind_null(cursor, index)
+        elif kind == "int":
+            stmt_bind_int(cursor, index, json_int(value))
+        elif kind == "float":
+            stmt_bind_float(cursor, index, json_float(value))
+        elif kind == "bool":
+            number = 0
+            if json_bool(value):
+                number = 1
+            stmt_bind_int(cursor, index, number)
+        elif kind == "str":
+            stmt_bind_text(cursor, index, json_str(value))
+        else:
+            raise "SQLite parameters must be JSON scalars"
+        index = index + 1
+
+fn execute(connection: database, sql: str, parameters: list[json]) -> int:
+    with prepare(connection, sql) as cursor:
+        _bind(cursor, parameters)
+        if stmt_step(cursor):
+            raise "SQLite execute does not accept rows; use query"
+    return changes(connection)
+
+fn _value(cursor: statement, column: int) -> json:
+    kind = stmt_kind(cursor, column)
+    if kind == "null":
+        return json_null()
+    if kind == "int":
+        return json(stmt_int(cursor, column))
+    if kind == "float":
+        return json(stmt_float(cursor, column))
+    if kind == "str":
+        return json(stmt_text(cursor, column))
+    raise "SQLite blobs require stmt_blob, not JSON row conversion"
+
+fn query(connection: database, sql: str, parameters: list[json], row_limit: int, byte_limit: int) -> list[dict[str, json]]:
+    if row_limit < 0 or row_limit > 100000 or byte_limit < 0 or byte_limit > 16777216:
+        raise "SQLite query limits must be rows 0..100000 and JSON bytes 0..16777216"
+    rows: list[dict[str, json]] = []
+    used = 0
+    with prepare(connection, sql) as cursor:
+        _bind(cursor, parameters)
+        names: list[str] = []
+        for column in range(stmt_columns(cursor)):
+            name = stmt_name(cursor, column)
+            if name in names:
+                raise "SQLite JSON rows require unique column names"
+            append(names, name)
+        while stmt_step(cursor):
+            if len(rows) >= row_limit:
+                raise "SQLite query exceeds row limit"
+            row: dict[str, json] = {}
+            for column in range(len(names)):
+                row[names[column]] = _value(cursor, column)
+            used = used + len(json_dump(row))
+            if used > byte_limit:
+                raise "SQLite query exceeds JSON byte limit"
+            append(rows, row)
+    return rows

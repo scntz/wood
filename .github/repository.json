@@ -1,0 +1,10 @@
+{
+  "name": "scntz/wood",
+  "description": "A native programming language. Built for humans, designed for AI.",
+  "homepage": "https://github.com/scntz/wood#readme",
+  "topics": ["programming-language", "compiler", "self-hosting", "native", "llvm", "static-typing"],
+  "default_branch": "main",
+  "license_expression": "MIT OR Apache-2.0",
+  "initial_release": "v1.1.0",
+  "prerelease": false
+}

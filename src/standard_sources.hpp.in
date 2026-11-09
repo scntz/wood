@@ -1,0 +1,8 @@
+#pragma once
+#include <string_view>
+#include <utility>
+namespace wood {
+inline constexpr std::pair<std::string_view,std::string_view> standard_sources[] = {
+@WOOD_STDLIB_ROWS@
+};
+}

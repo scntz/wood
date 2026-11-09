@@ -1,0 +1,506 @@
+# Library author workflow: validate, report the public API, pack and prepare a
+# GitHub release. Everything is local and read-only for Git; nothing is pushed.
+import driver_host as host
+import driver_inspect as inspection
+import package_manager as manager
+import project as project
+import project_trust as trust
+import body_semantics as semantic
+import sources as src
+import sha256 as sha
+import std.path as path
+import std.fs as fs
+
+record Library:
+    file: str
+    root: str
+    manifest: dict[str,json]
+    name: str
+    version: str
+
+fn open_library(start: str) -> Library:
+    file = project.discover(start)
+    if file == "":
+        raise manager.problem("D5101","no wood.json project found; run 'wood init --lib PATH' first")
+    root = path.resolve(path.parent(file))
+    manifest = project.object(json_parse(src.read(file,1048576)))
+    snapshot = project.snapshot(file,false)
+    if snapshot.configured.diagnostic.code != "":
+        raise manager.problem("D5104",snapshot.configured.diagnostic.message)
+    return Library(file,root,manifest,project.string(manifest["name"]),project.string(manifest["version"]))
+
+fn sourced_paths(library: Library) -> list[str]:
+    result: list[str] = []
+    if "dependencies" in library.manifest:
+        items = project.object(library.manifest["dependencies"])
+        for alias in items:
+            item = project.object(items[alias])
+            if "source" in item:
+                append(result,project.string(item["path"]))
+    return result
+
+fn distribution_files(library: Library) -> list[str]:
+    # Generated trees and installed dependencies are not package content.
+    excluded = [".git",".wood","build","dist","wood.lock","wood-source.json"]+sourced_paths(library)
+    names: dict[str,int] = {}
+    pending = [""]
+    while len(pending) > 0:
+        relative = pop(pending)
+        directory = library.root if relative == "" else path.combine(library.root,relative)
+        for name in fs.entries(directory,65536):
+            child = name if relative == "" else relative+"/"+name
+            if child in excluded:
+                continue
+            kind = fs.kind(path.combine(library.root,child))
+            if kind == "symlink":
+                raise manager.problem("D5107","filesystem links cannot be distributed: "+child)
+            if not manager.safe_relative(child):
+                raise manager.problem("D5107","unsafe or nonportable package path: "+child+"; use portable ASCII names")
+            if kind == "directory":
+                append(pending,child)
+            elif kind == "file":
+                names[child] = 0
+            else:
+                raise manager.problem("D5107","only regular files can be distributed: "+child)
+    return [name for name in json_dict(json(names))]
+
+fn _has(files: list[str], prefix: str) -> bool:
+    for file in files:
+        if starts_with(manager.lower(file),prefix):
+            return true
+    return false
+
+fn validate(start: str, standards: dict[str,str]) -> int:
+    library = open_library(start)
+    files = distribution_files(library)
+    names: dict[str,manager.Entry] = {}
+    for file in files:
+        names[file] = manager.Entry("",0,file)
+    # Applies the same manifest rules used when another project installs this package.
+    manager.validate_manifest(src.read(library.file,1048576),library.name,names)
+    manager.check_modules(library.root,library.manifest,standards)
+    modules = manager.package_modules(library.root,library.manifest)
+    warnings: list[str] = []
+    if len(modules) == 0:
+        raise manager.problem("D5104","package exports no public modules")
+    if "tests" not in library.manifest or not _has(files,manager.lower(project.string(library.manifest["tests"]))+"/test_"):
+        append(warnings,"no test_*.wd files; add tests before publishing")
+    if not _has(files,"readme"):
+        append(warnings,"no README; other developers will not know how to use this package")
+    if not _has(files,"license") and not _has(files,"copying"):
+        append(warnings,"no LICENSE file; others cannot legally reuse this package")
+    print(library.name+" "+library.version+": manifest and modules are valid")
+    print("  modules: "+join(modules,", "))
+    print("  files: "+str(len(files)))
+    for warning in warnings:
+        print("  warning: "+warning)
+    return 0
+
+fn api(start: str, standards: dict[str,str]) -> int:
+    library = open_library(start)
+    source = path.combine(library.root,project.string(library.manifest["source"]))
+    rows: list[json] = []
+    for module in manager.package_modules(library.root,library.manifest):
+        file = path.combine(source,replace(module,".","/")+".wd")
+        program = semantic.analyze(trust.load(file,standards,false))
+        if program.diagnostic.code != "":
+            raise manager.problem("D5104",module+": "+program.diagnostic.code+" "+program.diagnostic.message)
+        report = project.object(inspection.inspect(program))
+        for value in json_list(report["modules"]):
+            data = project.object(value)
+            if host.same(project.string(data["file"]),file):
+                row: dict[str,json] = {"module":json(module),"exports":data["exports"]}
+                append(rows,json(row))
+    result: dict[str,json] = {"schema_version":json(1),"name":json(library.name),"version":json(library.version),"modules":json(rows)}
+    print(json_dump(result))
+    return 0
+
+fn _octal(value: int, width: int) -> str:
+    digits = ""
+    remaining = value
+    for i in range(width-1):
+        digits = str(remaining%8)+digits
+        remaining = remaining//8
+    if remaining != 0:
+        raise manager.problem("D5104","package file is too large for a tar entry")
+    return digits+"\0"
+
+fn _pad(text: str, width: int) -> str:
+    return text+join(["\0" for i in range(width-len(text))],"")
+
+fn tar_header(name: str, size: int) -> str:
+    prefix = ""
+    leaf = name
+    if len(leaf) > 100:
+        # USTAR splits long portable names at a directory separator.
+        cut = -1
+        for i in range(len(name)):
+            if name[i] == "/" and i <= 155 and len(name)-i-1 <= 100:
+                cut = i
+                break
+        if cut < 0:
+            raise manager.problem("D5107","package path is too long for a portable archive: "+name)
+        prefix = name[:cut]
+        leaf = name[cut+1:]
+    head = _pad(leaf,100)+_octal(420,8)+_octal(0,8)+_octal(0,8)+_octal(size,12)+_octal(0,12)
+    tail = "0"+_pad("",100)+"ustar\0"+"00"+_pad("",32)+_pad("",32)+_octal(0,8)+_octal(0,8)+_pad(prefix,155)+_pad("",12)
+    total = 256
+    for byte in head+tail:
+        total += byte_value(byte)
+    return head+_octal(total,7)+" "+tail
+
+fn pack(start: str, output: str) -> int:
+    library = open_library(start)
+    directory = path.combine(library.root,"dist") if output == "" else path.absolute(output)
+    fs.make_dirs(directory)
+    label = library.name+"-"+library.version
+    pieces: list[str] = []
+    total = 0
+    files = distribution_files(library)
+    for file in files:
+        content = src.read(path.combine(library.root,file),16777216)
+        total += len(content)
+        if total > 134217728:
+            raise manager.problem("D5104","package exceeds 128 MiB")
+        append(pieces,tar_header(label+"/"+file,len(content)))
+        append(pieces,content)
+        padding = (512-len(content)%512)%512
+        append(pieces,_pad("",padding))
+    append(pieces,_pad("",1024))
+    archive = join(pieces,"")
+    target = path.combine(directory,label+".woodpkg")
+    # Archive bytes need not be valid UTF-8, so they bypass the JSON OS bridge.
+    stage = host.temporary(directory)
+    staged = path.combine(stage,"archive.tar")
+    write_text(staged,archive)
+    host.publish(staged,target)
+    host.release(stage)
+    digest = sha.digest(archive)
+    host.atomic(target+".sha256",digest+"  "+label+".woodpkg\n")
+    print("Packed "+str(len(files))+" files into "+target)
+    print("sha256 "+digest)
+    return 0
+
+fn prepare(start: str, standards: dict[str,str]) -> int:
+    library = open_library(start)
+    validate(start,standards)
+    work = manager.open_client(true)
+    blockers: list[str] = []
+    tag = "v"+library.version
+    status = work.run(["-C",library.root,"status","--porcelain"])
+    if status[0] != 0:
+        append(blockers,"not a Git repository; run 'git init' and commit the package")
+    elif strip(status[1]) != "":
+        append(blockers,"uncommitted changes; commit them first")
+    origin = work.run(["-C",library.root,"config","--get","remote.origin.url"])
+    repository = ""
+    if origin[0] != 0:
+        append(blockers,"no 'origin' remote; create a public GitHub repository and add it")
+    else:
+        text = manager.scrub(strip(origin[1]))
+        pieces = split(text,"github.com")
+        if len(pieces) != 2:
+            append(blockers,"'origin' is not a GitHub repository")
+        else:
+            repository = pieces[1][1:]
+            if ends_with(repository,".git"):
+                repository = repository[:len(repository)-4]
+    existing = work.run(["-C",library.root,"tag","--list",tag])
+    if existing[0] == 0 and strip(existing[1]) != "":
+        append(blockers,"tag "+tag+" already exists; never move a published tag, raise the version instead")
+    host.release(work.logs)
+    if len(blockers) > 0:
+        print("Not ready to publish:")
+        for blocker in blockers:
+            print("  - "+blocker)
+        return 1
+    print("Ready to publish "+library.name+" "+library.version+". Nothing has been pushed. Run:")
+    print("  git tag "+tag)
+    print("  git push origin HEAD "+tag)
+    print("Others can then install it with:")
+    print("  wood install dependency github@"+repository+"#"+tag)
+    return 0
+
+fn _catalog_files(directory: str) -> list[str]:
+    root = path.combine(directory,"packages")
+    if fs.kind(root) != "directory":
+        raise manager.problem("D5104","catalog has no packages directory: "+root)
+    ordered: dict[str,int] = {}
+    for owner in fs.entries(root,65536):
+        folder = path.combine(root,owner)
+        if fs.kind(folder) != "directory":
+            raise manager.problem("D5104","unexpected catalog entry: "+owner)
+        for name in fs.entries(folder,65536):
+            ordered[owner+"/"+name] = 0
+    return [name for name in json_dict(json(ordered))]
+
+fn _required_text(row: dict[str,json], field: str, label: str) -> str:
+    if field not in row or json_kind(row[field]) != "str" or strip(json_str(row[field])) == "":
+        raise manager.problem("D5104",label+": missing required text field '"+field+"'")
+    return json_str(row[field])
+
+fn _https_field(row: dict[str,json], field: str, label: str):
+    if field in row and not manager.valid_https(project.string(row[field])):
+        raise manager.problem("D5104",label+": '"+field+"' must be a plain https:// URL")
+
+fn _text_list(row: dict[str,json], field: str, allowed: list[str], label: str) -> list[str]:
+    if field not in row or json_kind(row[field]) != "list" or len(json_list(row[field])) == 0:
+        raise manager.problem("D5104",label+": '"+field+"' must be a non-empty list")
+    result: list[str] = []
+    for value in json_list(row[field]):
+        text = project.string(value)
+        if text not in allowed:
+            raise manager.problem("D5104",label+": unsupported "+field+" value '"+text+"'; allowed: "+join(allowed,", "))
+        append(result,text)
+    return result
+
+# VERIFIED describes one exact version, so it has to say what was audited and by whom.
+fn _trust_marks(version: dict[str,json], number: str, label: str):
+    if "revoked" in version:
+        _required_text(version,"revoked",label)
+    if "verification" not in version:
+        return
+    if "revoked" in version:
+        raise manager.problem("D5104",label+": revoked version "+number+" cannot be verified")
+    record: dict[str,json] = {}
+    try:
+        record = project.object(version["verification"])
+        project.fields(record,["artifact","commit","auditor","date","scope","findings","limitations"])
+    except err:
+        raise manager.problem("D5104",label+": "+err.message)
+    for field in ["artifact","auditor","date","scope","findings","limitations"]:
+        _required_text(record,field,label)
+
+fn _recommendations(row: dict[str,json], label: str):
+    if "recommended" not in row:
+        return
+    if json_kind(row["recommended"]) != "list":
+        raise manager.problem("D5104",label+": 'recommended' must be a list")
+    for value in json_list(row["recommended"]):
+        record: dict[str,json] = {}
+        try:
+            record = project.object(value)
+            project.fields(record,["note","version","by","on"])
+        except err:
+            raise manager.problem("D5104",label+": "+err.message)
+        for field in ["note","by","on"]:
+            _required_text(record,field,label)
+
+fn validate_entry(relative: str, text: str) -> dict[str,json]:
+    label = relative
+    pieces = split(relative,"/")
+    if len(pieces) != 2 or not ends_with(pieces[1],".json"):
+        raise manager.problem("D5104",label+": entries live at packages/OWNER/NAME.json")
+    row: dict[str,json] = {}
+    try:
+        row = project.object(json_parse(text))
+        project.fields(row,["owner","name","package","tier","description","readme","license","homepage","docs","repository","categories","platforms","example","versions","recommended"])
+    except err:
+        raise manager.problem("D5104",label+": "+err.message)
+    owner = _required_text(row,"owner",label)
+    name = _required_text(row,"name",label)
+    if owner != pieces[0] or name+".json" != pieces[1]:
+        raise manager.problem("D5104",label+": owner and name must match the file location")
+    if not manager.valid_owner(owner) or not manager.valid_name(name):
+        raise manager.problem("D5104",label+": invalid owner or package name")
+    if owner in ["github","python"]:
+        raise manager.problem("D5104",label+": the owner '"+owner+"' is reserved for its provider")
+    package = _required_text(row,"package",label)
+    if not project.identifier(package) or package == "std":
+        raise manager.problem("D5104",label+": 'package' must be the wood.json package name")
+    tier = _required_text(row,"tier",label)
+    if tier not in ["official","community"]:
+        raise manager.problem("D5104",label+": tier must be official or community")
+    if (owner == "wood") != (tier == "official"):
+        raise manager.problem("D5104",label+": only the reserved 'wood' owner is official")
+    description = _required_text(row,"description",label)
+    if len(description) > 200:
+        raise manager.problem("D5104",label+": description exceeds 200 bytes")
+    _required_text(row,"license",label)
+    _required_text(row,"repository",label)
+    for field in ["homepage","docs","repository"]:
+        _https_field(row,field,label)
+    _text_list(row,"categories",["audio","cli","data","desktop","graphics","images","math","networking","system","text","tooling","testing","web"],label)
+    _text_list(row,"platforms",["windows-x86_64","linux-x86_64"],label)
+    _recommendations(row,label)
+    if "versions" not in row or json_kind(row["versions"]) != "list" or len(json_list(row["versions"])) == 0:
+        raise manager.problem("D5104",label+": at least one version is required")
+    seen: dict[str,int] = {}
+    for value in json_list(row["versions"]):
+        version = project.object(value)
+        try:
+            project.fields(version,["version","source","published","dependencies","yanked","revoked","verification"])
+        except err:
+            raise manager.problem("D5104",label+": "+err.message)
+        number = _required_text(version,"version",label)
+        if not project.version(number) or number in seen:
+            raise manager.problem("D5104",label+": invalid or duplicate version '"+number+"'")
+        seen[number] = 0
+        _required_text(version,"published",label)
+        _trust_marks(version,number,label)
+        if "source" not in version:
+            raise manager.problem("D5104",label+": version "+number+" has no source")
+        source = project.object(version["source"])
+        kind = _required_text(source,"type",label)
+        if kind == "github":
+            repo = _required_text(source,"repo",label)
+            names = split(repo,"/")
+            # A community namespace is proven by the hosting account it claims.
+            if tier == "community" and manager.lower(names[0]) != manager.lower(owner):
+                raise manager.problem("D5104",label+": community owner '"+owner+"' must match the GitHub account in '"+repo+"'")
+        elif kind == "git":
+            if not manager.valid_https(_required_text(source,"url",label)):
+                raise manager.problem("D5107",label+": unsafe Git URL")
+        elif kind == "archive":
+            if not manager.valid_https(_required_text(source,"url",label)):
+                raise manager.problem("D5107",label+": unsafe archive URL")
+            if not manager.digest_id(_required_text(source,"sha256",label)):
+                raise manager.problem("D5104",label+": archive source requires a lowercase SHA-256")
+        else:
+            raise manager.problem("D5104",label+": unsupported source type '"+kind+"'")
+        if kind != "archive" and not manager.commit_id(_required_text(source,"commit",label)):
+            raise manager.problem("D5104",label+": Git sources must pin a full commit; tags can move")
+        if "directory" in source and not manager.safe_relative(project.string(source["directory"])):
+            raise manager.problem("D5107",label+": unsafe source directory")
+        # No process runs here: this only applies the installer's own source rules.
+        manager.catalog_spec(manager.Client("",0,true,"","",{},[],"",false),version,owner+"@"+name,"")
+    return row
+
+fn catalog_rows(directory: str) -> list[json]:
+    rows: list[json] = []
+    for relative in _catalog_files(directory):
+        text = src.read(path.combine(path.combine(directory,"packages"),relative),1048576)
+        append(rows,json(validate_entry(relative,text)))
+    return rows
+
+fn catalog_verify(directory: str, offline: bool) -> int:
+    # Fetches every pinned source and compares its real manifest with the listing.
+    failures = 0
+    work = manager.open_client(offline)
+    for value in catalog_rows(directory):
+        row = project.object(value)
+        identity = project.string(row["owner"])+"@"+project.string(row["name"])
+        for item in json_list(row["versions"]):
+            version = project.object(item)
+            number = project.string(version["version"])
+            label = identity+" "+number
+            stage = host.temporary()
+            try:
+                spec = manager.catalog_spec(work,version,identity,"")
+                exported = manager.Exported("","",{})
+                if spec.kind == "archive":
+                    exported = manager.export_archive(work,spec,path.combine(stage,"package"),"")
+                else:
+                    cached = work.ensure(spec,spec.commit,spec.commit,"")
+                    exported = manager.export_commit(work,cached,spec.commit,path.combine(stage,"package"),spec,"")
+                if project.string(exported.manifest["name"]) != project.string(row["package"]):
+                    raise manager.problem("D5104","manifest name is "+project.string(exported.manifest["name"]))
+                if project.string(exported.manifest["version"]) != number:
+                    raise manager.problem("D5104","manifest version is "+project.string(exported.manifest["version"]))
+                print("PASS "+label+" "+(spec.commit if spec.commit != "" else spec.sha256))
+            except err:
+                message = err.message
+                if starts_with(message,"__WOOD_DRIVER__"):
+                    message = message[len("__WOOD_DRIVER__"):]
+                print("FAIL "+label+": "+message)
+                failures += 1
+            host.release(stage)
+    host.release(work.logs)
+    print(str(failures)+" failure(s)")
+    return 1 if failures > 0 else 0
+
+fn catalog(raw: list[str]) -> int:
+    usage = "Usage: wood package catalog validate DIRECTORY\n       wood package catalog build DIRECTORY [-o index.json]\n       wood package catalog verify DIRECTORY [--offline]"
+    arguments = [value for value in raw if value != "--diagnostics=json"]
+    if len(arguments) < 2:
+        raise manager.problem("D5101",usage)
+    verb = arguments[0]
+    directory = path.absolute(arguments[1])
+    if verb == "validate" and len(arguments) == 2:
+        print(str(len(catalog_rows(directory)))+" catalog entries are valid")
+        return 0
+    if verb == "verify" and (len(arguments) == 2 or (len(arguments) == 3 and arguments[2] == "--offline")):
+        return catalog_verify(directory,len(arguments) == 3)
+    if verb == "build" and (len(arguments) == 2 or (len(arguments) == 4 and arguments[2] == "-o")):
+        output = path.combine(directory,"index.json") if len(arguments) == 2 else path.absolute(arguments[3])
+        document: dict[str,json] = {"schema_version":json(1),"packages":json(catalog_rows(directory))}
+        host.atomic(output,json_dump(document)+"\n")
+        print("Wrote "+output)
+        return 0
+    raise manager.problem("D5101",usage)
+
+fn listing(arguments: list[str]) -> int:
+    # Prints a catalog entry from the exact pushed commit for a pull request.
+    start = "."
+    tag = ""
+    i = 0
+    while i < len(arguments):
+        if arguments[i] == "--tag" and i+1 < len(arguments):
+            i += 1
+            tag = arguments[i]
+        elif starts_with(arguments[i],"-"):
+            raise manager.problem("D5101","Usage: wood package listing [PROJECT] [--tag vX.Y.Z]")
+        else:
+            start = arguments[i]
+        i += 1
+    library = open_library(start)
+    tag = tag if tag != "" else "v"+library.version
+    work = manager.open_client(true)
+    origin = work.run(["-C",library.root,"config","--get","remote.origin.url"])
+    commit = work.run(["-C",library.root,"rev-parse","--verify","-q",tag+"^{commit}"])
+    if origin[0] != 0 or len(split(manager.scrub(strip(origin[1])),"github.com")) != 2:
+        raise manager.problem("D5101","'origin' must be a GitHub repository")
+    if commit[0] != 0:
+        raise manager.problem("D5103","tag "+tag+" does not exist; run 'wood package prepare' and tag the release")
+    repository = split(manager.scrub(strip(origin[1])),"github.com")[1][1:]
+    if ends_with(repository,".git"):
+        repository = repository[:len(repository)-4]
+    owner = split(repository,"/")[0]
+    source: dict[str,json] = {"type":json("github"),"repo":json(repository),"ref":json(tag),"commit":json(strip(commit[1]))}
+    version: dict[str,json] = {"version":json(library.version),"source":json(source),"published":json("YYYY-MM-DD")}
+    categories: list[json] = [json("tooling")]
+    platforms: list[json] = [json("windows-x86_64"),json("linux-x86_64")]
+    versions: list[json] = [json(version)]
+    entry: dict[str,json] = {"owner":json(owner),"name":json(library.name),"package":json(library.name),"tier":json("community"),"description":json(""),"license":json(""),"repository":json("https://github.com/"+repository),"categories":json(categories),"platforms":json(platforms),"versions":json(versions)}
+    host.release(work.logs)
+    print(json_dump(entry))
+    print("Fill in description, license, categories and platforms, save it as packages/"+owner+"/"+library.name+".json and open a pull request.")
+    return 0
+
+fn run(arguments: list[str], standards: dict[str,str]) -> int:
+    if len(arguments) > 0 and arguments[0] == "catalog":
+        return catalog(arguments[1:])
+    if len(arguments) > 0 and arguments[0] == "listing":
+        return listing(arguments[1:])
+    usage = "Usage: wood package validate|api|prepare [PROJECT]\n       wood package pack [PROJECT] [-o DIRECTORY]"
+    if len(arguments) == 0 or arguments == ["--help"]:
+        print(usage)
+        return 0
+    verb = arguments[0]
+    start = "."
+    output = ""
+    i = 1
+    seen = false
+    while i < len(arguments):
+        if arguments[i] == "-o":
+            i += 1
+            if i == len(arguments) or verb != "pack":
+                raise manager.problem("D5101",usage)
+            output = arguments[i]
+        elif arguments[i] == "--diagnostics=json":
+            pass
+        elif starts_with(arguments[i],"-") or seen:
+            raise manager.problem("D5101",usage)
+        else:
+            start = arguments[i]
+            seen = true
+        i += 1
+    if verb == "validate":
+        return validate(start,standards)
+    if verb == "api":
+        return api(start,standards)
+    if verb == "pack":
+        return pack(start,output)
+    if verb == "prepare":
+        return prepare(start,standards)
+    raise manager.problem("D5101",usage)

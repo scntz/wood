@@ -1,0 +1,72 @@
+fn changed(values: list[int]) -> list[int]:
+    values[0] = 99
+    append(values, 4)
+    return values
+
+fn empty() -> list[int]:
+    return []
+
+fn count(values: list[int]) -> int:
+    return len(values)
+
+values = [1, 2, 3]
+copy = values
+copy[0] = 8
+assert(values == [1, 2, 3])
+assert(copy == [8, 2, 3])
+assert(changed(values) == [99, 2, 3, 4])
+assert(values == [1, 2, 3])
+assert(empty() == [])
+assert([] == empty())
+assert(count([]) == 0)
+floats: list[float] = [1, 2.5, 3]
+append(floats, 4)
+floats[0] = 5
+assert(floats == [5.0, 2.5, 3.0, 4.0])
+assert([1, 2.5, 3] == [1.0, 2.5, 3.0])
+matrix: list[list[int]] = [[], [1, 2]]
+original = matrix
+append(matrix[0], 9)
+matrix[1][-1] = 7
+assert(matrix == [[9], [1, 7]])
+assert(original == [[], [1, 2]])
+assert(pop(matrix[1]) == 7)
+assert(matrix[1] == [1])
+flags = [true, false]
+flags[1] = true
+assert(flags == [true, true])
+assert("abc"[-1] == "c")
+assert("abc"[0] == "a")
+
+# Mutation during iteration must not invalidate a cursor or extend the iteration.
+total = 0
+for value in values:
+    total = total + value
+    append(values, value)
+    value = 100
+assert(total == 6)
+assert(values == [1, 2, 3, 1, 2, 3])
+text = ""
+for byte in "abc":
+    text = text + byte
+assert(text == "abc")
+
+# RHS first for assignment; all target indexes before resolving references.
+positions = [0, 1]
+matrix[pop(positions)][0] = pop(positions)
+assert(matrix == [[1], [1]])
+target: list[list[int]] = [[1], [2]]
+indices = [0]
+append(target[pop(indices)], pop(target[1]))
+assert(target == [[1, 2], []])
+target = [[1], [2, 3]]
+append(target[-1], len(pop(target)))
+assert(target == [[1, 2]])
+
+# Index reads snapshot their base before evaluating their index.
+numbers = [0, 1, 2]
+assert(numbers[pop(numbers)] == 2)
+assert(numbers == [0, 1])
+assert(str(["a", "b"]) == '["a", "b"]')
+assert(str([[true], [false]]) == '[[true], [false]]')
+print("collections ok")

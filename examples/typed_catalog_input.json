@@ -1,0 +1,5 @@
+[
+  {"name": "book", "cents": 1250, "category": "reading"},
+  {"name": "cup", "cents": 350},
+  {"name": "pen", "cents": 100, "category": null}
+]

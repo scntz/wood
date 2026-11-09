@@ -1,0 +1,1288 @@
+# wood lsp: the Language Server Protocol over stdio. Runs on one thread. Analysis happens when
+# input goes quiet, so typing costs nothing, and requests that need an answer force it.
+import lsp_analysis as analysis
+import parser_recovery as recovery
+import package_manager as manager
+import lexer as lx
+import formatter as formatter
+import sources as src
+import syntax as ast
+import std.path as path
+import std.fs as fs
+
+extern fn wood_driver_stdin_read(mut output: array[int]) -> int
+extern fn wood_driver_stdin_ready(timeout_ms: int) -> int
+extern fn wood_driver_stdout_write(text: str) -> int
+
+record Doc:
+    uri: str
+    file: str
+    text: str
+    version: int
+
+record FileSymbols:
+    text: str
+    symbols: list[json]
+
+record Server:
+    engine: analysis.Engine
+    standards: dict[str,str]
+    docs: dict[str,Doc]
+    results: dict[str,analysis.Analysis]
+    good: dict[str,analysis.Analysis]
+    dirty: dict[str,bool]
+    unpublished: dict[str,bool]
+    buffer: str
+    ended: bool
+    initialized: bool
+    shutting_down: bool
+    roots: list[str]
+    files: list[str]
+    queue: list[str]
+    published: dict[str,bool]
+    symbols: dict[str,FileSymbols]
+    generation: int
+
+    # ---- Transport ------------------------------------------------------------------------
+
+    fn fill(mut self) -> bool:
+        chunk = array_full(65536,0)
+        count = wood_driver_stdin_read(chunk)
+        if count <= 0:
+            self.ended = true
+            return false
+        pieces: list[str] = []
+        for index in range(count):
+            append(pieces,byte_string(chunk[index]))
+        self.buffer += join(pieces,"")
+        return true
+
+    fn read_message(mut self) -> str | None:
+        while true:
+            ending = find(self.buffer,"\r\n\r\n")
+            if ending >= 0:
+                size = -1
+                for line in split(self.buffer[:ending],"\r\n"):
+                    if starts_with(lower_text(line),"content-length:"):
+                        size = int(strip(line[15:]))
+                if size < 0:
+                    raise "message has no Content-Length"
+                total = ending+4+size
+                while len(self.buffer) < total:
+                    if not self.fill():
+                        return None
+                body = self.buffer[ending+4:total]
+                self.buffer = self.buffer[total:]
+                return body
+            if not self.fill():
+                return None
+        return None
+
+    fn send(self, message: dict[str,json]):
+        message["jsonrpc"] = json("2.0")
+        body = json_dump(message)
+        wood_driver_stdout_write("Content-Length: "+str(len(body))+"\r\n\r\n"+body)
+
+    fn respond(self, id: json, result: json):
+        self.send({"id":id,"result":result})
+
+    fn respond_error(self, id: json, code: int, message: str):
+        self.send({"id":id,"error":json({"code":json(code),"message":json(message)})})
+
+    fn notify(self, method: str, parameters: json):
+        self.send({"method":json(method),"params":parameters})
+
+    # ---- Documents ------------------------------------------------------------------------
+
+    fn current(mut self, file: str) -> analysis.Analysis:
+        # A fresh analysis of the file, from the open document when there is one.
+        if file in self.results and file not in self.dirty:
+            return self.results[file]
+        text = self.docs[file].text if file in self.docs else src.read(file,16777216)
+        result = self.engine.analyze(file,text)
+        if file not in self.docs:
+            self.engine.release(file)
+        self.results[file] = result
+        if result.semantic:
+            self.good[file] = result
+        if file in self.dirty:
+            remove(self.dirty,file)
+        return result
+
+    fn publish(mut self, file: str):
+        uri = self.docs[file].uri if file in self.docs else path_to_uri(file)
+        result = self.current(file)
+        items: list[json] = []
+        seen: dict[str,bool] = {}
+        for item in result.diagnostics:
+            if item.file != file and item.file != "":
+                continue
+            key = item.code+":"+str(item.line)+":"+str(item.column)+":"+item.message
+            if key not in seen:
+                seen[key] = true
+                append(items,diagnostic_json(item,result,split(self.document_text(file),"\n")))
+        if len(items) == 0 and file not in self.published:
+            return
+        if len(items) > 0:
+            self.published[file] = true
+        elif file in self.published:
+            remove(self.published,file)
+        self.notify("textDocument/publishDiagnostics",json({"uri":json(uri),"diagnostics":json(items)}))
+
+    fn document_text(self, file: str) -> str:
+        return self.docs[file].text if file in self.docs else src.read(file,16777216)
+
+    fn invalidate(mut self):
+        # Any file can change what another file means, so open files are analyzed again.
+        self.generation += 1
+        self.results = {}
+        # Separate on purpose. A request can bring the analysis up to date before the editor has
+        # been told about it, and the editor must still hear about the result.
+        for file in self.docs:
+            self.dirty[file] = true
+            self.unpublished[file] = true
+
+    fn did_open(mut self, parameters: dict[str,json]):
+        item = json_dict(parameters["textDocument"])
+        uri = json_str(item["uri"])
+        file = uri_to_path(uri)
+        if file == "":
+            return
+        self.docs[file] = Doc(uri,file,json_str(item["text"]),json_int(item["version"]))
+        self.engine.overlays[file] = self.docs[file].text
+        self.invalidate()
+
+    fn did_change(mut self, parameters: dict[str,json]):
+        item = json_dict(parameters["textDocument"])
+        file = uri_to_path(json_str(item["uri"]))
+        if file not in self.docs:
+            return
+        document = self.docs[file]
+        for value in json_list(parameters["contentChanges"]):
+            change = json_dict(value)
+            if "range" in change:
+                document.text = apply_change(document.text,json_dict(change["range"]),json_str(change["text"]))
+            else:
+                document.text = json_str(change["text"])
+        if "version" in item:
+            document.version = json_int(item["version"])
+        self.docs[file] = document
+        self.engine.overlays[file] = document.text
+        self.invalidate()
+
+    fn did_close(mut self, parameters: dict[str,json]):
+        uri = json_str(json_dict(parameters["textDocument"])["uri"])
+        file = uri_to_path(uri)
+        if file in self.docs:
+            remove(self.docs,file)
+        self.engine.release(file)
+        if file in self.dirty:
+            remove(self.dirty,file)
+        if file in self.unpublished:
+            remove(self.unpublished,file)
+        self.invalidate()
+        # A project file keeps its diagnostics from disk. A lone script stops being watched.
+        if file in self.files:
+            append(self.queue,file)
+        elif file in self.published:
+            remove(self.published,file)
+            self.notify("textDocument/publishDiagnostics",json({"uri":json(uri),"diagnostics":json([])}))
+
+    fn scan_workspace(mut self):
+        self.files = []
+        for root in self.roots:
+            if root != "":
+                self.scan_directory(root,false,0)
+        self.queue = self.files
+
+    fn scan_directory(mut self, directory: str, project_file: bool, depth: int):
+        # Only files that belong to a project get background diagnostics. A lone script may be a
+        # deliberate failing fixture, and it is checked when it is opened.
+        if depth > 12 or len(self.files) >= 2048:
+            return
+        entries: list[str] = []
+        try:
+            entries = fs.entries(directory,65536)
+        except err:
+            return
+        inside = project_file or "wood.json" in entries
+        for name in entries:
+            full = path.combine(directory,name)
+            if ignored_directory(name):
+                continue
+            kind = "missing"
+            try:
+                kind = fs.kind(full)
+            except err:
+                continue
+            if kind == "directory":
+                self.scan_directory(full,inside,depth+1)
+            elif kind == "file" and ends_with(name,".wd") and inside:
+                append(self.files,canonical(full))
+
+    # ---- Lifecycle ------------------------------------------------------------------------
+
+    fn initialize(mut self, parameters: dict[str,json]) -> json:
+        if "workspaceFolders" in parameters and json_kind(parameters["workspaceFolders"]) == "list":
+            for value in json_list(parameters["workspaceFolders"]):
+                append(self.roots,uri_to_path(json_str(json_dict(value)["uri"])))
+        if len(self.roots) == 0 and "rootUri" in parameters and json_kind(parameters["rootUri"]) == "str":
+            append(self.roots,uri_to_path(json_str(parameters["rootUri"])))
+        self.initialized = true
+        legend = {"tokenTypes":json(token_types()),"tokenModifiers":json(["declaration"])}
+        capabilities: dict[str,json] = {
+            "positionEncoding":json("utf-16"),
+            "textDocumentSync":json({"openClose":json(true),"change":json(2),"save":json({"includeText":json(false)})}),
+            "hoverProvider":json(true),
+            "definitionProvider":json(true),
+            "referencesProvider":json(true),
+            "documentSymbolProvider":json(true),
+            "workspaceSymbolProvider":json(true),
+            "completionProvider":json({"triggerCharacters":json(["."]),"resolveProvider":json(false)}),
+            "signatureHelpProvider":json({"triggerCharacters":json(["(",","])}),
+            "renameProvider":json({"prepareProvider":json(true)}),
+            "documentFormattingProvider":json(true),
+            "semanticTokensProvider":json({"legend":json(legend),"full":json(true)})
+        }
+        return json({"capabilities":json(capabilities),"serverInfo":json({"name":json("wood"),"version":json("0.4.0")})})
+
+    # ---- Requests -------------------------------------------------------------------------
+
+    fn locate(mut self, parameters: dict[str,json]) -> tuple[str,int,int]:
+        # A request's document and position, as a file and 1-based line and byte column.
+        file = uri_to_path(json_str(json_dict(parameters["textDocument"])["uri"]))
+        place = json_dict(parameters["position"])
+        line = json_int(place["line"])+1
+        lines = split(self.document_text(file),"\n")
+        text = lines[line-1] if line <= len(lines) else ""
+        return (file,line,byte_column(text,json_int(place["character"]))+1)
+
+    fn target_at(mut self, parameters: dict[str,json]) -> tuple[analysis.Analysis,int,analysis.Target | None]:
+        place = self.locate(parameters)
+        result = self.current(place[0])
+        index = result.token_at(place[1],place[2])
+        return (result,index,result.resolve(index))
+
+    fn hover(mut self, parameters: dict[str,json]) -> json:
+        found = self.target_at(parameters)
+        if found[2] is None:
+            return json_null()
+        target = unwrap(found[2])
+        if target.detail == "":
+            return json_null()
+        text = "```wood\n"+target.detail+"\n```"
+        if target.kind in ["local","parameter","loop"]:
+            text = "```wood\n"+target.kind+" "+target.detail+"\n```"
+        documentation = doc_comment(found[0],target)
+        if documentation != "":
+            text += "\n\n"+documentation
+        return json({"contents":json({"kind":json("markdown"),"value":json(text)}),"range":json(token_range(found[0].tokens[found[1]],split(self.document_text(found[0].file),"\n")))})
+
+    fn location_json(mut self, target: analysis.Target) -> json | None:
+        file = target.file
+        if starts_with(file,"<"):
+            file = self.materialize(file)
+        if file == "":
+            return None
+        lines = split(self.document_text_or_empty(file),"\n")
+        text = lines[target.line-1] if target.line >= 1 and target.line <= len(lines) else ""
+        character = utf16_column(text,target.column-1)
+        size = utf16_length(target.name)
+        return json({"uri":json(self.uri_of(file)),"range":json(lsp_range(target.line-1,character,target.line-1,character+size))})
+
+    fn document_text_or_empty(self, file: str) -> str:
+        if file in self.docs:
+            return self.docs[file].text
+        try:
+            return src.read(file,16777216)
+        except err:
+            return ""
+
+    fn uri_of(self, file: str) -> str:
+        return self.docs[file].uri if file in self.docs else path_to_uri(file)
+
+    fn materialize(mut self, label: str) -> str:
+        # Standard modules are embedded in the compiler. Writing a copy gives editors a real
+        # file to open. It is rewritten each time, so it always matches this compiler.
+        name = label[1:-1]
+        if name not in self.standards:
+            return ""
+        directory = path.combine(path.combine(manager.cache_root(),"lsp-standard"),"0.4.0")
+        fs.make_dirs(directory)
+        file = path.combine(directory,replace(name,".","_")+".wd")
+        write_text(file,self.standards[name])
+        return file
+
+    fn definition(mut self, parameters: dict[str,json]) -> json:
+        found = self.target_at(parameters)
+        if found[2] is None:
+            return json_null()
+        located = self.location_json(unwrap(found[2]))
+        return unwrap(located) if located is not None else json_null()
+
+    fn candidates(mut self, name: str, current_file: str) -> list[str]:
+        # Files that could mention a name. Reading is much cheaper than analyzing.
+        result: list[str] = [current_file]
+        for file in self.docs:
+            if file != current_file and find(self.docs[file].text,name) >= 0:
+                append(result,file)
+        for file in self.files:
+            if file != current_file and file not in self.docs:
+                text = ""
+                try:
+                    text = src.read(file,16777216)
+                except err:
+                    continue
+                if find(text,name) >= 0:
+                    append(result,file)
+        return result
+
+    fn references_of(mut self, target: analysis.Target, file: str) -> list[tuple[str,lx.Token]]:
+        key = target_key(target)
+        result: list[tuple[str,lx.Token]] = []
+        files = [file] if target.kind == "local" or target.kind == "loop" else self.candidates(target.name,file)
+        for candidate in files:
+            item = self.current(candidate)
+            for index in range(len(item.tokens)):
+                token = item.tokens[index]
+                if token.kind == "Identifier" and token.text == target.name:
+                    resolved = item.resolve(index)
+                    if resolved is not None and target_key(unwrap(resolved)) == key:
+                        append(result,(candidate,token))
+            self.results[candidate] = item
+        return result
+
+    fn references(mut self, parameters: dict[str,json]) -> json:
+        found = self.target_at(parameters)
+        if found[2] is None:
+            return json([])
+        target = unwrap(found[2])
+        if target.kind in ["builtin","builtin-type","module"]:
+            return json([])
+        include = true
+        if "context" in parameters and "includeDeclaration" in json_dict(parameters["context"]):
+            include = json_bool(json_dict(parameters["context"])["includeDeclaration"])
+        output: list[json] = []
+        for item in self.references_of(target,found[0].file):
+            token = item[1]
+            if not include and token.line == target.line and token.column == target.column and item[0] == target.file:
+                continue
+            lines = split(self.document_text(item[0]),"\n")
+            append(output,json({"uri":json(self.uri_of(item[0])),"range":token_range(token,lines)}))
+        return json(output)
+
+    fn prepare_rename(mut self, parameters: dict[str,json]) -> json:
+        found = self.target_at(parameters)
+        problem = rename_refusal(found[2],self.files,self.docs)
+        if problem != "":
+            raise problem
+        return token_range(found[0].tokens[found[1]],split(self.document_text(found[0].file),"\n"))
+
+    fn rename(mut self, parameters: dict[str,json]) -> json:
+        found = self.target_at(parameters)
+        problem = rename_refusal(found[2],self.files,self.docs)
+        if problem != "":
+            raise problem
+        target = unwrap(found[2])
+        name = json_str(parameters["newName"])
+        if not valid_identifier(name):
+            raise "'"+name+"' is not a valid name"
+        files = [found[0].file] if target.kind in ["local","loop"] else self.candidates(target.name,found[0].file)
+        edits: dict[str,list[lx.Token]] = {}
+        key = target_key(target)
+        for candidate in files:
+            item = self.current(candidate)
+            if not item.semantic:
+                raise "cannot safely rename while "+path.name(candidate)+" has errors the compiler cannot get past"
+            for index in range(len(item.tokens)):
+                token = item.tokens[index]
+                if token.kind == "Identifier" and token.text == target.name:
+                    resolved = item.resolve(index)
+                    if resolved is None:
+                        # Something with this name has an unknown meaning. It might be this symbol.
+                        raise "cannot safely rename: the use of '"+target.name+"' at "+path.name(candidate)+":"+str(token.line)+" could not be resolved"
+                    if target_key(unwrap(resolved)) == key:
+                        if candidate not in edits:
+                            edits[candidate] = []
+                        append(edits[candidate],token)
+        self.verify_rename(edits,name)
+        changes: dict[str,json] = {}
+        for candidate in edits:
+            lines = split(self.document_text(candidate),"\n")
+            output: list[json] = []
+            for token in edits[candidate]:
+                append(output,json({"range":token_range(token,lines),"newText":json(name)}))
+            changes[self.uri_of(candidate)] = json(output)
+        return json({"changes":json(changes)})
+
+    fn verify_rename(mut self, edits: dict[str,list[lx.Token]], name: str):
+        # Try the edit in memory. A rename that adds a diagnostic anywhere is not safe.
+        before = 0
+        for file in edits:
+            before += len(self.current(file).diagnostics)
+        originals: dict[str,str] = {}
+        opened: dict[str,bool] = {}
+        for file in edits:
+            text = self.document_text(file)
+            originals[file] = text
+            opened[file] = file in self.docs
+            self.engine.overlays[file] = apply_renames(text,edits[file],name)
+        after = 0
+        failure = ""
+        try:
+            for file in edits:
+                problems = self.engine.analyze(file,self.engine.overlays[file]).diagnostics
+                after += len(problems)
+                if len(problems) > 0:
+                    failure = problems[0].message
+        except err:
+            failure = err.message
+            after = before+1
+        for file in originals:
+            if opened[file]:
+                self.engine.overlays[file] = originals[file]
+            else:
+                self.engine.release(file)
+        if after > before:
+            raise "renaming to '"+name+"' would cause an error: "+failure
+
+    fn document_symbols(mut self, parameters: dict[str,json]) -> json:
+        file = uri_to_path(json_str(json_dict(parameters["textDocument"])["uri"]))
+        return json(outline(self.document_text(file)))
+
+    fn workspace_symbols(mut self, parameters: dict[str,json]) -> json:
+        query = lower_text(json_str(parameters["query"]))
+        output: list[json] = []
+        files = self.files
+        for file in self.docs:
+            if file not in files:
+                files = files+[file]
+        for file in files:
+            text = self.document_text_or_empty(file)
+            if file not in self.symbols or self.symbols[file].text != text:
+                self.symbols[file] = FileSymbols(text,flat_symbols(text,self.uri_of(file)))
+            for item in self.symbols[file].symbols:
+                if subsequence(query,lower_text(json_str(json_dict(item)["name"]))):
+                    append(output,item)
+                    if len(output) >= 512:
+                        return json(output)
+        return json(output)
+
+    fn usable(mut self, file: str) -> analysis.Analysis:
+        # While the file cannot be analyzed at all, the last good analysis still knows its names.
+        result = self.current(file)
+        if not result.semantic and file in self.good:
+            return self.good[file]
+        return result
+
+    fn completion(mut self, parameters: dict[str,json]) -> json:
+        place = self.locate(parameters)
+        file = place[0]
+        lines = split(self.document_text(file),"\n")
+        text = lines[place[1]-1] if place[1] <= len(lines) else ""
+        before = text[:place[2]-1]
+        if in_string_or_comment(before):
+            return json({"isIncomplete":json(false),"items":json([])})
+        stripped = strip(before)
+        if starts_with(stripped,"import ") or (starts_with(stripped,"from ") and find(stripped," import ") < 0):
+            return completion_list(self.module_items())
+        result = self.usable(file)
+        word = trailing_word(before)
+        head = before[:len(before)-len(word)]
+        if ends_with(head,"."):
+            return completion_list(member_items(result,head[:-1],place[1],place[2]))
+        return completion_list(scope_items(result,place[1],place[2]))
+
+    fn module_items(self) -> list[json]:
+        items: list[json] = []
+        for name in self.standards:
+            append(items,completion_item(name,9,"standard module"))
+        return items
+
+    fn signature_help(mut self, parameters: dict[str,json]) -> json:
+        place = self.locate(parameters)
+        file = place[0]
+        lines = split(self.document_text(file),"\n")
+        call = enclosing_call(lines,place[1],place[2])
+        if call is None:
+            return json_null()
+        site = unwrap(call)
+        result = self.usable(file)
+        target = chain_target(result,site.callee,place[1],place[2])
+        if target is None:
+            return json_null()
+        return signature_json(result,unwrap(target),site.argument)
+
+    fn semantic_tokens(mut self, parameters: dict[str,json]) -> json:
+        file = uri_to_path(json_str(json_dict(parameters["textDocument"])["uri"]))
+        result = self.current(file)
+        lines = split(self.document_text(file),"\n")
+        data: list[json] = []
+        last_line = 0
+        last_column = 0
+        for index in range(len(result.tokens)):
+            token = result.tokens[index]
+            if token.kind != "Identifier":
+                continue
+            resolved = result.resolve(index)
+            if resolved is None:
+                continue
+            target = unwrap(resolved)
+            kind = token_type(target.kind)
+            if kind < 0:
+                continue
+            line = token.line-1
+            text = lines[line] if line < len(lines) else ""
+            column = utf16_column(text,token.column-1)
+            modifier = 1 if target.file == file and target.line == token.line and target.column == token.column else 0
+            append(data,json(line-last_line))
+            append(data,json(column-last_column if line == last_line else column))
+            append(data,json(utf16_length(token.text)))
+            append(data,json(kind))
+            append(data,json(modifier))
+            last_line = line
+            last_column = column
+        self.results[file] = result
+        return json({"data":json(data)})
+
+    # The whole document as wood fmt lays it out, as one edit. A file that does not parse gets none.
+    fn formatting(mut self, parameters: dict[str,json]) -> json:
+        file = uri_to_path(json_str(json_dict(parameters["textDocument"])["uri"]))
+        text = self.document_text(file)
+        result = formatter.format(text,file)
+        edits: list[json] = []
+        if result.problem.code == "" and result.text != text:
+            append(edits,json({"range":json(lsp_range(0,0,len(split(text,"\n")),0)),"newText":json(result.text)}))
+        return json(edits)
+
+    # ---- Dispatch -------------------------------------------------------------------------
+
+    fn request(mut self, method: str, parameters: dict[str,json]) -> json:
+        if method == "textDocument/hover":
+            return self.hover(parameters)
+        if method == "textDocument/definition":
+            return self.definition(parameters)
+        if method == "textDocument/references":
+            return self.references(parameters)
+        if method == "textDocument/documentSymbol":
+            return self.document_symbols(parameters)
+        if method == "workspace/symbol":
+            return self.workspace_symbols(parameters)
+        if method == "textDocument/completion":
+            return self.completion(parameters)
+        if method == "textDocument/signatureHelp":
+            return self.signature_help(parameters)
+        if method == "textDocument/prepareRename":
+            return self.prepare_rename(parameters)
+        if method == "textDocument/rename":
+            return self.rename(parameters)
+        if method == "textDocument/semanticTokens/full":
+            return self.semantic_tokens(parameters)
+        if method == "textDocument/formatting":
+            return self.formatting(parameters)
+        if method == "wood/flush":
+            # Finish all waiting work now. Lets a scripted client see every diagnostic.
+            while self.idle():
+                pass
+            return json_null()
+        raise "__unknown_method__"
+
+    fn notification(mut self, method: str, parameters: dict[str,json]):
+        if method == "initialized":
+            self.scan_workspace()
+        elif method == "textDocument/didOpen":
+            self.did_open(parameters)
+        elif method == "textDocument/didChange":
+            self.did_change(parameters)
+        elif method == "textDocument/didClose":
+            self.did_close(parameters)
+        elif method == "textDocument/didSave" or method == "workspace/didChangeWatchedFiles":
+            self.invalidate()
+            self.queue = self.files
+
+    fn handle(mut self, body: str):
+        message: dict[str,json] = {}
+        try:
+            message = json_dict(json_parse(body))
+        except err:
+            self.respond_error(json_null(),-32700,"parse error")
+            return
+        method = json_str(message["method"]) if "method" in message and json_kind(message["method"]) == "str" else ""
+        if "id" not in message:
+            self.handle_notification(method,message)
+            return
+        id = message["id"]
+        parameters: dict[str,json] = {}
+        if "params" in message and json_kind(message["params"]) == "dict":
+            parameters = json_dict(message["params"])
+        if method == "initialize":
+            self.respond(id,self.initialize(parameters))
+            return
+        if method == "shutdown":
+            self.shutting_down = true
+            self.respond(id,json_null())
+            return
+        if not self.initialized:
+            self.respond_error(id,-32002,"server not initialized")
+            return
+        if self.shutting_down:
+            self.respond_error(id,-32600,"server is shutting down")
+            return
+        try:
+            self.respond(id,self.request(method,parameters))
+        except err:
+            if err.message == "__unknown_method__":
+                self.respond_error(id,-32601,"method not found: "+method)
+            elif method == "textDocument/rename" or method == "textDocument/prepareRename":
+                self.respond_error(id,-32803,err.message)
+            else:
+                eprint("wood lsp: "+method+": "+err.message)
+                self.respond_error(id,-32603,err.message)
+
+    fn handle_notification(mut self, method: str, message: dict[str,json]):
+        if method == "exit":
+            self.ended = true
+            return
+        if not self.initialized:
+            return
+        parameters: dict[str,json] = {}
+        if "params" in message and json_kind(message["params"]) == "dict":
+            parameters = json_dict(message["params"])
+        try:
+            self.notification(method,parameters)
+        except err:
+            eprint("wood lsp: "+method+": "+err.message)
+
+    fn idle(mut self) -> bool:
+        # One unit of waiting work. Returns false when nothing is left.
+        for file in self.docs:
+            if file in self.unpublished:
+                remove(self.unpublished,file)
+                self.guarded_publish(file)
+                return true
+        while len(self.queue) > 0:
+            file = pop(self.queue)
+            if file not in self.docs:
+                self.guarded_publish(file)
+                # A background result is not worth keeping in memory until it is asked for.
+                if file in self.results:
+                    remove(self.results,file)
+                return true
+        return false
+
+    fn guarded_publish(mut self, file: str):
+        try:
+            self.publish(file)
+        except err:
+            if file in self.dirty:
+                remove(self.dirty,file)
+            eprint("wood lsp: "+file+": "+err.message+" ("+err.file+":"+str(err.line)+")")
+
+    fn run(mut self):
+        while not self.ended:
+            waiting = len(self.unpublished) > 0 or len(self.queue) > 0
+            if waiting and find(self.buffer,"\r\n\r\n") < 0:
+                # Wait out a burst of typing, then work one file at a time.
+                if wood_driver_stdin_ready(120 if len(self.unpublished) > 0 else 0) == 0:
+                    self.idle()
+                    continue
+            body = self.read_message()
+            if body is None:
+                return
+            self.handle(unwrap(body))
+
+# ---- Text and position helpers ---------------------------------------------------------------
+
+fn lower_text(text: str) -> str:
+    pieces: list[str] = []
+    for byte in text:
+        code = byte_value(byte)
+        append(pieces,byte_string(code+32) if code >= 65 and code <= 90 else byte)
+    return join(pieces,"")
+
+fn ascii_only(text: str) -> bool:
+    for byte in text:
+        if byte_value(byte) >= 128:
+            return false
+    return true
+
+fn sequence_width(code: int) -> int:
+    if code < 128:
+        return 1
+    if code < 224:
+        return 2
+    return 3 if code < 240 else 4
+
+fn byte_column(text: str, character: int) -> int:
+    # An LSP UTF-16 offset as a byte offset. Past the end means the end of the line.
+    if ascii_only(text):
+        return character if character < len(text) else len(text)
+    offset = 0
+    units = 0
+    while offset < len(text) and units < character:
+        width = sequence_width(byte_value(text[offset]))
+        units += 2 if width == 4 else 1
+        offset += width
+    return offset if offset < len(text) else len(text)
+
+fn utf16_column(text: str, offset: int) -> int:
+    limit = offset if offset < len(text) else len(text)
+    if ascii_only(text):
+        return limit
+    position = 0
+    units = 0
+    while position < limit:
+        width = sequence_width(byte_value(text[position]))
+        units += 2 if width == 4 else 1
+        position += width
+    return units
+
+fn utf16_length(text: str) -> int:
+    return utf16_column(text,len(text))
+
+fn apply_change(text: str, range_value: dict[str,json], replacement: str) -> str:
+    lines = split(text,"\n")
+    start = offset_of(lines,json_dict(range_value["start"]))
+    stop = offset_of(lines,json_dict(range_value["end"]))
+    return text[:start]+replacement+text[stop:]
+
+fn offset_of(lines: list[str], place: dict[str,json]) -> int:
+    line = json_int(place["line"])
+    offset = 0
+    for index in range(line if line < len(lines) else len(lines)):
+        offset += len(lines[index])+1
+    if line >= len(lines):
+        return offset-1 if offset > 0 else 0
+    return offset+byte_column(lines[line],json_int(place["character"]))
+
+fn lsp_position(line: int, character: int) -> json:
+    return json({"line":json(line),"character":json(character)})
+
+fn lsp_range(line: int, start: int, stop_line: int, stop: int) -> json:
+    return json({"start":lsp_position(line,start),"end":lsp_position(stop_line,stop)})
+
+fn token_range(token: lx.Token, lines: list[str]) -> json:
+    line = token.line-1
+    text = lines[line] if line >= 0 and line < len(lines) else ""
+    start = utf16_column(text,token.column-1)
+    return lsp_range(line,start,line,start+utf16_length(token.text))
+
+fn diagnostic_json(item: src.Diagnostic, result: analysis.Analysis, lines: list[str]) -> json:
+    range_value = lsp_range(0,0,0,1)
+    if item.line >= 1:
+        line = item.line-1
+        text = lines[line] if line < len(lines) else ""
+        start = item.column-1 if item.column >= 1 else 0
+        width = len(recovery.word_at(text,start)) if start < len(text) else 0
+        if width == 0:
+            width = 1
+        first = utf16_column(text,start)
+        range_value = lsp_range(line,first,line,utf16_column(text,start+width) if start+width <= len(text) else first+1)
+    return json({"range":range_value,"severity":json(1),"code":json(item.code),"source":json("wood"),"message":json(item.message)})
+
+fn hex_value(byte: str) -> int:
+    code = byte_value(byte)
+    if code >= 48 and code <= 57:
+        return code-48
+    if code >= 97 and code <= 102:
+        return code-87
+    if code >= 65 and code <= 70:
+        return code-55
+    return -1
+
+fn percent_decode(text: str) -> str:
+    pieces: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "%" and index+2 < len(text)+0 and hex_value(text[index+1]) >= 0 and hex_value(text[index+2]) >= 0:
+            append(pieces,byte_string(hex_value(text[index+1])*16+hex_value(text[index+2])))
+            index += 3
+        else:
+            append(pieces,text[index])
+            index += 1
+    return join(pieces,"")
+
+fn canonical(file: str) -> str:
+    try:
+        return path.resolve(file)
+    except err:
+        return path.absolute(file)
+
+fn uri_to_path(uri: str) -> str:
+    if not starts_with(uri,"file://"):
+        return ""
+    decoded = percent_decode(uri[7:])
+    if len(decoded) >= 3 and decoded[0] == "/" and decoded[2] == ":":
+        decoded = decoded[1:]
+    return canonical(decoded)
+
+fn path_to_uri(file: str) -> str:
+    hex = "0123456789ABCDEF"
+    pieces: list[str] = []
+    for byte in replace(file,"\\","/"):
+        code = byte_value(byte)
+        if (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or byte in ["/","-","_",".","~",":"]:
+            append(pieces,byte)
+        else:
+            append(pieces,"%"+hex[code//16]+hex[code%16])
+    text = join(pieces,"")
+    return "file://"+text if starts_with(text,"/") else "file:///"+text
+
+fn ignored_directory(name: str) -> bool:
+    return starts_with(name,".") or starts_with(name,"build") or name in ["node_modules","dist","install","out","vendor"]
+
+fn subsequence(needle: str, text: str) -> bool:
+    position = 0
+    for byte in text:
+        if position < len(needle) and needle[position] == byte:
+            position += 1
+    return position == len(needle)
+
+fn valid_identifier(name: str) -> bool:
+    if name == "" or name in keyword_names():
+        return false
+    first = byte_value(name[0])
+    if first >= 48 and first <= 57:
+        return false
+    return recovery.word_at(name,0) == name
+
+fn keyword_names() -> list[str]:
+    return ["import","from","as","try","except","finally","raise","fn","if","elif","else","while","for","in","return","break","continue","pass","record","with","and","or","not","True","False","None","extern","mut"]
+
+fn token_types() -> list[str]:
+    return ["namespace","type","function","method","parameter","variable","property"]
+
+fn token_type(kind: str) -> int:
+    names = {"module":0,"record":1,"builtin-type":1,"function":2,"builtin":2,"method":3,"parameter":4,"local":5,"loop":5,"field":6}
+    return names[kind] if kind in names else -1
+
+fn target_key(target: analysis.Target) -> str:
+    return target.file+":"+str(target.line)+":"+str(target.column)
+
+fn rename_refusal(found: analysis.Target | None, files: list[str], docs: dict[str,Doc]) -> str:
+    if found is None:
+        return "there is no symbol here that can be renamed"
+    target = unwrap(found)
+    if target.kind in ["builtin","builtin-type","module"]:
+        return "'"+target.name+"' is built in or a module, and cannot be renamed"
+    if target.file == "" or starts_with(target.file,"<"):
+        return "'"+target.name+"' is part of the standard library"
+    if target.file not in files and target.file not in docs:
+        return "'"+target.name+"' is defined outside this workspace"
+    if "vendor" in split(replace(target.file,"\\","/"),"/"):
+        return "'"+target.name+"' belongs to an installed package"
+    return ""
+
+fn apply_renames(text: str, tokens: list[lx.Token], name: str) -> str:
+    lines = split(text,"\n")
+    changes: dict[int,list[int]] = {}
+    width = 0
+    for token in tokens:
+        width = len(token.text)
+        if token.line not in changes:
+            changes[token.line] = []
+        append(changes[token.line],token.column)
+    for line in changes:
+        # Later columns first, so earlier edits do not move them.
+        columns = sorted_descending(changes[line])
+        current_text = lines[line-1]
+        for column in columns:
+            current_text = current_text[:column-1]+name+current_text[column-1+width:]
+        lines[line-1] = current_text
+    return join(lines,"\n")
+
+fn sorted_descending(values: list[int]) -> list[int]:
+    result = values
+    for index in range(1,len(result)):
+        item = result[index]
+        position = index-1
+        while position >= 0 and result[position] < item:
+            result[position+1] = result[position]
+            position -= 1
+        result[position+1] = item
+    return result
+
+fn comment_text(line: str) -> str:
+    text = strip(line)
+    return strip(text[1:])
+
+fn doc_comment(result: analysis.Analysis, target: analysis.Target) -> str:
+    # Comments directly above a declaration, or the first lines of its body.
+    if target.line < 1 or target.kind not in ["function","method","record"]:
+        return ""
+    module = result.module_of(target.file)
+    if module < 0:
+        return ""
+    lines = split(result.compilation.modules[module].source,"\n")
+    collected: list[str] = []
+    position = target.line-2
+    while position >= 0 and starts_with(strip(lines[position]),"#"):
+        collected = [comment_text(lines[position])]+collected
+        position -= 1
+    if len(collected) == 0:
+        position = target.line
+        while position < len(lines) and starts_with(strip(lines[position]),"#"):
+            append(collected,comment_text(lines[position]))
+            position += 1
+    return join(collected," ")
+
+# ---- Symbols ---------------------------------------------------------------------------------
+
+fn symbol_range(lines: list[str], line: int) -> json:
+    stop = line
+    if line < len(lines):
+        following = recovery.next_code_line(lines,line-1)
+        if following < len(lines) and recovery.indent_of(lines[following]) > recovery.indent_of(lines[line-1]):
+            stop = analysis.scope_end(lines,following+1)
+    text = lines[stop-1] if stop >= 1 and stop <= len(lines) else ""
+    return lsp_range(line-1,0,stop-1,utf16_length(text))
+
+fn name_range(lines: list[str], token: lx.Token, name: str) -> json:
+    column = analysis.name_column(lines,token.line,token.column+len(token.text),name)
+    text = lines[token.line-1] if token.line >= 1 and token.line <= len(lines) else ""
+    first = utf16_column(text,column-1)
+    return lsp_range(token.line-1,first,token.line-1,first+utf16_length(name))
+
+fn symbol_json(name: str, kind: int, full: json, selection: json, children: list[json], detail: str = "") -> json:
+    data: dict[str,json] = {"name":json(name),"kind":json(kind),"range":full,"selectionRange":selection}
+    if detail != "":
+        data["detail"] = json(detail)
+    if len(children) > 0:
+        data["children"] = json(children)
+    return json(data)
+
+fn outline(text: str) -> list[json]:
+    recovered = recovery.recover(text)
+    lines = split(recovered.text,"\n")
+    tree = recovered.tree
+    output: list[json] = []
+    seen: dict[str,bool] = {}
+    for statement in tree.roots:
+        stmt = tree.statements[statement]
+        if stmt.kind == "Function":
+            append(output,symbol_json(stmt.name,12,symbol_range(lines,stmt.token.line),name_range(lines,stmt.token,stmt.name),[]))
+        elif stmt.kind == "Record":
+            children: list[json] = []
+            for parameter in stmt.parameters:
+                place = lsp_range(parameter.token.line-1,parameter.token.column-1,parameter.token.line-1,parameter.token.column-1+len(parameter.name))
+                append(children,symbol_json(parameter.name,8,place,place,[]))
+            for item in stmt.body:
+                inner = tree.statements[item]
+                if inner.kind == "Function":
+                    append(children,symbol_json(inner.name,6,symbol_range(lines,inner.token.line),name_range(lines,inner.token,inner.name),[]))
+            append(output,symbol_json(stmt.name,23,symbol_range(lines,stmt.token.line),name_range(lines,stmt.token,stmt.name),children))
+        elif stmt.kind == "Assign" and stmt.relative == 0 and stmt.name not in seen:
+            seen[stmt.name] = true
+            place = name_range(lines,lx.Token("","",0,stmt.token.line,stmt.token.column),stmt.name)
+            append(output,symbol_json(stmt.name,13,place,place,[]))
+    return output
+
+fn flat_symbols(text: str, uri: str) -> list[json]:
+    recovered = recovery.recover(text)
+    lines = split(recovered.text,"\n")
+    tree = recovered.tree
+    output: list[json] = []
+    for statement in tree.roots:
+        stmt = tree.statements[statement]
+        if stmt.kind in ["Function","Record"]:
+            location = json({"uri":json(uri),"range":name_range(lines,stmt.token,stmt.name)})
+            append(output,json({"name":json(stmt.name),"kind":json(12 if stmt.kind == "Function" else 23),"location":location}))
+            if stmt.kind == "Record":
+                for item in stmt.body:
+                    inner = tree.statements[item]
+                    if inner.kind == "Function":
+                        place = json({"uri":json(uri),"range":name_range(lines,inner.token,inner.name)})
+                        append(output,json({"name":json(inner.name),"kind":json(6),"location":place,"containerName":json(stmt.name)}))
+    return output
+
+# ---- Completion and signatures ----------------------------------------------------------------
+
+fn in_string_or_comment(before: str) -> bool:
+    quote = ""
+    index = 0
+    while index < len(before):
+        byte = before[index]
+        if quote != "":
+            if byte == "\\":
+                index += 1
+            elif byte == quote:
+                quote = ""
+        elif byte == "\"" or byte == "'":
+            quote = byte
+        elif byte == "#":
+            return true
+        index += 1
+    return quote != ""
+
+fn trailing_word(before: str) -> str:
+    position = len(before)
+    while position > 0 and analysis.word_byte(before[position-1]):
+        position -= 1
+    return before[position:]
+
+fn completion_item(label: str, kind: int, detail: str) -> json:
+    data: dict[str,json] = {"label":json(label),"kind":json(kind)}
+    if detail != "":
+        data["detail"] = json(detail)
+    return json(data)
+
+fn completion_list(items: list[json]) -> json:
+    return json({"isIncomplete":json(false),"items":json(items)})
+
+fn split_chain(text: str) -> list[str]:
+    # "a.b(1, 2).c[0]" as ["a", "b(1, 2)", "c[0]"], taking only the expression at the end of text.
+    position = len(text)
+    depth = 0
+    while position > 0:
+        byte = text[position-1]
+        if byte in [")","]"]:
+            depth += 1
+        elif byte in ["(","["]:
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and not (analysis.word_byte(byte) or byte == "."):
+            break
+        position -= 1
+    expression = text[position:]
+    pieces: list[str] = []
+    current_piece = ""
+    depth = 0
+    for byte in expression:
+        if byte in ["(","["]:
+            depth += 1
+        elif byte in [")","]"]:
+            depth -= 1
+        if byte == "." and depth == 0:
+            append(pieces,current_piece)
+            current_piece = ""
+        else:
+            current_piece += byte
+    append(pieces,current_piece)
+    return pieces
+
+fn piece_name(piece: str) -> str:
+    return recovery.word_at(piece,0)
+
+fn chain_value(result: analysis.Analysis, pieces: list[str], line: int, column: int) -> int:
+    # The type of a textual chain on a line the parser could not use.
+    if len(pieces) == 0 or piece_name(pieces[0]) == "":
+        return 0
+    copy = result
+    first = pieces[0]
+    name = piece_name(first)
+    value = 0
+    local = copy.find_local(name,line,column)
+    env = copy.bindings.environments[copy.compilation.entry]
+    start = 1
+    if local is not None:
+        value = unwrap(local).type
+    elif name in env.names:
+        target = copy.declaration_target(env.names[name]-1)
+        value = target.type if ends_with(first,")") else 0
+    else:
+        # A dotted path through a namespace, such as fs.open(...).
+        path_text = name
+        start = 0
+        for index in range(1,len(pieces)):
+            path_text += "."+piece_name(pieces[index])
+            if path_text in env.names:
+                target = copy.declaration_target(env.names[path_text]-1)
+                value = target.type if ends_with(pieces[index],")") else 0
+                start = index+1
+                break
+        if start == 0:
+            return 0
+    if local is not None and (ends_with(first,"]") or ends_with(first,")")):
+        value = element_of(copy,value,first)
+    for index in range(start,len(pieces)):
+        member = copy.member_target(value,piece_name(pieces[index]))
+        if member is None:
+            return 0
+        target = unwrap(member)
+        value = target.type
+        if ends_with(pieces[index],"]"):
+            value = element_of(copy,value,pieces[index])
+    return value
+
+fn element_of(result: analysis.Analysis, value: int, piece: str) -> int:
+    if value <= 0 or value >= len(result.pool.types) or not ends_with(piece,"]"):
+        return value
+    node = result.pool.types[value]
+    return node.element if node.kind in ["List","Array","Dict"] else 0
+
+fn member_items(result: analysis.Analysis, head: str, line: int, column: int) -> list[json]:
+    items: list[json] = []
+    if not result.semantic:
+        return items
+    pieces = split_chain(head)
+    copy = result
+    env = copy.bindings.environments[copy.compilation.entry]
+    dotted = join(pieces,".")
+    prefix = dotted+"."
+    if copy.find_local(piece_name(pieces[0]),line,column) is None:
+        seen: dict[str,bool] = {}
+        for name in env.names:
+            if starts_with(name,prefix):
+                rest = name[len(prefix):]
+                first = split(rest,".")[0]
+                if first not in seen:
+                    seen[first] = true
+                    if first == rest:
+                        target = copy.declaration_target(env.names[name]-1)
+                        append(items,completion_item(first,7 if target.kind == "record" else 3,target.detail))
+                    else:
+                        append(items,completion_item(first,9,"module"))
+        if len(items) > 0:
+            return items
+    for target in copy.record_members(chain_value(copy,pieces,line,column)):
+        append(items,completion_item(target.name,2 if target.kind == "method" else 5,target.detail))
+    return items
+
+fn scope_items(result: analysis.Analysis, line: int, column: int) -> list[json]:
+    items: list[json] = []
+    seen: dict[str,bool] = {}
+    if result.semantic:
+        copy = result
+        for item in copy.locals:
+            if item.name not in seen and copy.find_local(item.name,line,column) is not None:
+                seen[item.name] = true
+                shown = item.text if item.text != "" else copy.display(item.type)
+                append(items,completion_item(item.name,6,shown))
+        env = copy.bindings.environments[copy.compilation.entry]
+        for name in env.names:
+            if "." not in name and name not in seen:
+                seen[name] = true
+                target = copy.declaration_target(env.names[name]-1)
+                append(items,completion_item(name,7 if target.kind == "record" else 3,target.detail))
+        for name in env.namespaces:
+            if name not in seen:
+                seen[name] = true
+                append(items,completion_item(name,9,"module"))
+        for name in copy.known:
+            if name not in seen:
+                seen[name] = true
+                append(items,completion_item(name,3,analysis.builtin_signature(name)))
+    for name in keyword_names():
+        if name not in seen:
+            seen[name] = true
+            append(items,completion_item(name,14,""))
+    return items
+
+record CallSite:
+    callee: str
+    argument: int
+
+fn enclosing_call(lines: list[str], line: int, column: int) -> CallSite | None:
+    # Walks back to the unmatched parenthesis, up to 32 lines, skipping strings and comments.
+    depth = 0
+    commas = 0
+    number = line
+    floor = line-32
+    while number >= 1 and number > floor:
+        if number > len(lines):
+            number -= 1
+            continue
+        text = lines[number-1]
+        if number == line:
+            text = text[:column-1]
+        if in_string_or_comment(text):
+            text = code_part(text)
+        for position in range(len(text)-1,-1,-1):
+            byte = text[position]
+            if byte in [")","]","}"]:
+                depth += 1
+            elif byte in ["[","{"]:
+                if depth == 0:
+                    return None
+                depth -= 1
+            elif byte == "(":
+                if depth == 0:
+                    callee = text[:position]
+                    if callee == "" or not analysis.word_byte(callee[len(callee)-1]):
+                        return None
+                    return CallSite(callee,commas)
+                depth -= 1
+            elif byte == "," and depth == 0:
+                commas += 1
+        number -= 1
+    return None
+
+fn code_part(text: str) -> str:
+    # The line with string contents removed and any comment dropped, keeping brackets honest.
+    pieces: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        byte = text[index]
+        if quote != "":
+            if byte == "\\":
+                index += 1
+            elif byte == quote:
+                quote = ""
+        elif byte == "\"" or byte == "'":
+            quote = byte
+        elif byte == "#":
+            break
+        else:
+            append(pieces,byte)
+        index += 1
+    return join(pieces,"")
+
+fn chain_target(result: analysis.Analysis, text: str, line: int, column: int) -> analysis.Target | None:
+    if not result.semantic:
+        return None
+    pieces = split_chain(text)
+    copy = result
+    env = copy.bindings.environments[copy.compilation.entry]
+    name = piece_name(pieces[len(pieces)-1])
+    if len(pieces) == 1:
+        local = copy.find_local(name,line,column)
+        if local is None:
+            if name in env.names:
+                return copy.declaration_target(env.names[name]-1)
+            if name in copy.known:
+                return analysis.Target("builtin",name,"",0,0,0,analysis.builtin_signature(name),-1)
+        return None
+    dotted = join([piece_name(piece) for piece in pieces],".")
+    if copy.find_local(piece_name(pieces[0]),line,column) is None and dotted in env.names:
+        return copy.declaration_target(env.names[dotted]-1)
+    return copy.member_target(chain_value(copy,pieces[:-1],line,column),name)
+
+fn signature_json(result: analysis.Analysis, target: analysis.Target, argument: int) -> json:
+    label = target.detail
+    parameters: list[json] = []
+    if target.declaration >= 0:
+        copy = result
+        declaration = copy.declarations[target.declaration]
+        stmt = copy.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if stmt.kind == "Record":
+            for parameter in declaration.parameters:
+                append(parameters,json({"label":json(parameter.name+": "+copy.display(parameter.type))}))
+        else:
+            for text in copy.parameters_text(declaration,stmt,stmt.method):
+                append(parameters,json({"label":json(text)}))
+    else:
+        opening = find(label,"(")
+        closing = find(label,")")
+        if opening >= 0 and closing > opening+1:
+            for text in split(label[opening+1:closing],", "):
+                append(parameters,json({"label":json(text)}))
+    active = argument if argument < len(parameters) else (len(parameters)-1 if len(parameters) > 0 else 0)
+    signature = json({"label":json(label),"parameters":json(parameters)})
+    return json({"signatures":json([signature]),"activeSignature":json(0),"activeParameter":json(active)})
+
+fn usage_text() -> str:
+    return "Usage: wood lsp [--stdio]\n\nStarts the wood language server, speaking the Language Server Protocol on standard\ninput and output. Editors start it for you. See docs/editors.md."
+
+fn serve(arguments: list[str], standards: dict[str,str]) -> int:
+    for argument in arguments:
+        if argument == "--help":
+            print(usage_text())
+            return 0
+        if argument != "--stdio":
+            raise "unknown option '"+argument+"'. "+usage_text()
+    engine = analysis.Engine(standards,{},{})
+    server = Server(engine,standards,{},{},{},{},{},"",false,false,false,[],[],[],{},{},0)
+    server.run()
+    return 0 if server.shutting_down else 1

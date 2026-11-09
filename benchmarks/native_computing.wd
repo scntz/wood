@@ -1,0 +1,69 @@
+import std.num as num
+import std.linalg as la
+import std.time as time
+extern fn bench_reset()
+extern fn bench_stop() -> int
+extern fn bench_bytes() -> int
+extern fn bench_peak() -> int
+extern fn bench_rss() -> int
+record Metrics:
+    checksum: float
+    elapsed_ns: int
+    allocations: int
+    allocated_bytes: int
+    peak_bytes: int
+    process_peak_bytes: int
+fn blend(left: array[float], right: array[float]):
+    weighted = left * 1.5
+    return weighted + right * 0.25
+fn weighted_mean(left: array[float], right: array[float]):
+    weighted = left * 1.5 + right * 0.5
+    return weighted / 2.0
+fn calculate(mode: str, left: array[float], right: array[float], matrix: array[float], rounds: int):
+    result = 0.0
+    for round in range(rounds):
+        if mode == "blend":
+            result += num.sum(blend(left,right))
+        elif mode == "owned":
+            result += num.sum(weighted_mean(left,right))
+        elif mode == "affine":
+            result += num.sum(la.transform_points(left,matrix))
+        else:
+            result += num.sum(num.matmul(left,right))
+    return result
+arguments = args()
+mode = arguments[0]
+count = int(arguments[1])
+rounds = int(arguments[2])
+if count < 4 or count > 1000000 or rounds < 1 or rounds > 100:
+    raise "invalid benchmark bounds"
+if mode != "blend" and mode != "owned" and mode != "affine" and mode != "matmul":
+    raise "invalid numerical workload"
+if mode == "matmul" and count > 384:
+    raise "matrix benchmark size exceeds 384"
+left = num.zeros(count)
+right = num.zeros(count)
+matrix = num.reshape(num.from_list([1.25,0.25,0.5,1.0,-0.5,0.75,0.25,2.0,0.125,0.5,1.5,-3.0,0.0,0.0,0.0,1.0]),(4,4))
+if mode == "blend" or mode == "owned":
+    for index in range(count):
+        left[index] = float(index % 1024) * 0.125
+        right[index] = float(index % 17) * 0.25
+elif mode == "affine":
+    left = num.zeros((count,3))
+    for index in range(count):
+        left[index,0] = float(index % 31) * 0.125
+        left[index,1] = float(index % 17) * 0.25
+        left[index,2] = float(index % 7) * 0.5
+else:
+    left = num.zeros((count,count))
+    right = num.zeros((count,count))
+    for row in range(count):
+        for column in range(count):
+            left[row,column] = float((row+column)%13) * 0.125
+            right[row,column] = float((row*3+column)%11) * 0.25
+bench_reset()
+started = time.perf_counter_ns()
+checksum = calculate(mode,left,right,matrix,rounds)
+elapsed = time.perf_counter_ns() - started
+allocations = bench_stop()
+print(json_dump(Metrics(checksum,elapsed,allocations,bench_bytes(),bench_peak(),bench_rss())))

@@ -1,0 +1,1 @@
+{"format":1,"name":"northstar_measurements","version":"1.0.0","source":"src","entry":"measurements.wd","tests":"tests","dependencies":{"units":{"path":"vendor/northstar_units","version":"1.0.0"}}}

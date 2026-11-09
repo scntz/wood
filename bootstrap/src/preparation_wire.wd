@@ -1,0 +1,55 @@
+import semantic_preparation as prep
+import preparation_frontend as frontend
+import signature_wire as signatures
+import semantic_queries as queries
+import expressions as expr
+import module_wire as mw
+
+record Default:
+    module: int
+    declaration: int
+    parameter: int
+    actual_type: str
+    events: list[queries.Event]
+
+record Function:
+    statement: int
+    exits: int
+    return_check_deferred: bool
+
+record Module:
+    statements: list[int]
+    functions: list[Function]
+    script: int
+
+record Reply:
+    format: int
+    stage: str
+    bodies_checked: bool
+    lock_verified: bool
+    default_scope: str
+    diagnostic: mw.Diagnostic
+    signatures: signatures.Reply
+    defaults: list[Default]
+    flows: list[Module]
+    deferred_defaults: int
+
+fn summarize(result: prep.Result) -> Reply:
+    signed = signatures.summarize(result.signatures)
+    defaults: list[Default] = []
+    flows: list[Module] = []
+    for item in result.defaults:
+        unit = result.signatures.compilation.modules[item.module]
+        checker = expr.checker(unit.tree,result.signatures.pool)
+        checker.types = result.expression_types[item.module]
+        checker.symbols = result.expression_symbols[item.module]
+        append(defaults,Default(item.module,item.declaration,item.parameter,checker.pool.display(item.type),queries.project_events(checker,item.expression)))
+    for module in result.flows:
+        functions: list[Function] = []
+        for item in module.functions:
+            append(functions,Function(item.statement,item.exits,item.return_check_deferred))
+        append(flows,Module(module.statements,functions,module.script))
+    return Reply(1,"semantic-preparation",false,false,"eager-unspecialized",signed.diagnostic,signed,defaults,flows,result.deferred_defaults)
+
+fn inspect(input: str, standards: dict[str,str]) -> Reply:
+    return summarize(frontend.load(input,standards))

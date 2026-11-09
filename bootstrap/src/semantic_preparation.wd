@@ -1,0 +1,88 @@
+# Complete eager literal-default checking for unspecialized declarations plus
+# structural control flow. Success deliberately does NOT mean body type safety.
+import expressions as expr
+import control_flow as flow
+import signatures as sig
+import sources as src
+
+record Default:
+    module: int
+    declaration: int
+    parameter: int
+    expression: int
+    type: int
+
+record Result:
+    signatures: sig.Result
+    expression_types: list[list[int]]
+    expression_symbols: list[list[int]]
+    defaults: list[Default]
+    flows: list[flow.Result]
+    deferred_defaults: int
+    diagnostic: src.Diagnostic
+
+fn rejected(diagnostic: src.Diagnostic) -> Result:
+    return Result(sig.rejected(diagnostic),[],[],[],[],0,diagnostic)
+
+fn check(input: sig.Result, visit_limit: int = 1048576) -> Result:
+    if input.diagnostic.code != "":
+        return rejected(input.diagnostic)
+    if visit_limit < 1 or visit_limit > 1048576:
+        return rejected(src.Diagnostic("B3301","invalid semantic visit budget","",0,0,0,0))
+    types: list[list[int]] = []
+    symbols: list[list[int]] = []
+    defaults: list[Default] = []
+    deferred = 0
+    visits = 0
+    for module in range(len(input.compilation.modules)):
+        unit = input.compilation.modules[module]
+        checker = expr.checker(unit.tree,input.pool,declarations=input.declarations,file=unit.file,source=module,limit=visit_limit)
+        checker.visits = visits
+        current_declaration = -1
+        try:
+            for index in range(len(input.declarations)):
+                declaration = input.declarations[index]
+                if declaration.module != module:
+                    continue
+                current_declaration = index
+                stmt = unit.tree.statements[declaration.statement]
+                if stmt.kind != "Function":
+                    continue
+                generic = len(stmt.type_parameters) > 0
+                if declaration.parent >= 0:
+                    parent = input.declarations[declaration.parent]
+                    generic = generic or len(unit.tree.statements[parent.statement].type_parameters) > 0
+                for parameter in range(len(declaration.parameters)):
+                    item = declaration.parameters[parameter]
+                    if item.default_value < 0:
+                        continue
+                    if generic:
+                        deferred += 1
+                        continue
+                    actual = checker.expression(item.default_value,item.type)
+                    checker.require(actual,item.type,unit.tree.expressions[item.default_value].token)
+                    append(defaults,Default(module,index,parameter,item.default_value,actual))
+            input.compilation.modules[module].tree = checker.tree
+            input.pool = checker.pool
+            visits = checker.visits
+            append(types,checker.types)
+            append(symbols,checker.symbols)
+        except err:
+            if checker.problem is not None:
+                problem = unwrap(checker.problem)
+                if current_declaration >= 0 and input.declarations[current_declaration].parent >= 0:
+                    declaration = input.declarations[current_declaration]
+                    parent = input.declarations[declaration.parent]
+                    problem.message += "\n  while checking method "+unit.tree.statements[parent.statement].name+"."+unit.tree.statements[declaration.statement].name
+                return rejected(problem)
+            if err.code == "R4010" and err.message == "bootstrap semantic type budget exceeded":
+                return rejected(src.located("B3202",err.message,unit.file,module,checker.current))
+            raise err
+    flows: list[flow.Result] = []
+    for module in range(len(input.compilation.modules)):
+        unit = input.compilation.modules[module]
+        checked = flow.check(unit.tree,unit.file,module,visit_limit)
+        if checked.diagnostic.code != "":
+            return rejected(checked.diagnostic)
+        append(flows,checked)
+    return Result(input,types,symbols,defaults,flows,deferred,src.success())

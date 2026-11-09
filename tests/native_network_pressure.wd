@@ -1,0 +1,19 @@
+import std.net as net
+import std.io as io
+
+# The independent peer advertises a bounded receive buffer and never reads.
+# This tests logical write deadlines, not execution speed. Payload allocation
+# stays at 1 MiB; total attempted bytes are bounded even on unusual host stacks.
+assert(len(args()) == 1)
+with net.connect("127.0.0.1", int(args()[0]), 10000) as connection:
+    net.set_timeout(connection, 10)
+    block = "x" * 1048576
+    interrupted = false
+    try:
+        for attempt in range(64):
+            io.write(connection, block)
+    except err:
+        assert(err.code == "R4018")
+        interrupted = true
+    assert(interrupted, "peer did not create write backpressure within the test budget")
+print("native write deadline passed")

@@ -1,0 +1,28 @@
+import std.num as num
+fn magnitude(value:float) -> float:
+    return -value if value < 0.0 else value
+assert(str(num.sin(-0.0)) == "-0.0")
+assert(num.cos(-0.0) == 1.0)
+cases = json_list(json_parse(read_text(args()[0])))
+assert(len(cases) == 7278)
+for entry in cases:
+    vector = json_list(entry)
+    value = json_float(vector[0])
+    sine = num.sin(value)
+    cosine = num.cos(value)
+    assert(magnitude(sine-json_float(vector[1])) <= 2.0*json_float(vector[3]))
+    assert(magnitude(cosine-json_float(vector[2])) <= 2.0*json_float(vector[4]))
+    assert(magnitude(sine*sine+cosine*cosine-1.0) <= 0.000000000000001)
+infinity = 1.0e308*1.0e308
+for value in [infinity,-infinity,infinity-infinity]:
+    for cosine in [false,true]:
+        try:
+            if cosine:
+                num.cos(value)
+            else:
+                num.sin(value)
+            assert(false)
+        except err:
+            assert(err.code == "R4027")
+            assert(err.message == ("cos requires a finite value" if cosine else "sin requires a finite value"))
+print("native full-range math passed",len(cases))

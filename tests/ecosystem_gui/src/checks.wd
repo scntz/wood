@@ -1,0 +1,102 @@
+import gui.widgets as gui
+import std.task as task
+
+fn post_work(payload: json) -> json:
+    token = json_int(payload)
+    assert(gui.post(token, 42, "worker\0🌳"))
+    caught = false
+    try:
+        gui.Window(token).set_text(2, "wrong thread")
+    except err:
+        caught = err.code == "R4010" and find(err.message, "owning thread") >= 0
+    assert(caught)
+    return json(true)
+
+fn controls(token: int) -> int:
+    window = gui.Window(token)
+    assert(window.context() == "context\0🌳")
+    window.label(1, "Native label", 16, 16, 300)
+    window.entry(2, "hé🌳", 16, 48, 300)
+    window.button(3, "Native button", 16, 88, 300)
+    window.textarea(4, "first\r\nsecond", 16, 128, 300, 100)
+    large = "a" * 65536
+    window.textarea(5, large, 16, 240, 300, 48, true)
+    assert(window.text(5) == large)
+    assert(window.text(2) == "hé🌳")
+    assert(window.text(4) == "first\r\nsecond")
+    window.set_text(2, "updated 🌳")
+    assert(window.text(2) == "updated 🌳")
+    # Failed nested lifecycles must preserve the active owner's controls.
+    caught = false
+    try:
+        gui.run("Nested", 320, 200, "", empty)
+    except err:
+        caught = err.code == "R4010" and find(err.message, "one GUI lifecycle") >= 0
+    assert(caught and window.text(2) == "updated 🌳")
+    column = gui.Column(16, 240, 100, 8)
+    before = column.y
+    caught = false
+    try:
+        column.label(window, 1, "Duplicate must not advance layout")
+    except err:
+        caught = err.code == "R4010"
+    assert(caught and column.y == before)
+    for text in ["bad\0text", byte_string(192)+byte_string(175)]:
+        caught = false
+        try:
+            window.set_text(2, text)
+        except err:
+            caught = err.code == "R4010"
+        assert(caught and window.text(2) == "updated 🌳")
+    caught = false
+    try:
+        window.label(1, "duplicate", 1, 1, 50)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+    with task.spawn(post_work, json(token)) as work:
+        assert(json_bool(task.wait(work, 10000)))
+        found = false
+        for i in range(16):
+            event = window.wait()
+            if event.kind == "message" and event.control == 42:
+                assert(event.payload == "worker\0🌳")
+                saved = event.payload
+                assert(gui.post(token, 43, "next"))
+                next = window.wait()
+                assert(saved == "worker\0🌳")
+                found = true
+                break
+        assert(found)
+    # Backpressure is explicit; a full posted queue must not corrupt the GUI.
+    posted = 0
+    caught = false
+    for i in range(1100):
+        try:
+            gui.post(token, 100, "bounded")
+            posted += 1
+        except err:
+            caught = err.code == "R4010"
+            break
+    assert(caught and posted > 0 and posted <= 1024)
+    received = 0
+    while received < posted:
+        event = window.wait()
+        if event.kind == "message" and event.control == 100:
+            received += 1
+    assert(window.text(2) == "updated 🌳")
+    return token
+
+fn fail(token: int) -> int:
+    window = gui.Window(token)
+    window.label(1, "Failure cleanup", 8, 8, 200)
+    raise "expected GUI callback failure"
+
+fn empty(token: int) -> int:
+    return token
+
+fn deferred_exit(token: int) -> int:
+    gui.Window(token).label(1, "Exit cleanup", 8, 8, 200)
+    if token > 0:
+        exit(23)
+    return 0

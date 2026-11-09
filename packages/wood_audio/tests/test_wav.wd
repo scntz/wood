@@ -1,0 +1,20 @@
+import buffer as audio
+import wav as wav
+original = audio.Buffer(8000, 2, [0.0, 0.5, -0.5, 1.0])
+for bits in [8, 16, 32]:
+    decoded = wav.decode(wav.encode(original, bits))
+    assert(decoded.rate == 8000)
+    assert(decoded.channels == 2)
+    assert(len(decoded.samples) == 4)
+    for i in range(4):
+        difference = decoded.samples[i]-original.samples[i]
+        assert(difference < 0.02 and difference > -0.02)
+assert(len(wav.encode(original, 16)) == 44+8)
+oversized = "RIFF"+byte_string(255)+byte_string(255)+byte_string(255)+byte_string(127)+"WAVEdata"+byte_string(255)+byte_string(255)+byte_string(255)+byte_string(127)
+for bad in ["", "RIFFxxxxWAVE", "not audio at all", oversized]:
+    failed = false
+    try:
+        wav.decode(bad)
+    except err:
+        failed = true
+    assert(failed)

@@ -1,0 +1,53 @@
+# The optional OS integration hook must not compromise the portable transaction.
+import installer.bundle as bundle
+import installer.engine as engine
+import std.fs as fs
+import std.path as path
+
+fn progress(done: int, total: int, operation: str) -> bool:
+    return true
+fn main(arguments: list[str]):
+    assert(len(arguments) == 2)
+    payload = bundle.load(arguments[0])
+    base = arguments[1]
+    root = path.combine(base, "hook-failure")
+    log = path.combine(base, "hook.log")
+    fn failure(phase: str, target: str, value: json) -> json:
+        if phase == "prepare":
+            return json({"test": json(true)})
+        if phase == "apply":
+            raise "injected integration failure"
+        assert(phase == "rollback" and json_bool(json_dict(value)["test"]))
+        write_text(log, "rolled back")
+        return json(false)
+    caught = false
+    try:
+        engine.install(payload, root, progress, [failure])
+    except err:
+        caught = "injected integration failure" in err.message
+    assert(caught and read_text(log) == "rolled back")
+    assert(fs.kind(path.combine(root, "receipt.json")) == "missing")
+    assert(fs.kind(path.combine(root, "journal.json")) == "missing")
+    fn success(phase: str, target: str, value: json) -> json:
+        if phase == "prepare":
+            return json({"test": json(true)})
+        if phase == "uninstall_prepare":
+            return json_dict(value)["integration"]
+        if phase == "uninstall_progress":
+            return json(false)
+        assert(phase == "apply" and json_bool(json_dict(value)["test"]))
+        return json(false)
+    engine.install(payload, root, progress, [success])
+    assert(json_bool(json_dict(json_dict(engine.installed_receipt(root, payload.app.id))["integration"])["test"]))
+    caught = false
+    try:
+        engine.uninstall(root, payload.app.id)
+    except err:
+        caught = "original frontend" in err.message
+    assert(caught)
+    engine.uninstall(root, payload.app.id, [success])
+    assert(fs.kind(path.combine(root, "receipt.json")) == "missing")
+    assert(fs.kind(path.combine(root, "uninstall.json")) == "missing")
+    print("installer integration hooks passed")
+
+main(args())

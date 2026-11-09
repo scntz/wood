@@ -1,0 +1,75 @@
+# Owned, index-addressed syntax trees. -1 is the sole absent-node sentinel.
+import lexer as lx
+
+record TypeNode:
+    kind: str
+    name: str
+    element: int
+    key: int
+    parameters: list[int]
+
+record Clause:
+    name: str
+    token: lx.Token
+
+record Expr:
+    kind: str
+    token: lx.Token
+    children: list[int]
+    keywords: list[str]
+    operators: list[str]
+    clauses: list[Clause]
+    type_arguments: list[int]
+    function: int
+    depth: int
+
+record Parameter:
+    name: str
+    type: int
+    token: lx.Token
+    mode: str
+    default_value: int
+    mutable_borrow: bool
+
+record ImportName:
+    name: str
+    alias: str
+    token: lx.Token
+
+record Stmt:
+    kind: str
+    token: lx.Token
+    name: str
+    expressions: list[int]
+    body: list[int]
+    otherwise: list[int]
+    parameters: list[Parameter]
+    mutable_captures: list[str]
+    type_parameters: list[str]
+    imports: list[ImportName]
+    module: str
+    relative: int
+    return_type: int
+    annotation: int
+    external: bool
+    method: bool
+    mutating: bool
+    inferred_return: bool
+    expression_body: bool
+
+record Tree:
+    types: list[TypeNode]
+    expressions: list[Expr]
+    statements: list[Stmt]
+    roots: list[int]
+
+record Result:
+    tree: Tree
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+
+fn empty() -> Tree:
+    return Tree([],[],[],[])

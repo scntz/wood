@@ -1,0 +1,58 @@
+import parser as ps
+import syntax_wire as wire
+
+fn accepted(source: str):
+    result = ps.parse(source)
+    if result.code != "":
+        print(source,result.code,result.message)
+    assert(result.code == "")
+    assert(len(wire.events(result.tree)) > 0)
+
+fn rejected(source: str, code: str, line: int, column: int):
+    result = ps.parse(source)
+    assert(result.code == code)
+    assert(result.line == line and result.column == column)
+    assert(len(result.tree.roots) == 0 and len(result.tree.expressions) == 0)
+
+empty = ps.parse("")
+assert(empty.code == "" and len(empty.tree.roots) == 0)
+accepted("x = 1 + 2 * 3\n")
+tree = ps.parse("x = 1 + 2 * 3\n").tree
+value = tree.expressions[tree.statements[tree.roots[0]].expressions[0]]
+assert(value.kind == "Binary" and value.token.text == "+")
+assert(tree.expressions[value.children[1]].token.text == "*")
+saved = tree
+tree.expressions[value.children[0]].token.text = "changed"
+assert(saved.expressions[value.children[0]].token.text == "1")
+accepted("fn f[T](x: T, /, *, y: int = 2) -> T:\n  return x\n")
+accepted("record Box[T]:\n  value: T\n  fn get(self) -> T:\n    return self.value\n")
+accepted("fn outer(x: int):\n  fn inner[mut x](y: int):\n    x += y\n    return x\n  return inner\n")
+accepted("f = fn[mut x](y: int) => x+y\n")
+accepted("a = Box[list[int]]([1])\nb = callbacks[0](1)\nc = x[a+b](1)\n")
+accepted("x = {i: j for i in xs for j in ys if j > i}\ny = a[1,2]\nz = a[1:2]\n")
+accepted("x = a < b is not None not in c\ny = yes if ok else no\n")
+accepted("extern fn scale(mut x: array[float], n: int)\n")
+rejected("x =\n","E2004",1,4)
+rejected("fn f(x: int = 1, y: int):\n  pass\n","E2001",1,18)
+rejected("x = f(a=1,2)\n","E2001",1,11)
+rejected("x: void = 1\n","E2003",1,4)
+rejected("x = 1 + not true\n","E2004",1,9)
+rejected("1 = 2\n","E2010",1,1)
+rejected("if true:\n  import std.io\n","E2011",2,3)
+rejected("if true:\n  record X:\n    pass\n","E2012",2,3)
+assert(ps.parse("",max_nodes=1).code == "B2001")
+assert(ps.parse("",max_nodes=1048577).code == "B2001")
+assert(ps.parse("",max_nodes=2).code == "")
+assert(ps.parse("x=1",max_nodes=3).code == "B2002")
+assert(ps.parse("x=1",max_nodes=4).code == "")
+assert(ps.parse("x="+"1+"*256+"1").code == "E2002")
+assert(ps.parse("x: "+"list["*65+"int"+"]"*65+" = []").code == "E2002")
+assert(ps.parse("x = f("+"1,"*256+")").code == "E2002")
+accepted("x: (int | None) | None = None\n")
+accepted("x = 'a\\0b'\n")
+for source in ["x=a[0]\n","x=a[foo+bar](1)\n","x=a[tuple[int,int]](1)\n"]:
+    first = ps.parse(source)
+    second = ps.parse(source)
+    assert(first.code == "" and wire.events(first.tree) == wire.events(second.tree))
+assert(ps.parse("@").code == "E1007")
+print("bootstrap parser unit checks passed")

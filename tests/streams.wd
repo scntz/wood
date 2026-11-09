@@ -1,0 +1,167 @@
+import std.io as io
+import std.net as net
+
+record File:
+    handle: stream
+
+# Value and type namespaces remain independent for this new primitive name.
+fn stream() -> int:
+    return 7
+
+assert(stream() == 7)
+
+fn returns_handle(path: str) -> stream:
+    with io.open(path, "w") as file:
+        io.write(file, "returned")
+        return file
+
+fn raises_with_file(file: stream):
+    with file as local:
+        io.write(local, "error")
+        raise "primary failure"
+
+fn exit_scope(path: str):
+    with io.open(path, "w") as output:
+        io.write(output, "exit cleanup")
+        exit(7)
+
+if len(args()) > 0:
+    exit_scope(args()[0])
+
+path = "streams-bytes.bin"
+alias = io.open(path, "w")
+with alias as file:
+    assert(alias == file)
+    io.write(file, "a\0b\r\nlast")
+    io.flush(file)
+    assert(io.tell(file) == 9)
+assert(io.closed(alias))
+assert(str(alias) == "<stream:closed>")
+io.close(alias)
+
+with io.open(path, "a") as output:
+    io.write(output, "!")
+with io.open(path, "r") as source:
+    assert(io.line(source, 5) == "a\0b\r\n")
+    assert(io.tell(source) == 5)
+    assert(io.read_exact(source, 2) == "la")
+    assert(io.tell(source) == 7)
+    assert(io.line(source, 5) == "st!")
+    assert(io.read(source, 1) == "")
+    assert(io.line(source, 0) == "")
+    io.seek(source, 0)
+    assert(io.read_exact(source, 10) == "a\0b\r\nlast!")
+    io.seek(source, 5)
+    assert(io.read_all(source, 5) == "last!")
+
+with io.open(path, "r") as source:
+    try:
+        io.line(source, 4)
+        assert(false)
+    except err:
+        assert(err.code == "R4016")
+    io.seek(source, 0)
+    try:
+        io.read_all(source, 9)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+    io.seek(source, 0)
+    try:
+        io.read_exact(source, 11)
+        assert(false)
+    except err:
+        assert(err.message == "unexpected end of stream")
+
+returned = returns_handle(path)
+assert(io.closed(returned))
+assert(read_text(path) == "returned")
+file = io.open(path, "w")
+try:
+    raises_with_file(file)
+except err:
+    assert(err.message == "primary failure")
+assert(io.closed(file))
+assert(read_text(path) == "error")
+
+last = io.open(path, "w")
+io.close(last)
+for i in range(3):
+    with io.open(path, "w") as file:
+        last = file
+        io.write(file, str(i))
+        if i < 2:
+            continue
+        break
+assert(io.closed(last))
+assert(read_text(path) == "2")
+
+# Closing the original handle is independent of assignment to the local binding.
+first = io.open(path, "r")
+second = io.open(path, "r")
+with first as local:
+    local = second
+assert(io.closed(first))
+assert(not io.closed(second))
+io.close(second)
+
+original = [File(io.open(path, "r"))]
+copied = original
+assert(str(original) == "[File(handle=<stream:open>)]")
+io.close(copied[0].handle)
+assert(io.closed(original[0].handle))
+# Replacing a field isolates the record/list value, while its old handle stays closed.
+copied[0].handle = io.open(path, "r")
+assert(io.closed(original[0].handle))
+assert(not io.closed(copied[0].handle))
+io.close(copied[0].handle)
+
+for bad_mode in ["", "rb", "r+"]:
+    try:
+        io.open(path, bad_mode)
+        assert(false)
+    except err:
+        assert(err.code == "R4016")
+try:
+    io.open(path, "x")
+    assert(false)
+except err:
+    assert(err.code == "R4016")
+assert(read_text(path) == "2")
+try:
+    io.open("missing-directory/file", "r")
+    assert(false)
+except err:
+    assert(err.code == "R4016")
+try:
+    with first as closed:
+        assert(false)
+except err:
+    assert(err.code == "R4016")
+try:
+    io.read(first, 1)
+    assert(false)
+except err:
+    assert(err.code == "R4016")
+
+# Real loopback sockets: buffered line reads, binary reads, half-close and EOF.
+with net.listen("127.0.0.1", 0, 1000) as listener:
+    port = net.port(listener)
+    assert(port > 0)
+    with net.connect("127.0.0.1", port, 1000) as client:
+        with net.accept(listener) as server:
+            io.write(client, "hello\r\n\0body")
+            net.shutdown_write(client)
+            assert(io.line(server, 7) == "hello\r\n")
+            assert(io.read_exact(server, 5) == "\0body")
+            assert(io.read(server, 1) == "")
+            io.write(server, "response")
+            net.shutdown_write(server)
+            assert(io.read_all(client, 8) == "response")
+    net.set_timeout(listener, 10)
+    try:
+        net.accept(listener)
+        assert(false)
+    except err:
+        assert(err.code == "R4018")
+print("native streams passed")

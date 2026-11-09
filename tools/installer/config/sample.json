@@ -1,0 +1,1 @@
+{"format":1,"id":"wood_setup_sample","name":"Installer sample","version":"1.0.0","publisher":"Wood","architecture":"windows-x86_64","license":"MIT OR Apache-2.0","command":"bin/sample.exe","path_default":false,"desktop":"bin/sample.exe","start_menu":"bin/sample.exe"}

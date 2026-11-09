@@ -1,0 +1,56 @@
+import std.functional as functional
+
+fn bind(seed: int, /, step: int = 2, *, limit: int = 5, tag: str = 'd') -> tuple[int, int, str]:
+    return (seed + step, limit, tag)
+
+fn square(value: int) -> int:
+    return value * value
+
+fn even(value: int) -> bool:
+    return value % 2 == 0
+
+fn add_item(total: int, value: int) -> int:
+    return total + value
+
+fn pair[A, B](left: A, right: B) -> tuple[A, B]:
+    return (left, right)
+
+while not eof():
+    line = read_line()
+    request = json_dict(json_parse(line))
+    numbers: list[int] = [json_int(item) for item in json_list(request['numbers'])]
+    mode = json_int(request['mode'])
+    seed = json_int(request['seed'])
+    step = json_int(request['step'])
+    limit = json_int(request['limit'])
+    tag = json_str(request['tag'])
+    bound: tuple[int,int,str] = (0,0,'')
+    if mode == 0:
+        bound = bind(seed)
+    elif mode == 1:
+        bound = bind(seed, step)
+    elif mode == 2:
+        bound = bind(seed, tag=tag, limit=limit)
+    elif mode == 3:
+        bound = bind(seed, tag=tag, step=step, limit=limit)
+    elif mode == 4:
+        bound = bind(seed, limit=limit, step=step, tag=tag)
+    else:
+        bound = bind(seed, step, tag=tag)
+    answer: dict[str,json] = {
+        'bound': json(bound),
+        'map': json(functional.map(square, numbers)),
+        'filter': json(functional.filter(even, numbers)),
+        'fold': json(functional.fold(add_item, numbers, initial=seed)),
+        'first': json(functional.first(numbers)),
+        'find': json(functional.find_first(even, numbers)),
+        'zip': json(functional.zip(numbers, [str(n) for n in numbers][::-1])),
+        'enumerate': json(functional.enumerate(numbers, start=seed)),
+        'partition': json(functional.partition(even, numbers)),
+        'optional': json(seed if mode % 2 == 0 else None)
+    }
+    if len(numbers) >= 2:
+        answer['order'] = json(pair(right=pop(numbers), left=pop(numbers)))
+    else:
+        answer['order'] = json(())
+    print(json_dump(answer))

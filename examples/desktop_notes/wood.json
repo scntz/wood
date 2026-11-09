@@ -1,0 +1,1 @@
+{"format":1,"name":"desktop_notes","version":"0.1.0","source":"src","entry":"main.wd","dependencies":{"gui":{"path":"../../packages/wood_windowsgui","version":"0.2.0"},"cli":{"path":"../../packages/wood_cli","version":"0.1.0"},"notes":{"path":"../packages/notes_store","version":"0.1.0"}},"tests":"tests"}

@@ -1,0 +1,83 @@
+# Existing callable semantics through LLVM: owning snapshots, stateful paths,
+# erased argument/result ABIs and cleanup when arguments or callbacks fail.
+fn counter(seed: int) -> callable() -> int:
+    fn increment[mut seed]() -> int:
+        seed += 1
+        return seed
+    return increment
+
+fn add(value: int) -> int:
+    return value + 1
+
+fn notify(message: str):
+    assert(message == "owned")
+
+erased: callable(int) -> int = add
+assert(erased(8) == 9)
+notification: callable(str) -> void = notify
+notification("owned")
+empty = fn() => 7
+empty_erased: callable() -> int = empty
+assert(empty_erased() == 7)
+record Empty:
+    pass
+captured_empty = Empty()
+empty_value = fn() => captured_empty
+empty_result: callable() -> Empty = empty_value
+assert(empty_result() == Empty())
+
+fn factory(text: str) -> callable(str) -> str:
+    return fn(suffix) => text + suffix
+text = "a considerably longer captured string payload"
+callback = factory(text)
+text = "changed"
+assert(callback("!") == "a considerably longer captured string payload!")
+assert(str(callback) == "<callable>")
+assert(str(empty) == "<closure>")
+assert(str(add) == "<function>")
+
+states = [counter(0)]
+saved = states
+assert(states[0]() == 1)
+assert(states[0]() == 2)
+assert(saved[0]() == 1)
+mapping = {"next": counter(10)}
+mapping_saved = mapping
+assert(mapping["next"]() == 11)
+assert(mapping_saved["next"]() == 11)
+
+record Holder:
+    action: callable(int) -> int
+    fn replace(mut self) -> int:
+        self.action = fn(value: int) => value * 3
+        return 4
+holder = Holder(add)
+# Stateful erased invocation reacquires the receiver after argument effects.
+assert(holder.action(holder.replace()) == 12)
+
+fn failures(seed: int) -> callable() -> int:
+    fn advance[mut seed]() -> int:
+        seed += 1
+        if seed == 1:
+            raise "first failure"
+        return seed
+    return advance
+failure = failures(0)
+original = failure
+try:
+    failure()
+    assert(false)
+except err:
+    assert(err.code == "R4010" and err.message == "first failure")
+assert(failure() == 2)
+try:
+    original()
+    assert(false)
+except err:
+    assert(err.message == "first failure")
+
+for ignored in range(100):
+    callbacks: list[callable(str) -> str] = [factory("long payload for owned error cleanup")]
+    copy = callbacks
+    assert(callbacks[0]("x") == copy[0]("x"))
+print("native callable ownership passed")

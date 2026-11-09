@@ -1,0 +1,47 @@
+{
+  "format": 1,
+  "stage": "declaration-signatures",
+  "entry": "signature_frontend.load(input: str, standards: dict[str,str]) -> signatures.Result",
+  "production_replacement": false,
+  "python_required": false,
+  "bodies_checked": false,
+  "lock_verified": false,
+  "layout_scope": "unspecialized-declarations",
+  "implemented": ["interned semantic type identity", "annotation name and arity resolution", "nominal imported records", "generic parameters", "callable patterns and associated projections", "method receivers and signatures", "literal default validation and normalization", "native external signature restrictions", "conflicting external declarations", "unspecialized direct record containment"],
+  "not_implemented": ["expression and local binding analysis", "default value type checking", "return inference", "generic instantiation", "concrete generic layouts", "closure capture checking", "control flow", "body checking", "lowering", "code generation", "lock verification", "self-compilation"],
+  "apis": {
+    "signatures.resolve": "compilation, bindings, max_types=1048576 -> Result; signatures only",
+    "declaration_checks.check": "resolved Result -> Diagnostic; unspecialized declarations only",
+    "signature_frontend.load": "module frontend + signature resolution + declaration checks",
+    "type_system.Pool": ["intern", "substitute", "abstract", "assignable", "depth_valid", "display"]
+  },
+  "limits": {"minimum_type_nodes": 2, "default_type_nodes": 1048576, "maximum_type_nodes": 1048576, "structural_depth": 64, "maximum_resolve_depth_zero_based": 128, "direct_record_edges": 256},
+  "bootstrap_only_diagnostics": {"B3201": "invalid semantic type budget", "B3202": "semantic type budget exceeded"},
+  "diagnostics": ["E2002", "E2003", "E3001", "E3020", "E3021", "E3023", "E3024", "E3026", "E3028", "E3029"],
+  "earlier_diagnostics": "project/module/lexical/parser/binding failures propagated unchanged",
+  "ownership": {
+    "model": "owned snapshot/value semantics; no exposed native pointers",
+    "input": "loader/binder-produced valid graph with unchanged AST and edge invariants",
+    "syntax": "original annotation indices retained; semantic type IDs are separate",
+    "defaults": "owned output graph changes expression kind/text for normalized literal names, retaining coordinates",
+    "type_identity": "interned within one pool; nominal records use graph-wide binder declaration IDs; type parameters follow existing name identity",
+    "method_symbols": "zero until later body-analysis symbol allocation; parent and method ordinals identify methods",
+    "failure": "empty graph/declarations, fresh two-sentinel type pool, located diagnostic; no partial resolved graph or failed-source snapshot"
+  },
+  "wire": {
+    "format": 1,
+    "encoding": "JSON Lines; default texts and diagnostic messages encoded as lowercase hexadecimal bytes",
+    "fields": ["format", "stage", "bodies_checked", "lock_verified", "layout_scope", "diagnostic", "files", "types", "declarations"],
+    "type_fields": ["kind", "name", "element", "key", "parameters", "declaration", "display"],
+    "declaration_fields": ["module", "root", "method", "symbol", "parent", "kind", "name", "result", "parameters", "type_parameters", "external", "mutating", "inferred_return", "offset", "line", "column"],
+    "parameter_fields": ["name", "type", "mode", "mutable_borrow", "field", "default_events"],
+    "default_fields": ["kind", "text_hex", "children", "offset", "line", "column"],
+    "type_order": "child-first, reachable types encountered by return/parameter order; declarations global-first then methods in record/source order",
+    "type_ids": "zero-based wire pool indices, independent of internal pool allocation order",
+    "nominal_identity": "one-based binder declaration ID; display names alone are not identities",
+    "absent": "element/key/parent/method/field=-1 where absent; methods have symbol=0",
+    "failure": "empty files/types/declarations; source ID refers to discarded graph; use file and coordinates",
+    "coordinates": "zero-based byte offsets; one-based physical line and byte column; zero for driver errors",
+    "exit_status": {"all_success": 0, "any_frontend_failure": 1, "missing_arguments": 2, "runtime_failure": 70}
+  }
+}

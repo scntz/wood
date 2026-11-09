@@ -1,0 +1,160 @@
+import std.num as num
+import native_ffi_alias as other
+extern fn wood_saturating_add(left: int, right: int) -> int
+extern fn wood_native_lerp(left: float, right: float, weight: float) -> float
+extern fn wood_native_accept(count: int, ratio: float)
+extern fn wood_bytes_sum(data: str) -> int
+extern fn wood_native_fold(count: int, step: fn(int,int) -> int) -> int
+extern fn wood_native_map(value: float, transform: fn(float) -> float) -> float
+extern fn wood_native_visit(value: int, visitor: fn(int) -> void)
+extern fn wood_native_pair(first: fn(int) -> int, second: fn(int) -> int) -> int
+extern fn wood_array_sum(values: array[float]) -> float
+extern fn wood_array_scale(mut values: array[float], factor: float)
+extern fn wood_array_copy(mut output: array[float], source: array[float])
+extern fn wood_int_sum(values: array[int]) -> int
+extern fn wood_int_scale(mut values: array[int], factor: int)
+extern fn wood_mixed(a:int,b:float,c:int,d:float,e:int,f:float,g:int,h:float,i:int,j:float,k:int,l:float,m:int,n:float,o:float,p:float,q:float) -> float
+extern fn wood_null_buffers(a: array[int], b: array[float]) -> int
+extern fn wood_foreign_calls() -> int
+extern fn wood_failure_probe(callback: fn(int)->int, mut values: array[float]) -> int
+extern fn wood_zero(callback: fn()->void)
+
+fn add(left:int,right:int) -> int:
+    return left+right
+fn recursive(left:int,right:int) -> int:
+    if right == 2:
+        return left+wood_native_fold(3,add)
+    return left+right
+fn twice(value:float) -> float:
+    return value*2.0
+fn visit(value:int):
+    assert(value == 42)
+fn zero():
+    assert(wood_bytes_sum("zero") == 448)
+fn plus_one(value:int) -> int:
+    return value+1
+fn double_int(value:int) -> int:
+    return value*2
+fn first_error(value:int) -> int:
+    raise "first callback was called after failure"
+fn second_error(value:int) -> int:
+    raise "second callback failed first"
+fn failure(left:int,right:int) -> int:
+    values = num.from_list([7,8,9])
+    words = ["owned callback"]*40
+    assert(values[0] == 7 and len(words) == 40)
+    raise "foreign callback failed"
+fn recover_nested(left:int,right:int) -> int:
+    if right == 1:
+        try:
+            wood_native_fold(3,failure)
+            assert(false)
+        except err:
+            assert(err.message == "foreign callback failed")
+    return left+right
+fn fail_first(value:int) -> int:
+    assert(value == 1)
+    raise "first failure preserved"
+fn zero_failure():
+    raise "void failure"
+
+assert(wood_bytes_sum("a\0"+byte_string(255)) == 352)
+assert(wood_bytes_sum("") == 0)
+assert(wood_native_fold(10,add) == 45)
+assert(wood_native_fold(10,wood_saturating_add) == 45)
+assert(wood_native_fold(4,recursive) == 7)
+assert(wood_native_fold(4,recover_nested) == 6)
+assert(wood_native_fold(10,add) == 45)
+assert(wood_native_map(1.25,twice) == 2.5)
+wood_native_visit(42,visit)
+wood_zero(zero)
+assert(wood_native_pair(plus_one,double_int) == 9)
+try:
+    wood_native_pair(first_error,second_error)
+    assert(false)
+except err:
+    assert(err.message == "second callback failed first")
+try:
+    wood_native_fold(10,failure)
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+    assert(err.message == "foreign callback failed")
+try:
+    wood_zero(zero_failure)
+    assert(false)
+except err:
+    assert(err.message == "void failure")
+assert(wood_native_fold(10,add) == 45)
+assert(wood_saturating_add(9223372036854775807,1) == 9223372036854775807)
+assert(wood_saturating_add(-9223372036854775808,-1) == -9223372036854775808)
+assert(wood_native_lerp(10,20,0.25) == 12.5)
+wood_native_accept(7,1)
+callback = wood_saturating_add
+assert(callback(10,32) == 42)
+assert(other.wood_saturating_add(10,32) == 42)
+assert(callback != other.wood_saturating_add)
+callbacks = [wood_native_fold]
+assert(callbacks[0](5,add) == 10)
+assert(wood_mixed(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17) == 153.0)
+
+values = num.from_list([1.0,2.0,3.0,4.0])
+snapshot = values
+wood_array_scale(values,2.0)
+assert(num.to_list(values) == [2.0,4.0,6.0,8.0])
+assert(num.to_list(snapshot) == [1.0,2.0,3.0,4.0])
+assert(wood_array_sum(values) == 20.0)
+wood_array_copy(values,values)
+assert(num.to_list(values) == [2.0,4.0,6.0,8.0])
+window = num.slice(values,0,1,3)
+wood_array_scale(window,3.0)
+assert(num.to_list(window) == [12.0,18.0])
+assert(num.to_list(values) == [2.0,4.0,6.0,8.0])
+integers = num.from_list([1,2,3])
+wood_int_scale(integers,4)
+assert(wood_int_sum(integers) == 24)
+assert(wood_null_buffers(num.full(0,0),num.full(0,0.0)) == 1)
+matrix = num.reshape(values,(2,2))
+strided = num.transpose(matrix)
+for mutable in [false,true]:
+    try:
+        if mutable:
+            wood_array_scale(strided,2.0)
+        else:
+            wood_array_sum(strided)
+        assert(false)
+    except err:
+        assert(err.code == "R4026")
+        if mutable:
+            assert(err.message == "mutable native buffer imports require contiguous arrays; use num.copy")
+        else:
+            assert(err.message == "native buffer imports require contiguous arrays; use num.copy")
+assert(num.to_list(strided) == [2.0,6.0,4.0,8.0])
+before = wood_foreign_calls()
+try:
+    wood_failure_probe(fail_first,strided)
+    assert(false)
+except err:
+    assert(err.code == "R4026")
+assert(wood_foreign_calls() == before)
+try:
+    wood_failure_probe(fail_first,values)
+    assert(false)
+except err:
+    assert(err.message == "first failure preserved")
+assert(wood_foreign_calls() == before+1)
+assert(values[0] == 123.0)
+assert(snapshot[0] == 1.0)
+assert(wood_native_pair(plus_one,double_int) == 9)
+
+record Bucket:
+    items: list[array[float]]
+    fn replace(mut self) -> float:
+        self.items = [num.from_list([7.0,8.0])]
+        return 2.0
+bucket = Bucket([num.from_list([1.0,2.0])])
+old = bucket
+wood_array_scale(bucket.items[0],bucket.replace())
+assert(num.to_list(bucket.items[0]) == [14.0,16.0])
+assert(num.to_list(old.items[0]) == [1.0,2.0])
+print("native borrowed C ABI passed")

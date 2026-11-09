@@ -1,0 +1,29 @@
+import std.env as env
+import std.task as task
+
+assert(env.get("WOOD_STDLIB_ABSENT_53c69ef0") is None)
+empty = env.get("WOOD_STDLIB_EMPTY")
+assert(empty is not None and unwrap(empty) == "")
+value = env.get("WOOD_STDLIB_VALUE")
+assert(value is not None and unwrap(value) == "hé🌳=value")
+assert(env.get("WOOD_STDLIB_🌳") == "unicode-key")
+saved = unwrap(value)
+value = None
+assert(saved == "hé🌳=value")
+for name in ["", "bad=name", "bad\0name"]:
+    caught = false
+    try:
+        env.get(name)
+    except err:
+        caught = err.code == "R4003"
+    assert(caught)
+
+fn read_configuration(payload: json) -> json:
+    for i in range(10):
+        assert(env.get("WOOD_STDLIB_EMPTY") == "")
+    return json(env.get("WOOD_STDLIB_VALUE"))
+with task.spawn(read_configuration, json_null()) as work:
+    assert(json_str(task.wait(work,10000)) == saved)
+    assert(json_str(task.wait(work,10000)) == saved)
+assert(env.get("WOOD_STDLIB_VALUE") == saved)
+print("environment contract passed")

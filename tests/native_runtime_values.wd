@@ -1,0 +1,104 @@
+# Existing value semantics, collection mutation and formatting through LLVM.
+record Node:
+    value: int
+    children: list[Node]
+
+record Item[T]:
+    value: T
+
+mapping = {"z":[1,2],"a":[3],"middle":[4,5]}
+saved = mapping
+assert(remove(mapping,"a"))
+assert(not remove(mapping,"absent"))
+assert(keys(mapping) == ["z","middle"])
+assert(keys(saved) == ["z","a","middle"])
+mapping["a"] = [6]
+assert(keys(mapping) == ["z","middle","a"])
+assert(str(mapping) == '{"z": [1, 2], "middle": [4, 5], "a": [6]}')
+assert(str(saved) == '{"z": [1, 2], "a": [3], "middle": [4, 5]}')
+for key in keys(mapping):
+    assert(remove(mapping,key))
+assert(str(mapping) == "{}")
+
+values = {i:i*3 for i in range(257)}
+for step in range(257):
+    key = (step*97)%257
+    snapshot = values
+    assert(remove(values,key))
+    assert(key in snapshot and key not in values)
+    for remaining in values:
+        assert(values[remaining] == remaining*3)
+assert(len(values) == 0)
+flags = {true:"yes",false:"no"}
+assert(remove(flags,true) and keys(flags) == [false])
+assert(str(flags) == '{false: "no"}')
+assert(str([byte_string(255),byte_string(1)]) == '["'+byte_string(255)+'", "\\x01"]')
+
+outer = [saved]
+old = outer
+fn replace_key() -> str:
+    return "a"
+assert(remove(outer[0],replace_key()))
+assert("a" in old[0] and "a" not in outer[0])
+record Catalog:
+    groups: list[dict[str,int]]
+    calls: int
+    fn replace(mut self) -> str:
+        self.calls += 1
+        self.groups = [{"new":2}]
+        return "new"
+catalog = Catalog([{"old":1}],0)
+snapshot = catalog
+try:
+    remove(catalog.groups[9],catalog.replace())
+    assert(false)
+except failure:
+    assert(failure.code == "R4006" and catalog.calls == 1)
+assert(remove(catalog.groups[0],catalog.replace()))
+assert(catalog.groups == [{}] and snapshot.groups == [{"old":1}])
+record Buckets:
+    values: list[list[int]]
+    calls: int
+    fn replace(mut self) -> int:
+        self.calls += 1
+        self.values = [[9]]
+        return 7
+buckets = Buckets([[1]],0)
+try:
+    append(buckets.values[9],buckets.replace())
+    assert(false)
+except failure:
+    assert(failure.code == "R4006" and buckets.calls == 1)
+append(buckets.values[0],buckets.replace())
+assert(buckets.values == [[9,7]])
+owned_keys = {"key-"+str(i):i for i in range(20)}
+for key in owned_keys:
+    assert(remove(owned_keys,keys(owned_keys)[0]))
+assert(len(owned_keys) == 0)
+optional: str | None = "raw\nbytes"
+assert(str(optional) == "raw\nbytes")
+assert(str([optional,None]) == '["raw\\nbytes", None]')
+assert(str(("a\0b",true,None,1.0)) == '("a\\0b", true, None, 1.0)')
+assert(str((1,)) == "(1,)")
+assert(str(Item([1,2])) == "Item(value=[1, 2])")
+assert(str(json({"z":1,"a":2})) == '{"a":2,"z":1}')
+assert(str(yielded(optional)) == 'yielded("raw\\nbytes")')
+absent: step[int] = finished()
+assert(str(absent) == "finished()")
+assert(str(yielded(None)) == "yielded(None)")
+try:
+    raise "message"
+except failure:
+    assert(str(failure) == "R4010: message")
+    assert(str([failure]) == "[R4010: message]")
+zero = 0
+time_sleep(zero)
+time_sleep(0.0000000001)
+node = Node(1,[Node(2,[])])
+assert(str(node) == "Node(value=1, children=[Node(value=2, children=[])])")
+# Deep values require no recursive compiler/runtime formatting traversal.
+deep = Node(0,[])
+for i in range(1000):
+    deep = Node(i,[deep])
+assert(len(str(deep)) > 25000)
+print("native runtime values passed")

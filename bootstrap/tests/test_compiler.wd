@@ -1,0 +1,130 @@
+import body_semantics as semantic
+import frontend as frontend
+import parser as parser
+import modules as mod
+import bindings as bind
+import sources as src
+import project as project
+import native_calls as native
+import emit_cpp as backend
+
+record Reply:
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+    results: list[str]
+
+fn inspect(text: str) -> Reply:
+    parsed = parser.parse(text)
+    if parsed.code != "":
+        return Reply(parsed.code,parsed.message,parsed.offset,parsed.line,parsed.column,[])
+    graph = mod.Compilation([mod.Unit("query.wd",text,0,parsed.tree,[])],0)
+    bound = bind.bind(graph)
+    result = semantic.analyze(frontend.Result([],graph,bound,bound.diagnostic))
+    diagnostic = result.diagnostic
+    results: list[str] = []
+    if diagnostic.code == "":
+        for declaration in result.signatures.declarations:
+            stmt = result.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if stmt.kind == "Function" and declaration.parent != -2 and declaration.statement < len(parsed.tree.statements):
+                append(results,result.signatures.pool.display(declaration.result))
+    return Reply(diagnostic.code,diagnostic.message,diagnostic.offset,diagnostic.line,diagnostic.column,results)
+
+fn emitted(text: str) -> str:
+    parsed = parser.parse(text)
+    assert(parsed.code == "")
+    graph = mod.Compilation([mod.Unit("query.wd",text,0,parsed.tree,[])],0)
+    bound = bind.bind(graph)
+    result = semantic.analyze(frontend.Result([],graph,bound,bound.diagnostic))
+    assert(result.diagnostic.code == "")
+    return backend.emit(result, "")
+
+fn method_snapshot(graph: mod.Compilation, expected: str):
+    bound = bind.bind(graph)
+    assert(bound.diagnostic.code == "",bound.diagnostic.message)
+    input = frontend.Result([],graph,bound,bound.diagnostic)
+    snapshot = input
+    result = semantic.analyze(input)
+    assert(result.diagnostic.code == expected,result.diagnostic.code+": "+result.diagnostic.message)
+    assert(input == snapshot)
+    assert(result == semantic.analyze(input))
+    if expected == "":
+        for module in range(len(result.signatures.compilation.modules)):
+            tree = result.signatures.compilation.modules[module].tree
+            assert(len(tree.expressions) == len(result.facts[module].types))
+            assert(len(tree.expressions) == len(result.facts[module].symbols))
+        saved = result
+        result.signatures.compilation.modules[0].tree.expressions[0].token.text = "changed"
+        assert(input == snapshot and saved == semantic.analyze(input))
+
+fn test_method_snapshots():
+    counter = "record Counter:\n    value:int\n    fn bump(mut self, by:int=1)->int:\n        self.value+=by\n        return self.value\n    fn read(self)->int:\n        return self.value\n"
+    cases = [
+        (counter+"record Outer:\n    child:Counter\nitem=Outer(Counter(1))\nsaved=item\na=item.child.bump()\nb=item.child.bump(by=0007)\nassert(saved.child.read()==1)\nassert(item.child.read()==9)\n",""),
+        (counter+"fn total():\n    item=Counter(1)\n    return item.bump()+item.read()\nassert(total()==4)\n",""),
+        (counter+"fn make():\n    item=Counter(0)\n    fn step[mut item]():\n        return item.bump()\n    return step\nf=make()\nassert(f()==1)\nassert(f()==2)\n",""),
+        ("record Box[T]:\n    value:T\n    fn pair[U](self, other:U)->tuple[T,U]:\n        return (self.value,other)\nbox=Box(3)\na=box.pair('x')\nb=box.pair(4.0)\nassert(a[0]==3 and b[1]==4.0)\n",""),
+        ("fn plus(value:int)->int:\n    return value+1\nrecord Action:\n    callback:fn(int)->int\naction=Action(plus)\nassert(action.callback(4)==5)\n",""),
+        (counter+"item=Counter(1)\nitem.bump('bad')\n","E3002"),
+        (counter+"item=Counter(1)\nitem.bump(1,2)\n","E3003"),
+        (counter+"item=Counter(1)\nitem.missing()\n","E3016"),
+        (counter+"record Outer:\n    child:Counter\n    fn wrong(self):\n        self.child.bump()\n","E3027")]
+    for case in cases:
+        parsed = parser.parse(case[0])
+        assert(parsed.code == "",parsed.message)
+        method_snapshot(mod.Compilation([mod.Unit("method.wd",case[0],0,parsed.tree,[])],0),case[1])
+    text = "from models import Box\nitem=Box(2)\nassert(item.read()==2)\nassert(item.read()==2)\n"
+    model = "record Box[T]:\n    value:T\n    fn read(self)->T:\n        return self.value\n"
+    entry = parser.parse(text)
+    library = parser.parse(model)
+    assert(entry.code == "" and library.code == "")
+    method_snapshot(mod.Compilation([mod.Unit("entry.wd",text,0,entry.tree,[mod.Edge(entry.tree.roots[0],1)]),mod.Unit("models.wd",model,0,library.tree,[])],0),"")
+
+arguments = args()
+if arguments == ["--method-snapshots"]:
+    test_method_snapshots()
+    print("method-call lowering snapshots passed")
+elif arguments == ["--native-names"]:
+    print(json_dump(native.known()))
+elif len(arguments) == 2 and arguments[0] == "--native-contract":
+    expected = project.object(json_parse(src.read(arguments[1],16777216)))
+    fixed = native.fixed()
+    for name in fixed:
+        assert(name in expected,"native mapping missing: "+name)
+        entry = project.object(expected[name])
+        assert(fixed[name].native == project.string(entry["native"]),"native symbol mismatch: "+name)
+        assert(fixed[name].site == json_bool(entry["site"]),"native source-site mismatch: "+name)
+    print("native contracts match production")
+elif len(arguments) == 1:
+    for item in json_list(json_parse(src.read(arguments[0],16777216))):
+        query = project.object(item)
+        print(json_dump(inspect(project.string(query["source"]))))
+else:
+    test_method_snapshots()
+    assert(" = wd_read_iteration(" in emitted("for item in ['long value']:\n    print(len(item))\n"))
+    assert(" = wd_read_iteration(" not in emitted("for item in ['long value']:\n    if true:\n        item='changed'\n"))
+    assert(" = wd_read_iteration(" not in emitted("for item in ['long value']:\n    fn change[mut item]():\n        item+='!'\n    change()\n"))
+    assert(inspect("fn f(x:int):\n    return x+1\nassert(f(2)==3)\n").results == ["int"])
+    assert(inspect("fn f(x:int):\n    return g(x)\nfn g(x:int):\n    return x\n").results == ["int","int"])
+    assert(inspect("fn f():\n    return f()\n").code == "E3030")
+    assert(inspect("fn f(x:int)->int:\n    if x==0:\n        return 0\n    return f(x-1)\n").code == "")
+    assert(inspect("if true:\n    hidden=1\nprint(hidden)\n").code == "E3007")
+    assert(inspect("value=1\nvalue: int=2\n").code == "E3009")
+    assert(inspect("record R:\n    value:int\n    fn change(self):\n        self.value=1\n").code == "E3027")
+    assert(inspect("record R:\n    value:int\n    fn change(mut self):\n        self.value=1\n").code == "")
+    assert(inspect("fn id[T](x:T)->T:\n    return x\nassert(id(2)==2)\nassert(id(\"ok\")==\"ok\")\n").code == "")
+    assert(inspect("record Box[T]:\n    value:T\na=Box(1)\nb=Box('x')\n").code == "")
+    assert(inspect("fn f[T](a:T,b:T)->T:\n    return a\nf(1,'x')\n").code == "E3024")
+    assert(inspect("x:array[int]=array_full(2,0)\n").code == "")
+    assert(inspect("extern fn native_sum(x:array[float])->float\n").code == "")
+    assert(inspect("db_version()\n").code == "")
+    assert(inspect("fn f():\n    return [i*i for i in range(3)]\n").results == ["list[int]"])
+    assert(inspect("x:dict[str,list[int]]={str(i):[] for i in range(3)}\n").code == "")
+    assert(inspect("x=[i for i in range(3) if i]\n").code == "E3002")
+    assert(inspect("x=[i for i in range(3)]\nprint(i)\n").code == "E3007")
+    assert(inspect("offset=2\nf=fn(x:int)=>x+offset\nf(3)\n").code == "")
+    assert(inspect("f:callable(int)->int=fn(x)=>x+1\n").code == "")
+    assert(inspect("fn outer():\n    value=1\n    fn change():\n        value+=1\n    return change\n").code == "E3028")
+    print("integrated compiler unit checks passed")

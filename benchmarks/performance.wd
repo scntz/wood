@@ -1,0 +1,176 @@
+# Allocation-aware application kernels. Input construction is outside measurement.
+import std.iter as it
+import std.functional as functional
+import std.num as num
+import std.time as time
+extern fn bench_reset()
+extern fn bench_stop() -> int
+extern fn bench_bytes() -> int
+extern fn bench_peak() -> int
+extern fn bench_rss() -> int
+extern fn bench_cpu_mask() -> int
+
+record Metrics:
+    checksum: float
+    elapsed_ns: int
+    allocations: int
+    allocated_bytes: int
+    peak_bytes: int
+    process_peak_bytes: int
+    cpu_mask: int
+
+fn scan_row(row: str) -> int:
+    if row != "" and row[0:5] == "mesh:" and "payload-" in row:
+        return len(row) + len(row[-9:]) + int(row[-1])
+    raise "invalid input row"
+
+fn format_row(row: str, index: int) -> str:
+    return "[" + str(index) + "] " + row + " :: " + row[0:5]
+
+fn process_rows(source: list[str], rounds: int, mode: str) -> int:
+    checksum = 0
+    for round in range(rounds):
+        index = 0
+        for row in source:
+            if mode == "scan":
+                checksum += scan_row(row)
+            else:
+                formatted = format_row(row, index)
+                assert(ends_with(formatted, "mesh:"))
+                checksum += len(formatted)
+            index += 1
+    return checksum
+
+fn payload(source: list[str], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        checksum += it.fold(it.map(source, fn(value) => len(value)), 0, fn(total,value) => total + value)
+    return checksum
+
+fn payload_direct(source: list[str], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        for value in source:
+            checksum += len(value)
+    return checksum
+
+fn payload_eager(source: list[str], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        checksum += functional.fold(fn(total, value) => total + len(value), source, 0)
+    return checksum
+
+fn pipeline(count: int, rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        scale = round % 7 + 1
+        values = it.take(it.map(it.filter(range(count), fn(x) => x % 3 == 0), fn(x) => x * scale + 1), count // 4)
+        checksum += it.fold(values, 0, fn(total,value) => total + value)
+    return checksum
+
+fn capture(count: int, rounds: int) -> int:
+    text = "native wood" * 128
+    callback = fn(x: int) => len(text) + x
+    checksum = 0
+    for round in range(rounds):
+        for item in range(count):
+            checksum += callback(item % 256)
+    return checksum
+
+fn ranges(count: int, rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        for start in range(count):
+            for item in range(start, start + 8, start % 7 + 1):
+                checksum += item % 17
+    return checksum
+
+fn lists(source: list[int], rounds: int) -> int:
+    values = source
+    for round in range(rounds):
+        for index in range(len(values)):
+            values[index] = values[index] + 1
+    checksum = 0
+    for value in values:
+        checksum += value
+    return checksum
+
+fn validation(source: list[int], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        for value in source:
+            assert(value >= 0)
+            checksum += value
+    return checksum
+
+fn dictionary(source: dict[int,int], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        for index in range(len(source)):
+            if index in source:
+                checksum += source[index]
+    return checksum
+
+fn blend(left: array[float], right: array[float]) -> array[float]:
+    weighted = left * 1.5
+    return weighted + right * 0.25
+
+fn arrays(left: array[float], right: array[float], rounds: int) -> float:
+    checksum = 0.0
+    for round in range(rounds):
+        checksum += num.sum(blend(left, right))
+    return checksum
+
+arguments = args()
+mode = arguments[0]
+count = int(arguments[1])
+rounds = int(arguments[2])
+if count < 4 or count > 1000000 or rounds < 1 or rounds > 100:
+    raise "unsupported benchmark size"
+source: list[str] = []
+numbers: list[int] = []
+mapping: dict[int,int] = {}
+left = num.zeros(0)
+right = num.zeros(0)
+if mode == "scan" or mode == "concat" or mode == "payload" or mode == "payload_direct" or mode == "payload_eager":
+    source = ["mesh:" + str(index) + ":" + "payload-" * 16 + str(index % 10) for index in range(count)]
+elif mode == "lists" or mode == "validation":
+    numbers = [index % 97 for index in range(count)]
+elif mode == "dictionary":
+    mapping = {index: index % 97 for index in range(count)}
+elif mode == "arrays":
+    left = num.zeros(count)
+    right = num.zeros(count)
+    for index in range(count):
+        left[index] = float(index % 1024) * 0.125
+        right[index] = float(index % 17) * 0.25
+bench_reset()
+started = time.perf_counter_ns()
+checksum = 0.0
+if mode == "scan" or mode == "concat":
+    checksum = float(process_rows(source, rounds, mode))
+elif mode == "payload":
+    checksum = float(payload(source, rounds))
+elif mode == "payload_direct":
+    checksum = float(payload_direct(source, rounds))
+elif mode == "payload_eager":
+    checksum = float(payload_eager(source, rounds))
+elif mode == "pipeline":
+    checksum = float(pipeline(count, rounds))
+elif mode == "capture":
+    checksum = float(capture(count, rounds))
+elif mode == "ranges":
+    checksum = float(ranges(count, rounds))
+elif mode == "lists":
+    checksum = float(lists(numbers, rounds))
+elif mode == "validation":
+    checksum = float(validation(numbers, rounds))
+elif mode == "dictionary":
+    checksum = float(dictionary(mapping, rounds))
+elif mode == "arrays":
+    checksum = arrays(left, right, rounds)
+else:
+    raise "unknown benchmark mode"
+elapsed = time.perf_counter_ns() - started
+allocations = bench_stop()
+print(json_dump(Metrics(checksum, elapsed, allocations, bench_bytes(), bench_peak(), bench_rss(), bench_cpu_mask())))

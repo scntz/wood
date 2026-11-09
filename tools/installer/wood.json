@@ -1,0 +1,1 @@
+{"format":1,"name":"wood_setup","version":"0.1.0","source":".","entry":"cli.wd","tests":"tests","dependencies":{"installer":{"path":"../../packages/wood_installer","version":"0.1.0"},"gui":{"path":"../../packages/wood_windowsgui","version":"0.2.0"}}}

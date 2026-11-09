@@ -1,0 +1,132 @@
+# In-memory differential/embedding entry point for semantic kernels. Query
+# bodies are fixtures, not an alternate accepted subset of the Wood language.
+import parser as parser
+import modules as mod
+import bindings as bind
+import signatures as sig
+import declaration_checks as declarations
+import semantic_preparation as preparation
+import expressions as expr
+import control_flow as flow
+import return_types as returns
+import sources as src
+import syntax as ast
+import syntax_wire as bytes
+import module_wire as mw
+
+record Event:
+    kind: str
+    text_hex: str
+    type: str
+    marker: int
+    offset: int
+    line: int
+    column: int
+
+record Reply:
+    diagnostic: mw.Diagnostic
+    events: list[Event]
+    return_type: str
+
+fn reply(diagnostic: src.Diagnostic, events: list[Event] = [], return_type: str = "") -> Reply:
+    return Reply(mw.Diagnostic(diagnostic.code,bytes.hex_text(diagnostic.message),diagnostic.file,diagnostic.source,diagnostic.offset,diagnostic.line,diagnostic.column),events,return_type)
+
+fn project_events(checker: expr.Checker, root: int) -> list[Event]:
+    result: list[Event] = []
+    pending = [root]
+    while len(pending) > 0:
+        index = pop(pending)
+        if index < 0:
+            continue
+        node = checker.tree.expressions[index]
+        token = node.token
+        marker = 0
+        if node.kind in ["Unary","Index","Member"]:
+            marker = checker.symbols[index]
+        append(result,Event(node.kind,bytes.hex_text(token.text),checker.pool.display(checker.types[index]),marker,token.offset,token.line,token.column))
+        for child in range(len(node.children)-1,-1,-1):
+            append(pending,node.children[child])
+    return result
+
+fn return_sites(tree: ast.Tree, body: list[int]) -> list[int]:
+    sites: list[int] = []
+    pending: list[int] = []
+    for index in range(len(body)-1,-1,-1):
+        append(pending,body[index])
+    while len(pending) > 0:
+        index = pop(pending)
+        stmt = tree.statements[index]
+        if stmt.kind in ["Record","Function"]:
+            continue
+        if stmt.kind == "Return":
+            append(sites,index)
+        for child in range(len(stmt.otherwise)-1,-1,-1):
+            append(pending,stmt.otherwise[child])
+        for child in range(len(stmt.body)-1,-1,-1):
+            append(pending,stmt.body[child])
+    return sites
+
+fn inspect(text: str, mode: str) -> Reply:
+    parsed = parser.parse(text)
+    if parsed.code != "":
+        return reply(src.Diagnostic(parsed.code,parsed.message,"query.wd",0,parsed.offset,parsed.line,parsed.column))
+    graph = mod.Compilation([mod.Unit("query.wd",text,0,parsed.tree,[])],0)
+    bound = bind.bind(graph)
+    signed = sig.resolve(graph,bound)
+    problem = declarations.check(signed)
+    if problem.code != "":
+        return reply(problem)
+    if mode == "defaults":
+        checked = preparation.check(signed)
+        if checked.diagnostic.code != "":
+            return reply(checked.diagnostic)
+        output: list[Event] = []
+        checker = expr.checker(checked.signatures.compilation.modules[0].tree,checked.signatures.pool)
+        checker.types = checked.expression_types[0]
+        checker.symbols = checked.expression_symbols[0]
+        for default in checked.defaults:
+            output = output+project_events(checker,default.expression)
+        return reply(src.success(),output)
+    tree = signed.compilation.modules[0].tree
+    if mode == "flow":
+        return reply(flow.check(tree,"query.wd").diagnostic)
+    declaration = signed.declarations[len(bound.symbols)-1]
+    stmt = tree.statements[declaration.statement]
+    names: dict[str,int] = {}
+    for parameter in declaration.parameters:
+        names[parameter.name] = parameter.type
+    record_parameters: dict[int,list[str]] = {}
+    for item in signed.declarations:
+        if item.symbol > 0 and tree.statements[item.statement].kind == "Record":
+            record_parameters[item.symbol] = tree.statements[item.statement].type_parameters
+    checker = expr.checker(tree,signed.pool,names,signed.declarations,"query.wd",record_parameters=record_parameters)
+    try:
+        if mode == "expression":
+            root = tree.statements[stmt.body[0]].expressions[0]
+            actual = checker.expression(root,declaration.result)
+            if declaration.result != 0:
+                checker.require(actual,declaration.result,tree.expressions[root].token)
+            return reply(src.success(),project_events(checker,root))
+        if mode == "returns":
+            sites: list[returns.Site] = []
+            for index in return_sites(tree,stmt.body):
+                site = tree.statements[index]
+                actual = 1
+                if len(site.expressions) > 0:
+                    actual = checker.expression(site.expressions[0])
+                append(sites,returns.Site(actual,site.token))
+            inferred = returns.infer(checker.pool,sites,stmt.token,"query.wd")
+            if inferred.diagnostic.code != "":
+                return reply(inferred.diagnostic)
+            # Flow's explicit-result check is also used after successful join.
+            checked = flow.check(tree,"query.wd",return_kinds={declaration.statement:inferred.pool.types[inferred.type].kind})
+            if checked.diagnostic.code != "":
+                return reply(checked.diagnostic)
+            return reply(src.success(),return_type=inferred.pool.display(inferred.type))
+        return reply(src.Diagnostic("B3301","unknown semantic query mode","",0,0,0,0))
+    except err:
+        if checker.problem is not None:
+            return reply(unwrap(checker.problem))
+        if err.code == "R4010" and err.message == "bootstrap semantic type budget exceeded":
+            return reply(src.located("B3202",err.message,"query.wd",0,checker.current))
+        raise err

@@ -1,0 +1,2793 @@
+# Native lowering consumes the same checked facts as emit_cpp. No C++ text or
+# runtime is used in its output. Unsupported ownership families fail explicitly.
+import checked_program as ir
+import lexer as lx
+import sources as src
+
+record Value:
+    type: int
+    text: str
+
+record Root:
+    type: int
+    pointer: str
+
+record Access:
+    type: int
+    parent: int
+    kind: str
+    index: Value
+    module: int
+    token: lx.Token
+
+record Place:
+    pointer: str
+    steps: list[Access]
+
+# A finally block around the statement being emitted. Return, break and continue that leave its
+# try block store how they left in flow (1, 2, 3) and jump to label, where the finally block runs
+# and then leaves the same way; an error stores 4. roots is where the try block's locals start.
+record Final:
+    label: str
+    flow: str
+    loops: int
+    roots: int
+    uses: int
+
+record Generator:
+    program: ir.Result
+    constants: dict[str,str]
+    globals: list[str]
+    output: list[str]
+    lines: list[str]
+    frame: list[str]
+    slots: dict[int,str]
+    counter: int
+    current: str
+    ended: bool
+    handler: str
+    loops: list[tuple[str,str]]
+    declarations: dict[int,int]
+    problem: src.Diagnostic
+    needed: list[int]
+    visited: dict[int,bool]
+    used_types: dict[int,bool]
+    managed_types: dict[int,bool]
+    locals: list[Root]
+    temporaries: list[Root]
+    pending: list[Root]
+    statement_call: int
+    statement_module: int
+    statement_pins: int
+    loop_roots: list[int]
+    return_slot: str
+    equal_types: list[tuple[int,int,lx.Token]]
+    scopes: dict[str,tuple[int,lx.Token]]
+    erasures: dict[int,bool]
+    externals: dict[str,bool]
+    format_types: dict[int,bool]
+    python_used: bool
+    system_libraries: bool
+    # Fixed for one emission; never rebuild this dictionary in type() queries.
+    type_names: dict[str,str]
+    finals: list[Final]
+
+    fn unsupported(mut self, module: int, token: lx.Token, detail: str):
+        self.problem = src.located("B3501","native LLVM backend does not yet support "+detail,self.program.signatures.compilation.modules[module].file,module,token)
+        raise "native lowering rejected"
+
+    fn type(self, value: int) -> str:
+        node = self.program.signatures.pool.types[value]
+        if node.kind in self.type_names:
+            return self.type_names[node.kind]
+        if node.kind == "Record":
+            return "%wd.r"+str(node.declaration)
+        if node.kind == "Closure":
+            return "%wd.c"+str(node.declaration)
+        if node.kind in ["Optional","Step"]:
+            return "{ i1, "+self.type(node.element)+" }"
+        if node.kind == "Cursor":
+            source = self.program.signatures.pool.types[node.element]
+            return "{ "+("ptr" if source.kind == "Dict" else self.type(node.element))+", i64 }"
+        if node.kind == "Tuple":
+            return "{ "+join([self.type(item) for item in node.parameters],", ")+" }"
+        raise "unsupported native value type: "+node.kind
+
+    fn require_type(mut self, value: int, module: int, token: lx.Token):
+        if value in self.used_types:
+            return
+        self.used_types[value] = true
+        node = self.program.signatures.pool.types[value]
+        if node.kind == "PythonObject":
+            # Optional/record-held resources can need scope helpers without an
+            # executed Python builtin (for example a None-only caller).
+            self.python_used = true
+        if node.kind in ["Database","Statement","Transaction","TlsContext","PythonObject"]:
+            self.system_libraries = true
+        if node.kind not in ["Void","Int","Float","Bool","None","Str","Error","Range","Function","Record","Tuple","Optional","List","Dict","Stream","Json","Closure","Callable","Step","Cursor","Array","Task","Database","Statement","Transaction","TlsContext","PythonObject"]:
+            self.unsupported(module,token,"type "+self.program.signatures.pool.display(value))
+        if node.kind in ["Optional","Function","List","Dict","Callable","Closure","Step","Cursor","Array"]:
+            self.require_type(node.element,module,token)
+        if node.kind == "Dict":
+            self.require_type(node.key,module,token)
+        if node.kind == "Error":
+            self.require_type(self.kind_id("Str"),module,token)
+            self.require_type(self.kind_id("Int"),module,token)
+        for child in node.parameters:
+            self.require_type(child,module,token)
+        if node.kind == "Record":
+            for field in self.program.signatures.declarations[self.declarations[node.declaration]].parameters:
+                self.require_type(field.type,module,token)
+        if node.kind == "Closure":
+            for capture in self.program.closures[self.declarations[node.declaration]].captures:
+                self.require_type(capture.type,module,token)
+
+    fn need(mut self, index: int):
+        if index >= 0 and index not in self.visited:
+            self.visited[index] = true
+            append(self.needed,index)
+
+    fn collect_expression(mut self, module: int, index: int):
+        if index < 0:
+            return
+        facts = self.program.facts[module]
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[index]
+        if expr.kind == "Closure":
+            self.need(self.declarations[self.program.signatures.pool.types[facts.types[index]].declaration])
+        if index in facts.protocols:
+            self.need(facts.protocols[index].make)
+            self.need(facts.protocols[index].next)
+        if index in facts.calls:
+            call = facts.calls[index]
+            if call.kind in ["declared","function","closure"]:
+                self.need(call.target)
+            for argument in call.arguments:
+                self.collect_expression(argument.module,argument.expression)
+        else:
+            for child in self.program.signatures.compilation.modules[module].tree.expressions[index].children:
+                self.collect_expression(module,child)
+
+    fn collect_block(mut self, module: int, body: list[int]):
+        for index in body:
+            stmt = self.program.signatures.compilation.modules[module].tree.statements[index]
+            if stmt.kind in ["Function","Record","Import"]:
+                continue
+            for expression in stmt.expressions:
+                self.collect_expression(module,expression)
+            self.collect_block(module,stmt.body)
+            self.collect_block(module,stmt.otherwise)
+
+    fn fresh(mut self) -> str:
+        self.counter += 1
+        return "%n"+str(self.counter)
+
+    fn label(mut self) -> str:
+        self.counter += 1
+        return "b"+str(self.counter)
+
+    fn line(mut self, text: str):
+        if self.ended:
+            raise "instruction after native terminator"
+        append(self.lines,"  "+text)
+
+    fn instruction(mut self, text: str) -> str:
+        name = self.fresh()
+        self.line(name+" = "+text)
+        return name
+
+    fn open(mut self, label: str):
+        append(self.lines,label+":")
+        self.current = label
+        self.ended = false
+
+    fn jump(mut self, label: str):
+        self.line("br label %"+label)
+        self.ended = true
+
+    fn branch(mut self, condition: str, yes: str, no: str):
+        self.line("br i1 "+condition+", label %"+yes+", label %"+no)
+        self.ended = true
+
+    fn string(mut self, text: str) -> str:
+        if text not in self.constants:
+            name = "@wd.s"+str(len(self.constants))
+            hexadecimal = "0123456789ABCDEF"
+            encoded: list[str] = []
+            for byte in text:
+                number = byte_value(byte)
+                append(encoded,"\\"+hexadecimal[number//16]+hexadecimal[number%16])
+            append(self.globals,name+" = private constant ["+str(len(text))+" x i8] c\""+join(encoded,"")+"\"")
+            self.constants[text] = "{ ptr "+name+", i64 "+str(len(text))+", ptr null }"
+        return self.constants[text]
+
+    fn managed(mut self, type: int) -> bool:
+        if type in self.managed_types:
+            return self.managed_types[type]
+        node = self.program.signatures.pool.types[type]
+        result = node.kind in ["Str","List","Dict","Error","Stream","Json","Callable","Array","Task","Database","Statement","Transaction","TlsContext","PythonObject"]
+        if node.kind in ["Optional","Step","Cursor"]:
+            result = self.managed(node.element)
+        if node.kind == "Tuple":
+            for child in node.parameters:
+                result = self.managed(child) or result
+        if node.kind == "Record":
+            for field in self.program.signatures.declarations[self.declarations[node.declaration]].parameters:
+                result = self.managed(field.type) or result
+        if node.kind == "Closure":
+            for capture in self.program.closures[self.declarations[node.declaration]].captures:
+                result = self.managed(capture.type) or result
+        self.managed_types[type] = result
+        return result
+
+    fn retain(mut self, value: Value):
+        if self.managed(value.type):
+            self.line("call void @wd.retain."+str(value.type)+"("+self.type(value.type)+" "+value.text+")")
+
+    fn cleanup(mut self, root: Root) -> list[str]:
+        lines: list[str] = []
+        if not self.managed(root.type):
+            return lines
+        if root.pointer in self.scopes:
+            site = self.scopes[root.pointer]
+            file = self.string(self.program.signatures.compilation.modules[site[0]].file)
+            helper = "wd.task_scope_close" if self.program.signatures.pool.types[root.type].kind == "Task" else "wd.scope_close"
+            if self.program.signatures.pool.types[root.type].kind in ["Database","Statement","Transaction"]:
+                helper = {"Database":"wd.database_scope_close","Statement":"wd.statement_scope_close","Transaction":"wd.transaction_scope_close"}[self.program.signatures.pool.types[root.type].kind]
+            if self.program.signatures.pool.types[root.type].kind == "PythonObject":
+                helper = "wd.python_scope_close"
+            if self.program.signatures.pool.types[root.type].kind == "TlsContext":
+                helper = "wd.tls_scope_close"
+            append(lines,"call void @"+helper+"(ptr %ctx, ptr "+root.pointer+", %wd.str "+file+", i64 "+str(site[1].line)+", i64 "+str(site[1].column)+")")
+        append(lines,"call void @wd.clean."+str(root.type)+"(ptr "+root.pointer+")")
+        return lines
+
+    fn release_root(mut self, root: Root):
+        for line in self.cleanup(root):
+            self.line(line)
+
+    fn clean(mut self, roots: list[Root]):
+        for i in range(len(roots)-1,-1,-1):
+            self.release_root(roots[i])
+
+    fn drain(mut self):
+        self.clean(self.pending)
+        self.pending = []
+
+    # Ends the pins a statement took while evaluating, just before it writes. Otherwise a value read
+    # from the collection being written, as in x[i] = x[i] + 1, makes the write copy all of x, because
+    # the pin looks like a second owner. Kept values may have no other owner, so they get their own
+    # first. Only a statement may do this: inside an expression, earlier operands still need their pins.
+    # A string cannot be a second owner of a collection, so its pin stays. With nothing to release, as in
+    # append(parts, str(i)), this adds no code to the loop.
+    fn settle(mut self, start: int, kept: list[Value]):
+        released: list[Root] = []
+        remaining = self.pending[:start]
+        for root in self.pending[start:]:
+            if self.managed(root.type) and self.program.signatures.pool.types[root.type].kind != "Str":
+                append(released,root)
+            else:
+                append(remaining,root)
+        self.pending = remaining
+        if len(released) == 0:
+            return
+        for value in kept:
+            if value.text != "":
+                self.hold(value)
+        self.clean(released)
+
+    fn path_values(self, place: Place) -> list[Value]:
+        return [step.index for step in place.steps]
+
+    fn owned_slot(mut self, type: int, transient: bool = true) -> str:
+        self.require_type(type,0,src.origin())
+        pointer = self.temporary(self.type(type))
+        if self.managed(type):
+            root = Root(type,pointer)
+            if transient:
+                append(self.temporaries,root)
+                append(self.pending,root)
+            else:
+                append(self.locals,root)
+        return pointer
+
+    fn hold(mut self, value: Value, transfer: bool = false) -> Value:
+        if self.managed(value.type):
+            pointer = self.owned_slot(value.type)
+            if transfer:
+                # The root may have held a value in an earlier loop iteration.
+                old = self.instruction("load "+self.type(value.type)+", ptr "+pointer)
+                self.line("call void @wd.drop."+str(value.type)+"("+self.type(value.type)+" "+old+")")
+                self.line("store "+self.type(value.type)+" "+value.text+", ptr "+pointer)
+            else:
+                self.store(value,pointer)
+        return value
+
+    fn spill(mut self, value: Value) -> str:
+        pointer = self.temporary(self.type(value.type))
+        self.line("store "+self.type(value.type)+" "+value.text+", ptr "+pointer)
+        return pointer
+
+    fn site(mut self, module: int, token: lx.Token):
+        file = self.string(self.program.signatures.compilation.modules[module].file)
+        self.line("call void @wd.site(ptr %ctx, %wd.str "+file+", i64 "+str(token.line)+", i64 "+str(token.column)+")")
+
+    fn callbacks(mut self, type: int) -> str:
+        if not self.managed(type):
+            return "ptr null, ptr null"
+        return "ptr @wd.retain.slot."+str(type)+", ptr @wd.drop.slot."+str(type)
+
+    fn stride(mut self, type: int) -> str:
+        end = self.instruction("getelementptr "+self.type(type)+", ptr null, i64 1")
+        size = self.instruction("ptrtoint ptr "+end+" to i64")
+        # Empty nominal records/tuples still occupy a distinct sequence slot.
+        zero = self.instruction("icmp eq i64 "+size+", 0")
+        return self.instruction("select i1 "+zero+", i64 1, i64 "+size)
+
+    fn zero_size(self, type: int) -> bool:
+        node = self.program.signatures.pool.types[type]
+        if node.kind == "Tuple":
+            for child in node.parameters:
+                if not self.zero_size(child):
+                    return false
+            return true
+        if node.kind == "Record":
+            for field in self.program.signatures.declarations[self.declarations[node.declaration]].parameters:
+                if not self.zero_size(field.type):
+                    return false
+            return true
+        if node.kind == "Closure":
+            for capture in self.program.closures[self.declarations[node.declaration]].captures:
+                if not self.zero_size(capture.type):
+                    return false
+            return true
+        return false
+
+    fn runtime_value(mut self, type: int, name: str, operands: list[str]) -> Value:
+        pointer = self.owned_slot(type)
+        self.line("call void @"+name+"(ptr %ctx, ptr "+pointer+(", " if len(operands) > 0 else "")+join(operands,", ")+")")
+        self.propagate()
+        return Value(type,self.instruction("load "+self.type(type)+", ptr "+pointer))
+
+    fn map_slot(mut self, type: int, module: int, token: lx.Token) -> str:
+        node = self.program.signatures.pool.types[type]
+        pair = "{ "+self.type(node.key)+", "+self.type(node.element)+" }"
+        end = self.instruction("getelementptr "+pair+", ptr null, i64 1")
+        stride = self.instruction("ptrtoint ptr "+end+" to i64")
+        member = self.instruction("getelementptr "+pair+", ptr null, i32 0, i32 1")
+        offset = self.instruction("ptrtoint ptr "+member+" to i64")
+        key_size = self.stride(node.key)
+        key_copy = "ptr @wd.retain.slot."+str(node.key) if self.managed(node.key) else "ptr null"
+        pointer = self.owned_slot(type)
+        self.site(module,token)
+        entry_copy = "ptr @wd.map.retain."+str(type)+", ptr @wd.map.drop."+str(type) if self.managed(node.key) or self.managed(node.element) else "ptr null, ptr null"
+        value = self.instruction("call ptr @wd_m_map_new(ptr %ctx, i64 "+stride+", i64 "+offset+", i64 "+key_size+", "+entry_copy+", "+key_copy+", ptr @wd.key."+str(type)+")")
+        self.line("store ptr "+value+", ptr "+pointer)
+        self.propagate()
+        return pointer
+
+    fn integer_span(mut self, value: Value) -> str:
+        node = self.program.signatures.pool.types[value.type]
+        if node.kind == "Int":
+            return "ptr "+self.spill(value)+", i64 1"
+        if node.kind == "List":
+            pointer = self.instruction("call ptr @wd_m_seq_read(ptr "+value.text+", i64 0)")
+            size = self.instruction("call i64 @wd_m_seq_len(ptr "+value.text+")")
+            return "ptr "+pointer+", i64 "+size
+        size = len(node.parameters)
+        type = "["+str(size)+" x i64]"
+        pointer = self.temporary(type)
+        for i in range(size):
+            item = self.instruction("extractvalue "+self.type(value.type)+" "+value.text+", "+str(i))
+            at = self.instruction("getelementptr "+type+", ptr "+pointer+", i32 0, i32 "+str(i))
+            self.line("store i64 "+item+", ptr "+at)
+        return "ptr "+pointer+", i64 "+str(size)
+
+    fn array_operand(mut self, value: Value) -> str:
+        node = self.program.signatures.pool.types[value.type]
+        array = node.kind == "Array"
+        floating = self.program.signatures.pool.types[node.element].kind == "Float" if array else node.kind == "Float"
+        return "ptr "+(value.text if array else self.spill(value))+", i64 "+str((2 if array else 0)+(1 if floating else 0))
+
+    fn kind_id(self, kind: str) -> int:
+        for index in range(len(self.program.signatures.pool.types)):
+            if self.program.signatures.pool.types[index].kind == kind:
+                return index
+        raise "missing native semantic type"
+
+    fn slot(mut self, symbol: int, type: int, initialize: bool = true) -> str:
+        self.require_type(type,0,src.origin())
+        if symbol not in self.slots:
+            pointer = "%v"+str(symbol)
+            append(self.frame,"  "+pointer+" = alloca "+self.type(type))
+            if initialize:
+                append(self.frame,"  store "+self.type(type)+" zeroinitializer, ptr "+pointer)
+            self.slots[symbol] = pointer
+            if self.managed(type):
+                append(self.locals,Root(type,pointer))
+        return self.slots[symbol]
+
+    fn temporary(mut self, type: str) -> str:
+        pointer = self.fresh()
+        append(self.frame,"  "+pointer+" = alloca "+type)
+        append(self.frame,"  store "+type+" zeroinitializer, ptr "+pointer)
+        return pointer
+
+    fn load(mut self, type: int, pointer: str) -> Value:
+        return self.hold(Value(type,self.instruction("load "+self.type(type)+", ptr "+pointer)))
+
+    fn store(mut self, value: Value, pointer: str):
+        if self.managed(value.type):
+            self.retain(value)
+            old = self.instruction("load "+self.type(value.type)+", ptr "+pointer)
+            self.line("call void @wd.drop."+str(value.type)+"("+self.type(value.type)+" "+old+")")
+        self.line("store "+self.type(value.type)+" "+value.text+", ptr "+pointer)
+
+    fn convert(mut self, value: Value, target: int) -> Value:
+        if value.type == target:
+            return value
+        source = self.program.signatures.pool.types[value.type]
+        result = self.program.signatures.pool.types[target]
+        if result.kind == "Optional":
+            if source.kind == "None":
+                return Value(target,"zeroinitializer")
+            item = self.convert(value,result.element)
+            first = self.instruction("insertvalue "+self.type(target)+" zeroinitializer, i1 true, 0")
+            return Value(target,self.instruction("insertvalue "+self.type(target)+" "+first+", "+self.type(item.type)+" "+item.text+", 1"))
+        if result.kind == "Callable":
+            self.require_type(target,0,src.origin())
+            self.erasures[value.type] = true
+            size = "0" if self.zero_size(value.type) else self.stride(value.type)
+            owner = self.instruction("call ptr @wd_m_callable_new(ptr %ctx, i64 "+size+", "+self.callbacks(value.type)+", ptr @wd.invoke."+str(value.type)+", ptr "+self.spill(value)+")")
+            self.propagate()
+            return self.hold(Value(target,owner),true)
+        if result.kind == "Float" and source.kind == "Int":
+            return Value(target,self.instruction("sitofp i64 "+value.text+" to double"))
+        raise "invalid checked native conversion"
+
+    fn failure(mut self, module: int, token: lx.Token, code: str, message: str):
+        file = self.string(self.program.signatures.compilation.modules[module].file)
+        code_value = self.string(code)
+        self.line("call void @wd.fail(ptr %ctx, %wd.str "+code_value+", %wd.str "+message+", %wd.str "+file+", i64 "+str(token.line)+", i64 "+str(token.column)+")")
+        self.jump(self.handler)
+
+    fn guard(mut self, bad: str, module: int, token: lx.Token, code: str, message: str):
+        rejected = self.label()
+        valid = self.label()
+        self.branch(bad,rejected,valid)
+        self.open(rejected)
+        self.failure(module,token,code,self.string(message))
+        self.open(valid)
+
+    fn propagate(mut self):
+        exited = self.instruction("call i1 @wd.exited(ptr %ctx)")
+        running = self.label()
+        self.branch(exited,"unwind",running)
+        self.open(running)
+        bad = self.instruction("call i1 @wd.failed(ptr %ctx)")
+        valid = self.label()
+        self.branch(bad,self.handler,valid)
+        self.open(valid)
+
+    fn checked(mut self, op: str, a: str, b: str, module: int, token: lx.Token) -> str:
+        names = {"+":"sadd","-":"ssub","*":"smul"}
+        messages = {"+":"addition","-":"subtraction","*":"multiplication"}
+        pair = self.instruction("call {i64, i1} @llvm."+names[op]+".with.overflow.i64(i64 "+a+", i64 "+b+")")
+        value = self.instruction("extractvalue {i64, i1} "+pair+", 0")
+        overflow = self.instruction("extractvalue {i64, i1} "+pair+", 1")
+        self.guard(overflow,module,token,"R4001","integer overflow in "+messages[op])
+        return value
+
+    fn compare(mut self, op: str, left: Value, right: Value, module: int, token: lx.Token) -> str:
+        if op in ["in","not in"]:
+            return self.operation(op,left,right,self.kind_id("Bool"),module,token).text
+        a = self.program.signatures.pool.types[left.type]
+        b = self.program.signatures.pool.types[right.type]
+        equal = op in ["==","is","!=","is not"]
+        negate = op in ["!=","is not"]
+        if a.kind == "Array" and b.kind == "Array":
+            result = self.instruction("call i64 @wd_m_array_equal(ptr "+left.text+", ptr "+right.text+")")
+            return self.instruction("icmp "+("eq" if negate else "ne")+" i64 "+result+", 0")
+        if a.kind == "Json" and b.kind == "Json":
+            result = self.instruction("call i64 @wd_m_json_equal(ptr "+left.text+", ptr "+right.text+")")
+            return self.instruction("icmp "+("eq" if negate else "ne")+" i64 "+result+", 0")
+        if a.kind == "None" or b.kind == "None":
+            other = right if a.kind == "None" else left
+            other_type = b if a.kind == "None" else a
+            present = "false"
+            if other_type.kind == "Optional":
+                present = self.instruction("extractvalue "+self.type(other.type)+" "+other.text+", 0")
+            return present if negate else self.instruction("xor i1 "+present+", true")
+        if a.kind in ["Optional","Step"] or b.kind in ["Optional","Step"]:
+            target = left.type if a.kind == "Optional" else (right.type if b.kind == "Optional" else left.type)
+            left = self.convert(left,target)
+            right = self.convert(right,target)
+            ty = self.type(target)
+            pa = self.instruction("extractvalue "+ty+" "+left.text+", 0")
+            pb = self.instruction("extractvalue "+ty+" "+right.text+", 0")
+            same = self.instruction("icmp eq i1 "+pa+", "+pb)
+            element = self.program.signatures.pool.types[target].element
+            av = self.instruction("extractvalue "+ty+" "+left.text+", 1")
+            bv = self.instruction("extractvalue "+ty+" "+right.text+", 1")
+            contents = self.compare("==",Value(element,av),Value(element,bv),module,token)
+            absent = self.instruction("xor i1 "+pa+", true")
+            contents = self.instruction("or i1 "+absent+", "+contents)
+            result = self.instruction("and i1 "+same+", "+contents)
+            return self.instruction("xor i1 "+result+", true") if negate else result
+        if a.kind in ["Tuple","Record","Error"]:
+            if not equal:
+                self.unsupported(module,token,"aggregate ordering")
+            fields = a.parameters
+            if a.kind == "Record":
+                fields = [p.type for p in self.program.signatures.declarations[self.declarations[a.declaration]].parameters]
+            elif a.kind == "Error":
+                fields = [self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Int"),self.kind_id("Int")]
+            result = "true"
+            for i in range(len(fields)):
+                av = self.instruction("extractvalue "+self.type(left.type)+" "+left.text+", "+str(i))
+                bv = self.instruction("extractvalue "+self.type(right.type)+" "+right.text+", "+str(i))
+                same = self.compare("==",Value(fields[i],av),Value(fields[i],bv),module,token)
+                result = self.instruction("and i1 "+result+", "+same)
+            return self.instruction("xor i1 "+result+", true") if negate else result
+        if a.kind in ["List","Dict"]:
+            if not equal:
+                self.unsupported(module,token,"container ordering")
+            known = false
+            for entry in self.equal_types:
+                known = known or entry[0] == left.type
+            if not known:
+                append(self.equal_types,(left.type,module,token))
+            same = self.instruction("call i1 @wd.equal."+str(left.type)+"(ptr "+left.text+", ptr "+right.text+")")
+            return self.instruction("xor i1 "+same+", true") if negate else same
+        conditions = {"==":"eq","!=":"ne","is":"eq","is not":"ne","<":"slt","<=":"sle",">":"sgt",">=":"sge"}
+        if op not in conditions:
+            self.unsupported(module,token,"comparison "+op)
+        if a.kind == "Str":
+            ordering = self.instruction("call i32 @wd.compare(%wd.str "+left.text+", %wd.str "+right.text+")")
+            return self.instruction("icmp "+conditions[op]+" i32 "+ordering+", 0")
+        if a.kind == "Float" or b.kind == "Float":
+            left = self.convert(left,self.kind_id("Float"))
+            right = self.convert(right,self.kind_id("Float"))
+            floating = {"==":"oeq","!=":"une","<":"olt","<=":"ole",">":"ogt",">=":"oge"}
+            if op not in floating:
+                self.unsupported(module,token,"float identity")
+            return self.instruction("fcmp "+floating[op]+" double "+left.text+", "+right.text)
+        return self.instruction("icmp "+conditions[op]+" "+self.type(left.type)+" "+left.text+", "+right.text)
+
+    fn operation(mut self, op: str, left: Value, right: Value, target: int, module: int, token: lx.Token) -> Value:
+        node = self.program.signatures.pool.types[target]
+        if op in ["==","!=","is","is not","<","<=",">",">="]:
+            return Value(target,self.compare(op,left,right,module,token))
+        if op in ["in","not in"]:
+            kind = self.program.signatures.pool.types[right.type].kind
+            if kind == "Dict":
+                found = self.instruction("call i64 @wd_m_map_find(ptr "+right.text+", ptr "+self.spill(left)+")")
+                return Value(target,self.instruction("icmp "+("sge" if op == "in" else "slt")+" i64 "+found+", 0"))
+            if kind == "Str":
+                found = self.instruction("call i64 @wd_m_find(ptr "+self.spill(right)+", ptr "+self.spill(left)+")")
+                return Value(target,self.instruction("icmp "+("sge" if op == "in" else "slt")+" i64 "+found+", 0"))
+            if kind == "List":
+                index = self.temporary("i64")
+                result = self.temporary("i1")
+                test = self.label()
+                body = self.label()
+                advance = self.label()
+                yes = self.label()
+                end = self.label()
+                self.line("store i64 0, ptr "+index)
+                self.line("store i1 false, ptr "+result)
+                size = self.instruction("call i64 @wd_m_seq_len(ptr "+right.text+")")
+                self.jump(test)
+                self.open(test)
+                current = self.instruction("load i64, ptr "+index)
+                more = self.instruction("icmp slt i64 "+current+", "+size)
+                self.branch(more,body,end)
+                self.open(body)
+                pointer = self.instruction("call ptr @wd_m_seq_read(ptr "+right.text+", i64 "+current+")")
+                element = self.program.signatures.pool.types[right.type].element
+                item = Value(element,self.instruction("load "+self.type(element)+", ptr "+pointer))
+                found = self.compare("==",self.convert(left,element),item,module,token)
+                self.branch(found,yes,advance)
+                self.open(advance)
+                following = self.instruction("add i64 "+current+", 1")
+                self.line("store i64 "+following+", ptr "+index)
+                self.jump(test)
+                self.open(yes)
+                self.line("store i1 true, ptr "+result)
+                self.jump(end)
+                self.open(end)
+                found = self.instruction("load i1, ptr "+result)
+                return Value(target,self.instruction("xor i1 "+found+", true") if op == "not in" else found)
+            self.unsupported(module,token,"membership on "+kind)
+        if node.kind == "Array":
+            self.site(module,token)
+            result = self.instruction("call ptr @wd_m_array_binary(ptr %ctx, "+self.array_operand(left)+", "+self.array_operand(right)+", i64 "+str({"+":0,"-":1,"*":2,"/":3}[op])+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if node.kind in ["Str","List"] and op in ["+","*"]:
+            self.site(module,token)
+            if node.kind == "Str":
+                if op == "+":
+                    return self.runtime_value(target,"wd_m_str_concat",["ptr "+self.spill(left),"ptr "+self.spill(right)])
+                sequence = left if self.program.signatures.pool.types[left.type].kind == "Str" else right
+                count = right if sequence.type == left.type else left
+                return self.runtime_value(target,"wd_m_str_repeat",["ptr "+self.spill(sequence),"i64 "+count.text])
+            result = ""
+            if op == "+":
+                result = self.instruction("call ptr @wd_m_seq_concat(ptr %ctx, ptr "+left.text+", ptr "+right.text+")")
+            else:
+                sequence = left if self.program.signatures.pool.types[left.type].kind == "List" else right
+                count = right if sequence.type == left.type else left
+                result = self.instruction("call ptr @wd_m_seq_repeat(ptr %ctx, ptr "+sequence.text+", i64 "+count.text+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if node.kind == "Float":
+            left = self.convert(left,target)
+            right = self.convert(right,target)
+            if op == "/":
+                bad = self.instruction("fcmp oeq double "+right.text+", 0.0")
+                self.guard(bad,module,token,"R4002","division by zero")
+            operations = {"+":"fadd","-":"fsub","*":"fmul","/":"fdiv"}
+            if op not in operations:
+                self.unsupported(module,token,"floating operator "+op)
+            return Value(target,self.instruction(operations[op]+" double "+left.text+", "+right.text))
+        if node.kind != "Int":
+            self.unsupported(module,token,"operator "+op+" on "+node.kind)
+        a = left.text
+        b = right.text
+        if op in ["+","-","*"]:
+            return Value(target,self.checked(op,a,b,module,token))
+        if op in ["&","|","^"]:
+            return Value(target,self.instruction({"&":"and","|":"or","^":"xor"}[op]+" i64 "+a+", "+b))
+        if op in ["<<",">>"]:
+            low = self.instruction("icmp slt i64 "+b+", 0")
+            high = self.instruction("icmp sgt i64 "+b+", 63")
+            bad = self.instruction("or i1 "+low+", "+high)
+            self.guard(bad,module,token,"R4014","shift count must be in 0..63")
+            if op == ">>":
+                return Value(target,self.instruction("ashr i64 "+a+", "+b))
+            wide = self.instruction("sext i64 "+a+" to i128")
+            count = self.instruction("zext i64 "+b+" to i128")
+            product = self.instruction("shl i128 "+wide+", "+count)
+            narrow = self.instruction("trunc i128 "+product+" to i64")
+            restored = self.instruction("sext i64 "+narrow+" to i128")
+            overflow = self.instruction("icmp ne i128 "+product+", "+restored)
+            self.guard(overflow,module,token,"R4001","integer overflow in left shift")
+            return Value(target,narrow)
+        if op in ["//","%"]:
+            zero = self.instruction("icmp eq i64 "+b+", 0")
+            self.guard(zero,module,token,"R4002","division by zero")
+            minimum = self.instruction("icmp eq i64 "+a+", -9223372036854775808")
+            minus = self.instruction("icmp eq i64 "+b+", -1")
+            edge = self.instruction("and i1 "+minimum+", "+minus)
+            if op == "//":
+                self.guard(edge,module,token,"R4001","integer overflow in division")
+            else:
+                b = self.instruction("select i1 "+edge+", i64 1, i64 "+b)
+            remainder = self.instruction("srem i64 "+a+", "+b)
+            nonzero = self.instruction("icmp ne i64 "+remainder+", 0")
+            rnegative = self.instruction("icmp slt i64 "+remainder+", 0")
+            bnegative = self.instruction("icmp slt i64 "+b+", 0")
+            opposite = self.instruction("xor i1 "+rnegative+", "+bnegative)
+            adjust = self.instruction("and i1 "+nonzero+", "+opposite)
+            if op == "//":
+                quotient = self.instruction("sdiv i64 "+a+", "+b)
+                amount = self.instruction("zext i1 "+adjust+" to i64")
+                return Value(target,self.instruction("sub i64 "+quotient+", "+amount))
+            amount = self.instruction("select i1 "+adjust+", i64 "+b+", i64 0")
+            return Value(target,self.instruction("add i64 "+remainder+", "+amount))
+        self.unsupported(module,token,"integer operator "+op)
+        return Value(target,"")
+
+    fn place(mut self, module: int, expression: int, validate: bool = true) -> Place:
+        facts = self.program.facts[module]
+        node = self.program.signatures.compilation.modules[module].tree.expressions[expression]
+        if node.kind == "Name":
+            return Place(self.slots[facts.symbols[expression]],[])
+        if node.kind in ["Member","Index"]:
+            base = node.children[0]
+            base_kind = self.program.signatures.pool.types[facts.types[base]].kind
+            if (node.kind == "Index" and base_kind not in ["Tuple","List","Dict","Array"]) or (node.kind == "Member" and base_kind not in ["Record","Error"]):
+                self.unsupported(module,node.token,"mutable indexed storage")
+            place = self.place(module,base,validate)
+            # Validate outer indexes before executing a deeper index expression.
+            if validate:
+                self.address(place,false)
+            field = facts.symbols[expression]
+            if base_kind == "Error":
+                field = {"code":0,"message":1,"file":2,"line":3,"column":4}[node.token.text]
+            key = Value(self.kind_id("Int"),str(field))
+            if base_kind in ["List","Dict","Array"]:
+                key = self.expression(module,node.children[1])
+            access = {"List":"list","Dict":"dict","Array":"array"}[base_kind] if base_kind in ["List","Dict","Array"] else "field"
+            append(place.steps,Access(facts.types[expression],facts.types[base],access,key,module,node.token))
+            return place
+        self.unsupported(module,node.token,"mutable path "+node.kind)
+        return Place("",[])
+
+    fn address(mut self, place: Place, mutate: bool, insert: bool = false) -> str:
+        pointer = place.pointer
+        for i in range(len(place.steps)):
+            step = place.steps[i]
+            if step.kind == "field":
+                pointer = self.instruction("getelementptr "+self.type(step.parent)+", ptr "+pointer+", i32 0, i32 "+step.index.text)
+            elif step.kind == "array" and self.fixed_rank(step.index):
+                source = self.instruction("load ptr, ptr "+pointer)
+                element = self.array_element(source,step.index,step.module,step.token)
+                if mutate:
+                    element = self.own_array(pointer,source,element,step.index,step.module,step.token)
+                pointer = element
+            elif step.kind == "array":
+                self.site(step.module,step.token)
+                span = self.integer_span(step.index)
+                source = pointer if mutate else self.instruction("load ptr, ptr "+pointer)
+                pointer = self.instruction("call ptr @wd_m_array_"+("edit" if mutate else "at")+"(ptr %ctx, ptr "+source+", "+span+")")
+                self.propagate()
+            elif step.kind == "dict":
+                self.site(step.module,step.token)
+                key = self.spill(step.index)
+                if mutate:
+                    pointer = self.instruction("call ptr @wd_m_map_edit(ptr %ctx, ptr "+pointer+", ptr "+key+", i64 "+("1" if insert and i == len(place.steps)-1 else "0")+")")
+                else:
+                    source = self.instruction("load ptr, ptr "+pointer)
+                    pointer = self.instruction("call ptr @wd_m_map_at(ptr %ctx, ptr "+source+", ptr "+key+")")
+                self.propagate()
+            else:
+                source = self.instruction("load ptr, ptr "+pointer)
+                position = self.position(source,step.index.text,step.module,step.token)
+                if mutate:
+                    self.own_list(pointer,source,step.module,step.token)
+                    source = self.instruction("load ptr, ptr "+pointer)
+                pointer = self.element(source,position,step.type)
+        return pointer
+
+    # Lists and arrays are indexed inline, so a loop over their elements makes no runtime call
+    # unless a value it changes is shared and has to be copied first.
+
+    # A list index checked against the length, with a negative one counted from the end.
+    fn position(mut self, sequence: str, index: str, module: int, token: lx.Token) -> str:
+        length = self.instruction("call i64 @wd.list_length(ptr "+sequence+")")
+        negative = self.instruction("icmp slt i64 "+index+", 0")
+        adjusted = self.instruction("add i64 "+index+", "+length)
+        position = self.instruction("select i1 "+negative+", i64 "+adjusted+", i64 "+index)
+        bad = self.instruction("icmp uge i64 "+position+", "+length)
+        self.guard(bad,module,token,"R4006","index out of bounds")
+        return position
+
+    # Elements follow the 64-byte list header; empty records and tuples take one byte each.
+    fn element(mut self, sequence: str, position: str, type: int) -> str:
+        start = self.instruction("getelementptr i8, ptr "+sequence+", i64 64")
+        if self.zero_size(type):
+            return self.instruction("getelementptr i8, ptr "+start+", i64 "+position)
+        return self.instruction("getelementptr "+self.type(type)+", ptr "+start+", i64 "+position)
+
+    # Copy on write: a list that another value shares is copied before this one changes it.
+    fn own_list(mut self, slot: str, sequence: str, module: int, token: lx.Token):
+        shared = self.label()
+        owned = self.label()
+        self.branch(self.instruction("call i1 @wd.exclusive(ptr "+sequence+")"),owned,shared)
+        self.open(shared)
+        self.site(module,token)
+        length = self.instruction("call i64 @wd.list_length(ptr "+sequence+")")
+        self.instruction("call ptr @wd_m_seq_unique(ptr %ctx, ptr "+slot+", i64 "+length+")")
+        self.propagate()
+        self.jump(owned)
+        self.open(owned)
+
+    # An int, or a tuple of ints, names one element of an array with that many axes.
+    fn fixed_rank(self, coordinate: Value) -> bool:
+        node = self.program.signatures.pool.types[coordinate.type]
+        return node.kind == "Int" or node.kind == "Tuple"
+
+    fn array_element(mut self, array: str, coordinate: Value, module: int, token: lx.Token) -> str:
+        node = self.program.signatures.pool.types[coordinate.type]
+        indices: list[str] = []
+        if node.kind == "Int":
+            indices = [coordinate.text]
+        else:
+            for i in range(len(node.parameters)):
+                append(indices,self.instruction("extractvalue "+self.type(coordinate.type)+" "+coordinate.text+", "+str(i)))
+        rank = self.instruction("load i64, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 32"))
+        wrong = self.instruction("icmp ne i64 "+rank+", "+str(len(indices)))
+        self.guard(wrong,module,token,"R4026","one integer index is required for each array axis")
+        at = self.instruction("load i64, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 48"))
+        for axis in range(len(indices)):
+            size = self.instruction("load i64, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 "+str(64+8*axis)))
+            stride = self.instruction("load i64, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 "+str(128+8*axis)))
+            negative = self.instruction("icmp slt i64 "+indices[axis]+", 0")
+            adjusted = self.instruction("add i64 "+indices[axis]+", "+size)
+            position = self.instruction("select i1 "+negative+", i64 "+adjusted+", i64 "+indices[axis])
+            bad = self.instruction("icmp uge i64 "+position+", "+size)
+            self.guard(bad,module,token,"R4006","index out of bounds")
+            at = self.instruction("add i64 "+at+", "+self.instruction("mul i64 "+position+", "+stride))
+        storage = self.instruction("load ptr, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 24"))
+        start = self.instruction("getelementptr i8, ptr "+storage+", i64 64")
+        return self.instruction("getelementptr i64, ptr "+start+", i64 "+at)
+
+    # Copy on write for an array: its descriptor and its buffer must both have one owner.
+    fn own_array(mut self, slot: str, array: str, element: str, coordinate: Value, module: int, token: lx.Token) -> str:
+        result = self.temporary("ptr")
+        self.line("store ptr "+element+", ptr "+result)
+        shared = self.label()
+        check = self.label()
+        owned = self.label()
+        self.branch(self.instruction("call i1 @wd.exclusive(ptr "+array+")"),check,shared)
+        self.open(check)
+        storage = self.instruction("load ptr, ptr "+self.instruction("getelementptr i8, ptr "+array+", i64 24"))
+        self.branch(self.instruction("call i1 @wd.exclusive(ptr "+storage+")"),owned,shared)
+        self.open(shared)
+        self.site(module,token)
+        copied = self.instruction("call ptr @wd_m_array_edit(ptr %ctx, ptr "+slot+", "+self.integer_span(coordinate)+")")
+        self.propagate()
+        self.line("store ptr "+copied+", ptr "+result)
+        self.jump(owned)
+        self.open(owned)
+        return self.instruction("load ptr, ptr "+result)
+
+    # A local list or array read at an index that calls nothing: nothing can change the collection while
+    # the index is computed, so the element is read in place without pinning the collection.
+    fn local_element(mut self, module: int, expression: int, target: int) -> str:
+        tree = self.program.signatures.compilation.modules[module].tree
+        node = tree.expressions[expression]
+        facts = self.program.facts[module]
+        base = node.children[0]
+        kind = self.program.signatures.pool.types[facts.types[base]].kind
+        coordinate = self.program.signatures.pool.types[facts.types[node.children[1]]].kind
+        if tree.expressions[base].kind != "Name" or not (kind == "List" or (kind == "Array" and coordinate in ["Int","Tuple"])) or not self.call_free(module,node.children[1]):
+            return ""
+        slot = self.projection(module,base)
+        if slot == "":
+            return ""
+        index = self.expression(module,node.children[1])
+        collection = self.instruction("load ptr, ptr "+slot)
+        if kind == "Array":
+            return self.array_element(collection,index,module,node.token)
+        return self.element(collection,self.position(collection,index.text,module,node.token),target)
+
+    fn call_free(self, module: int, expression: int) -> bool:
+        tree = self.program.signatures.compilation.modules[module].tree
+        node = tree.expressions[expression]
+        if expression in self.program.facts[module].calls or node.kind not in ["Integer","Bool","Name","Unary","Binary","Member","Index","Tuple","Conditional","CompareChain"]:
+            return false
+        for child in node.children:
+            if child >= 0 and not self.call_free(module,child):
+                return false
+        return true
+
+    fn path(mut self, module: int, expression: int) -> str:
+        return self.address(self.place(module,expression),true,true)
+
+    fn projection(mut self, module: int, expression: int) -> str:
+        facts = self.program.facts[module]
+        node = self.program.signatures.compilation.modules[module].tree.expressions[expression]
+        if node.kind == "Name":
+            return self.slots[facts.symbols[expression]] if expression not in facts.calls else ""
+        if node.kind not in ["Member","Index"]:
+            return ""
+        base = node.children[0]
+        kind = self.program.signatures.pool.types[facts.types[base]].kind
+        if (node.kind == "Member" and kind not in ["Record","Error"]) or (node.kind == "Index" and kind != "Tuple"):
+            return ""
+        pointer = self.projection(module,base)
+        if pointer == "":
+            return ""
+        field = facts.symbols[expression]
+        if kind == "Error":
+            field = {"code":0,"message":1,"file":2,"line":3,"column":4}[node.token.text]
+        return self.instruction("getelementptr "+self.type(facts.types[base])+", ptr "+pointer+", i32 0, i32 "+str(field))
+
+    fn rooted(self, module: int, expression: int) -> bool:
+        node = self.program.signatures.compilation.modules[module].tree.expressions[expression]
+        if node.kind == "Name":
+            return expression not in self.program.facts[module].calls
+        return node.kind in ["Member","Index"] and self.rooted(module,node.children[0])
+
+    fn passive(self, module: int, expression: int) -> bool:
+        # There are no overload/property effects. Native closures/foreign calls
+        # remain unsupported. Unknown calls conservatively require a snapshot.
+        facts = self.program.facts[module]
+        node = self.program.signatures.compilation.modules[module].tree.expressions[expression]
+        if expression in facts.calls:
+            call = facts.calls[expression]
+            if call.kind == "function":
+                return true
+            if call.kind == "declared":
+                declaration = self.program.signatures.declarations[call.target]
+                statement = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                if not statement.method or statement.mutating or statement.external:
+                    return false
+                for parameter in statement.parameters:
+                    if parameter.mutable_borrow:
+                        return false
+            elif call.kind == "builtin":
+                if call.name not in ["len","str","int","float","byte_value","byte_string","find","starts_with","ends_with","unwrap"]:
+                    return false
+            elif call.kind not in ["construct","snapshot"]:
+                return false
+            for ref in call.arguments:
+                if not self.passive(ref.module,ref.expression):
+                    return false
+            return true
+        if node.kind not in ["Name","Integer","Float","Bool","None","String","Tuple","List","Dict","Member","Index","Slice","Unary","Binary","Conditional","CompareChain"]:
+            return false
+        for child in node.children:
+            if child >= 0 and not self.passive(module,child):
+                return false
+        return true
+
+    fn stringify(mut self, value: Value, quoted: bool, module: int, token: lx.Token) -> Value:
+        node = self.program.signatures.pool.types[value.type]
+        target = self.kind_id("Str")
+        self.require_type(target,module,token)
+        if node.kind == "Str":
+            return self.runtime_value(target,"wd_m_repr_str",["ptr "+self.spill(value)]) if quoted else value
+        if node.kind in ["Int","Float"]:
+            return self.runtime_value(target,"wd_m_int_str" if node.kind == "Int" else "wd_m_float_str",[self.type(value.type)+" "+value.text])
+        if node.kind == "Array":
+            return self.runtime_value(target,"wd_m_array_str",["ptr "+value.text])
+        if node.kind == "None":
+            return Value(target,self.string("None"))
+        if node.kind == "Bool":
+            return Value(target,self.instruction("select i1 "+value.text+", %wd.str "+self.string("true")+", %wd.str "+self.string("false")))
+        if node.kind in ["Function","Callable","Closure","Cursor","Range"]:
+            return Value(target,self.string({"Function":"<function>","Callable":"<callable>","Closure":"<closure>","Cursor":"<cursor>","Range":"<range>"}[node.kind]))
+        self.require_format(value.type,module,token)
+        return self.runtime_value(target,"wd_m_format_value",["ptr @wd.format.type."+str(value.type),"ptr "+self.spill(value),"i64 "+("1" if quoted else "0")])
+
+    fn print_value(mut self, value: Value, fd: str, module: int, token: lx.Token):
+        if self.program.signatures.pool.types[value.type].kind == "Int":
+            self.line("call void @wd.checked_integer(ptr %ctx, i64 "+fd+", i64 "+value.text+")")
+            self.propagate()
+            return
+        text = self.stringify(value,false,module,token)
+        self.output_text(text.text,fd)
+
+    fn output_text(mut self, text: str, fd: str):
+        self.line("call void @wd.checked_text(ptr %ctx, i64 "+fd+", %wd.str "+text+")")
+        self.propagate()
+
+    fn call(mut self, module: int, expression: int) -> Value:
+        # Calls nested in its arguments are not the statement, so this ends here.
+        whole_statement = expression == self.statement_call and module == self.statement_module
+        self.statement_call = -1
+        call = self.program.facts[module].calls[expression]
+        token = self.program.signatures.compilation.modules[module].tree.expressions[expression].token
+        target = self.program.facts[module].types[expression]
+        self.require_type(target,module,token)
+        if call.kind == "function":
+            return Value(target,"@wd.f"+str(self.program.signatures.declarations[call.target].symbol))
+        if call.kind == "snapshot":
+            ref = call.arguments[0]
+            return self.expression(ref.module,ref.expression)
+        if call.kind == "builtin" and call.name == "next":
+            ref = call.arguments[0]
+            place = self.place(ref.module,ref.expression)
+            self.address(place,false)
+            pointer = self.address(place,true)
+            actual = self.program.facts[ref.module].types[ref.expression]
+            item = self.program.signatures.pool.types[target].element
+            present = self.native_step(pointer,actual,item,module,token)
+            aggregate = self.instruction("insertvalue "+self.type(target)+" zeroinitializer, i1 "+present[0]+", 0")
+            return Value(target,self.instruction("insertvalue "+self.type(target)+" "+aggregate+", "+self.type(item)+" "+present[1].text+", 1"))
+        if call.kind == "closure" or (call.kind == "indirect" and self.program.signatures.pool.types[self.program.facts[call.arguments[0].module].types[call.arguments[0].expression]].kind == "Callable"):
+            return self.invocation(module,expression)
+        if call.kind == "builtin" and call.name in ["append","pop","remove"]:
+            ref = call.arguments[0]
+            # Builtins cache indexes, evaluate remaining arguments, then borrow
+            # the current path. Methods/borrowed parameters retain early checks.
+            place = self.place(ref.module,ref.expression,false)
+            value = Value(target,"")
+            if call.name in ["append","remove"]:
+                ref = call.arguments[1]
+                container = self.program.signatures.pool.types[self.program.facts[call.arguments[0].module].types[call.arguments[0].expression]]
+                element = container.key if call.name == "remove" else container.element
+                value = self.convert(self.expression(ref.module,ref.expression),element)
+            if whole_statement:
+                self.settle(self.statement_pins,[value]+self.path_values(place))
+            self.site(module,token)
+            pointer = self.address(place,true)
+            if call.name == "remove":
+                removed = self.instruction("call i64 @wd_m_map_remove(ptr %ctx, ptr "+pointer+", ptr "+self.spill(value)+")")
+                self.propagate()
+                return Value(target,self.instruction("icmp ne i64 "+removed+", 0"))
+            if call.name == "append":
+                self.line("call void @wd_m_seq_append(ptr %ctx, ptr "+pointer+", ptr "+self.spill(value)+")")
+                self.propagate()
+                return Value(target,"")
+            out = self.owned_slot(target)
+            self.line("call void @wd_m_seq_pop(ptr %ctx, ptr "+pointer+", ptr "+out+")")
+            self.propagate()
+            return Value(target,self.instruction("load "+self.type(target)+", ptr "+out))
+        if call.kind not in ["declared","construct","builtin","indirect"]:
+            self.unsupported(module,token,"call kind "+call.kind)
+        arguments: list[Value] = []
+        pointers: dict[int,str] = {}
+        places: dict[int,Place] = {}
+        mutations: dict[int,bool] = {}
+        snapshots: list[Value] = []
+        if call.kind in ["declared","construct"]:
+            declaration = self.program.signatures.declarations[call.target]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            for parameter in declaration.parameters:
+                append(arguments,Value(parameter.type,""))
+        for i in range(len(call.arguments)):
+            reference = call.arguments[i]
+            if call.kind in ["declared","construct"]:
+                declaration = self.program.signatures.declarations[call.target]
+                stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                position = call.order[i]
+                borrowed = call.kind == "declared" and ((stmt.method and stmt.mutating and position == 0) or stmt.parameters[position].mutable_borrow)
+                if borrowed:
+                    places[position] = self.place(reference.module,reference.expression)
+                    mutations[position] = true
+                    self.address(places[position],false)
+                elif call.kind == "declared" and stmt.method and position == 0:
+                    safe = self.rooted(reference.module,reference.expression)
+                    for j in range(len(call.arguments)):
+                        if j != i:
+                            ref = call.arguments[j]
+                            safe = safe and self.passive(ref.module,ref.expression)
+                    if safe:
+                        places[position] = self.place(reference.module,reference.expression)
+                        mutations[position] = false
+                        self.address(places[position],false)
+                    else:
+                        # Snapshot before effectful later arguments; the callee
+                        # borrows only this privately owned receiver value.
+                        value = self.expression(reference.module,reference.expression)
+                        append(snapshots,value)
+                        pointers[position] = self.spill(value)
+                else:
+                    arguments[position] = self.convert(self.expression(reference.module,reference.expression),declaration.parameters[position].type)
+            else:
+                append(arguments,self.expression(reference.module,reference.expression))
+        if call.kind == "construct":
+            aggregate = "zeroinitializer"
+            for i in range(len(arguments)):
+                item = arguments[i]
+                aggregate = self.instruction("insertvalue "+self.type(target)+" "+aggregate+", "+self.type(item.type)+" "+item.text+", "+str(i))
+            return Value(target,aggregate)
+        if call.kind in ["declared","indirect"]:
+            if whole_statement and True in [mutations[position] for position in places]:
+                kept = arguments+snapshots
+                for position in places:
+                    kept = kept+self.path_values(places[position])
+                self.settle(self.statement_pins,kept)
+            for position in places:
+                pointers[position] = self.address(places[position],mutations[position])
+            function = ""
+            if call.kind == "declared":
+                function = "@wd.f"+str(self.program.signatures.declarations[call.target].symbol)
+            else:
+                function = arguments[0].text
+                signature = self.program.signatures.pool.types[arguments[0].type]
+                arguments = arguments[1:]
+                for i in range(len(arguments)):
+                    arguments[i] = self.convert(arguments[i],signature.parameters[i])
+            operands = ["ptr %ctx"]
+            for i in range(len(arguments)):
+                append(operands,("ptr "+pointers[i]) if i in pointers else (self.type(arguments[i].type)+" "+arguments[i].text))
+            command = "call "+self.type(target)+" "+function+"("+join(operands,", ")+")"
+            result = ""
+            if self.program.signatures.pool.types[target].kind == "Void":
+                self.line(command)
+            else:
+                result = self.instruction(command)
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        name = call.name
+        self.site(module,token)
+        if starts_with(name,"db_") or starts_with(name,"stmt_") or starts_with(name,"py_"):
+            # A used optional service selects an explicit Linux system-library
+            # profile. Ordinary native compiler/application builds stay static.
+            self.system_libraries = true
+            self.python_used = self.python_used or starts_with(name,"py_")
+            operands: list[str] = []
+            for item in arguments:
+                append(operands,("ptr "+self.spill(item)) if self.program.signatures.pool.types[item.type].kind == "Str" else (self.type(item.type)+" "+item.text))
+            if self.program.signatures.pool.types[target].kind == "Str":
+                return self.runtime_value(target,"wd_m_"+name,operands)
+            result_type = "i64" if self.program.signatures.pool.types[target].kind == "Bool" else self.type(target)
+            command = "call "+result_type+" @wd_m_"+name+"("+join(["ptr %ctx"]+operands,", ")+")"
+            value = ""
+            if result_type == "void":
+                self.line(command)
+            else:
+                value = self.instruction(command)
+            self.propagate()
+            if self.program.signatures.pool.types[target].kind == "Bool":
+                value = self.instruction("icmp ne i64 "+value+", 0")
+            return self.hold(Value(target,value),true)
+        if name == "array_full":
+            floating = self.program.signatures.pool.types[self.program.signatures.pool.types[target].element].kind == "Float"
+            result = self.instruction("call ptr @wd_m_array_full(ptr %ctx, "+self.integer_span(arguments[0])+", ptr "+self.spill(arguments[1])+", i64 "+("1" if floating else "0")+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "array_from_list":
+            floating = self.program.signatures.pool.types[self.program.signatures.pool.types[target].element].kind == "Float"
+            result = self.instruction("call ptr @wd_m_array_from_list(ptr %ctx, ptr "+arguments[0].text+", i64 "+("1" if floating else "0")+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name in ["array_rank","array_contiguous"]:
+            result = self.instruction("call i64 @wd_m_"+name+"(ptr "+arguments[0].text+")")
+            return Value(target,self.instruction("icmp ne i64 "+result+", 0") if name == "array_contiguous" else result)
+        if name in ["array_sum","array_dot"]:
+            type = self.type(target)
+            result = self.instruction("call "+type+" @wd_m_array_reduce_"+("f" if type == "double" else "i")+"(ptr %ctx, ptr "+arguments[0].text+", ptr "+(arguments[1].text if name == "array_dot" else "null")+")")
+            self.propagate()
+            return Value(target,result)
+        if name in ["array_shape","array_copy","array_to_list","array_reshape","array_transpose","array_slice","array_matmul","array_affine","array_floats","array_integers"]:
+            operands = "ptr %ctx, ptr "+arguments[0].text
+            helper = name
+            if name == "array_reshape":
+                operands += ", "+self.integer_span(arguments[1])
+            elif name == "array_slice":
+                operands += ", "+join(["i64 "+item.text for item in arguments[1:]],", ")+", i64 1, i64 1"
+            elif name in ["array_transpose","array_matmul","array_affine"]:
+                operands += ", ptr "+arguments[1].text
+            elif name in ["array_floats","array_integers"]:
+                helper = "array_convert"
+                operands += ", i64 "+("1" if name == "array_floats" else "0")
+            result = self.instruction("call ptr @wd_m_"+helper+"("+operands+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name in ["math_sin","math_cos"]:
+            self.site(module,token)
+            value = self.convert(arguments[0],self.kind_id("Float"))
+            result = self.instruction("call double @wd_m_"+name+"(ptr %ctx, double "+value.text+")")
+            self.propagate()
+            return Value(target,result)
+        if name in ["math_finite","math_sqrt"]:
+            value = arguments[0].text
+            bits = self.instruction("bitcast double "+value+" to i64")
+            exponent = self.instruction("and i64 "+bits+", 9218868437227405312")
+            finite = self.instruction("icmp ne i64 "+exponent+", 9218868437227405312")
+            if name == "math_finite":
+                return Value(target,finite)
+            bad = self.instruction("xor i1 "+finite+", true")
+            negative = self.instruction("fcmp olt double "+value+", 0.0")
+            self.guard(self.instruction("or i1 "+bad+", "+negative),module,token,"R4027","sqrt requires a finite nonnegative value")
+            return Value(target,self.instruction("call double @llvm.sqrt.f64(double "+value+")"))
+        if name == "iter":
+            return self.make_cursor(arguments[0],target)
+        if name == "finished":
+            return Value(target,"zeroinitializer")
+        if name == "yielded":
+            value = self.convert(arguments[0],self.program.signatures.pool.types[target].element)
+            aggregate = self.instruction("insertvalue "+self.type(target)+" zeroinitializer, i1 true, 0")
+            return Value(target,self.instruction("insertvalue "+self.type(target)+" "+aggregate+", "+self.type(value.type)+" "+value.text+", 1"))
+        if name in ["has_item","step_value"]:
+            value = arguments[0]
+            present = self.instruction("extractvalue "+self.type(value.type)+" "+value.text+", 0")
+            if name == "has_item":
+                return Value(target,present)
+            self.guard(self.instruction("xor i1 "+present+", true"),module,token,"R4024","cannot read an exhausted iterator step")
+            return Value(target,self.instruction("extractvalue "+self.type(value.type)+" "+value.text+", 1"))
+        if name == "args":
+            result = self.instruction("call ptr @wd_m_args(ptr %ctx)")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "task_spawn":
+            self.site(module,token)
+            result = self.instruction("call ptr @wd_m_task_spawn(ptr %ctx, ptr "+arguments[0].text+", ptr "+arguments[1].text+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "task_spawn_io":
+            self.system_libraries = true
+            self.site(module,token)
+            file = self.spill(Value(self.kind_id("Str"),self.string(self.program.signatures.compilation.modules[module].file)))
+            result = self.instruction("call ptr @wd_m_task_spawn_io(ptr %ctx, ptr "+arguments[0].text+", ptr "+arguments[1].text+", ptr "+arguments[2].text+", ptr "+file+", i64 "+str(token.line)+", i64 "+str(token.column)+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "task_wait":
+            self.site(module,token)
+            result = self.instruction("call ptr @wd_m_task_wait(ptr %ctx, ptr "+arguments[0].text+", i64 "+arguments[1].text+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "task_checkpoint":
+            self.site(module,token)
+            self.line("call void @wd_m_task_checkpoint(ptr %ctx)")
+            self.propagate()
+            return Value(target,"")
+        if name == "random_bytes":
+            self.site(module,token)
+            return self.runtime_value(target,"wd_m_random_bytes",["i64 "+arguments[0].text])
+        if name in ["task_done","task_cancel","task_close","task_cancelled"]:
+            self.site(module,token)
+            if name == "task_close":
+                self.line("call void @wd_m_task_close(ptr "+arguments[0].text+")")
+                return Value(target,"")
+            if name == "task_cancel":
+                self.line("call void @wd_m_task_cancel(ptr %ctx, ptr "+arguments[0].text+")")
+                self.propagate()
+                return Value(target,"")
+            result = self.instruction("call i64 @wd_m_"+name+"("+("" if name == "task_cancelled" else "ptr %ctx, ptr "+arguments[0].text)+")")
+            self.propagate()
+            return Value(target,self.instruction("icmp ne i64 "+result+", 0"))
+        if name in ["eof","time_monotonic","time_monotonic_ns"]:
+            self.site(module,token)
+            function = "wd_m_eof" if name == "eof" else "wd_m_time_ns" if name == "time_monotonic_ns" else "wd_m_time_seconds"
+            value = self.instruction("call "+("double" if name == "time_monotonic" else "i64")+" @"+function+"(ptr %ctx)")
+            self.propagate()
+            return Value(target,self.instruction("icmp ne i64 "+value+", 0") if name == "eof" else value)
+        if name == "read_line":
+            return self.runtime_value(target,"wd_m_read_line",[])
+        if name == "time_sleep":
+            duration = self.convert(arguments[0],self.kind_id("Float"))
+            self.site(module,token)
+            self.line("call void @wd_m_time_sleep(ptr %ctx, double "+duration.text+")")
+            self.propagate()
+            return Value(target,"")
+        if name in ["fs_size","fs_mkdirs","fs_remove"]:
+            self.site(module,token)
+            result = self.instruction("call i64 @wd_m_"+name+"(ptr %ctx, ptr "+self.spill(arguments[0])+")")
+            self.propagate()
+            if name != "fs_size":
+                result = self.instruction("icmp ne i64 "+result+", 0")
+            return Value(target,result)
+        if name == "env_get":
+            self.site(module,token)
+            string = self.program.signatures.pool.intern("Str")
+            out = self.owned_slot(string)
+            found = self.instruction("call i64 @wd_m_env_get(ptr %ctx, ptr "+out+", ptr "+self.spill(arguments[0])+")")
+            self.propagate()
+            present = self.instruction("icmp ne i64 "+found+", 0")
+            result = self.instruction("insertvalue "+self.type(target)+" zeroinitializer, i1 "+present+", 0")
+            text = self.instruction("load %wd.str, ptr "+out)
+            return Value(target,self.instruction("insertvalue "+self.type(target)+" "+result+", %wd.str "+text+", 1"))
+        if name == "read_text":
+            self.site(module,token)
+            out = self.owned_slot(target)
+            self.line("call void @wd_m_read_text(ptr %ctx, ptr "+out+", ptr "+self.spill(arguments[0])+")")
+            self.propagate()
+            return Value(target,self.instruction("load %wd.str, ptr "+out))
+        if name == "write_text":
+            self.line("call void @wd_m_write_text(ptr %ctx, ptr "+self.spill(arguments[0])+", ptr "+self.spill(arguments[1])+")")
+            self.propagate()
+            return Value(target,"")
+        if name in ["path_join","path_name","path_parent","path_normalize","path_absolute","path_resolve","path_identity","fs_kind"]:
+            operands = ["ptr "+self.spill(arguments[0])]
+            if name == "path_join":
+                append(operands,"ptr "+self.spill(arguments[1]))
+            if name == "path_resolve":
+                append(operands,"i64 "+self.instruction("zext i1 "+arguments[1].text+" to i64"))
+            return self.runtime_value(target,"wd_m_"+name,operands)
+        if name in ["path_is_absolute","path_exists","path_within","fs_list"]:
+            operands = ["ptr %ctx","ptr "+self.spill(arguments[0])]
+            if name == "path_within":
+                append(operands,"ptr "+self.spill(arguments[1]))
+            if name == "fs_list":
+                append(operands,"i64 "+arguments[1].text)
+            type = "ptr" if name == "fs_list" else "i64"
+            result = self.instruction("call "+type+" @wd_m_"+name+"("+join(operands,", ")+")")
+            self.propagate()
+            if name == "fs_list":
+                return self.hold(Value(target,result),true)
+            return Value(target,self.instruction("icmp ne i64 "+result+", 0"))
+        if name == "json_null":
+            return Value(target,"null")
+        if name in ["json","json_dump"] or (name == "str" and self.program.signatures.pool.types[arguments[0].type].kind == "Json"):
+            value = arguments[0]
+            converted = self.instruction("call ptr @wd_m_json_convert(ptr %ctx, ptr @wd.json.type."+str(value.type)+", ptr "+self.spill(value)+", i64 0)")
+            self.propagate()
+            # json_dump accepts ordinary values without a source-level json
+            # type. Intern its private temporary type before rooting the node.
+            json_type = self.program.signatures.pool.intern("Json")
+            result = self.hold(Value(json_type,converted),true)
+            if name == "json":
+                return Value(target,result.text)
+            return self.runtime_value(target,"wd_m_json_dump",["ptr "+result.text])
+        if name == "json_parse":
+            result = self.instruction("call ptr @wd_m_json_parse(ptr %ctx, ptr "+self.spill(arguments[0])+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name in ["json_kind","json_str"]:
+            return self.runtime_value(target,"wd_m_"+name,["ptr "+arguments[0].text])
+        if name in ["json_list","json_dict","json_int","json_float","json_bool"]:
+            type = "ptr" if name in ["json_list","json_dict"] else ("double" if name == "json_float" else "i64")
+            result = self.instruction("call "+type+" @wd_m_"+name+"(ptr %ctx, ptr "+arguments[0].text+")")
+            self.propagate()
+            if name == "json_bool":
+                result = self.instruction("icmp ne i64 "+result+", 0")
+            return self.hold(Value(target,result),true)
+        if name in ["print","eprint"]:
+            self.site(module,token)
+            fd = "1" if name == "print" else "2"
+            for i in range(len(arguments)):
+                if i > 0:
+                    space = self.string(" ")
+                    self.output_text(space,fd)
+                self.print_value(arguments[i],fd,module,token)
+            newline = self.string("\n")
+            self.output_text(newline,fd)
+            return Value(target,"")
+        if name == "assert":
+            bad = self.instruction("xor i1 "+arguments[0].text+", true")
+            message = self.string("assertion failed") if len(arguments) == 1 else arguments[1].text
+            rejected = self.label()
+            valid = self.label()
+            self.branch(bad,rejected,valid)
+            self.open(rejected)
+            self.failure(module,token,"R4004",message)
+            self.open(valid)
+            return Value(target,"")
+        if name == "stream_open":
+            result = self.instruction("call ptr @wd_m_stream_open(ptr %ctx, ptr "+self.spill(arguments[0])+", ptr "+self.spill(arguments[1])+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "tls_version":
+            self.system_libraries = true
+            return self.runtime_value(target,"wd_m_tls_version",[])
+        if name in ["tcp_connect","tcp_listen","tcp_accept","tcp_port","tcp_shutdown_write","stream_timeout","tls_context_new","tls_context_close","tls_accept","tls_connect"]:
+            self.system_libraries = true
+            operands = ["ptr %ctx"]
+            for item in arguments:
+                append(operands,("ptr "+self.spill(item)) if self.program.signatures.pool.types[item.type].kind == "Str" else (self.type(item.type)+" "+item.text))
+            command = "call "+self.type(target)+" @wd_m_"+name+"("+join(operands,", ")+")"
+            value = ""
+            if self.program.signatures.pool.types[target].kind == "Void":
+                self.line(command)
+            else:
+                value = self.instruction(command)
+            self.propagate()
+            return self.hold(Value(target,value),true)
+        if name == "stream_closed":
+            closed = self.instruction("call i64 @wd_m_stream_closed(ptr "+arguments[0].text+")")
+            return Value(target,self.instruction("icmp ne i64 "+closed+", 0"))
+        if name in ["stream_read","stream_read_line"]:
+            return self.runtime_value(target,"wd_m_stream_line" if name == "stream_read_line" else "wd_m_stream_read",["ptr "+arguments[0].text,"i64 "+arguments[1].text])
+        if name in ["stream_write","stream_close","stream_flush","stream_seek","stream_tell"]:
+            operands = ["ptr %ctx","ptr "+arguments[0].text]
+            if name == "stream_write":
+                append(operands,"ptr "+self.spill(arguments[1]))
+            if name == "stream_close":
+                append(operands,"i64 1")
+            if name == "stream_seek":
+                append(operands,"i64 "+arguments[1].text)
+            command = "call "+self.type(target)+" @wd_m_"+name+"("+join(operands,", ")+")"
+            result = ""
+            if self.program.signatures.pool.types[target].kind == "Void":
+                self.line(command)
+            else:
+                result = self.instruction(command)
+            self.propagate()
+            return Value(target,result)
+        if name == "len":
+            kind = self.program.signatures.pool.types[arguments[0].type].kind
+            if kind == "Str":
+                return Value(target,self.instruction("extractvalue %wd.str "+arguments[0].text+", 1"))
+            if kind == "List":
+                return Value(target,self.instruction("call i64 @wd_m_seq_len(ptr "+arguments[0].text+")"))
+            if kind == "Array":
+                return Value(target,self.instruction("call i64 @wd_m_array_len(ptr "+arguments[0].text+")"))
+            if kind == "Dict":
+                return Value(target,self.instruction("call i64 @wd_m_map_len(ptr "+arguments[0].text+")"))
+            if kind == "Tuple":
+                return Value(target,str(len(self.program.signatures.pool.types[arguments[0].type].parameters)))
+        if name == "get":
+            index = self.instruction("call i64 @wd_m_map_find(ptr "+arguments[0].text+", ptr "+self.spill(arguments[1])+")")
+            found = self.instruction("icmp sge i64 "+index+", 0")
+            output = self.owned_slot(target)
+            yes = self.label()
+            no = self.label()
+            end = self.label()
+            self.branch(found,yes,no)
+            self.open(yes)
+            pointer = self.instruction("call ptr @wd_m_map_entry(ptr "+arguments[0].text+", i64 "+index+", i64 1)")
+            value = Value(target,self.instruction("load "+self.type(target)+", ptr "+pointer))
+            self.store(value,output)
+            self.jump(end)
+            self.open(no)
+            self.store(self.convert(arguments[2],target),output)
+            self.jump(end)
+            self.open(end)
+            return Value(target,self.instruction("load "+self.type(target)+", ptr "+output))
+        if name in ["keys","values"]:
+            node = self.program.signatures.pool.types[target]
+            size = self.instruction("call i64 @wd_m_map_len(ptr "+arguments[0].text+")")
+            owner = self.instruction("call ptr @wd_m_seq_new(ptr %ctx, i64 "+self.stride(node.element)+", i64 "+size+", i64 "+size+", "+self.callbacks(node.element)+")")
+            self.propagate()
+            result = self.hold(Value(target,owner),true)
+            position = self.temporary("i64")
+            self.line("store i64 0, ptr "+position)
+            test = self.label()
+            body = self.label()
+            end = self.label()
+            self.jump(test)
+            self.open(test)
+            current = self.instruction("load i64, ptr "+position)
+            valid = self.instruction("icmp slt i64 "+current+", "+size)
+            self.branch(valid,body,end)
+            self.open(body)
+            source = self.instruction("call ptr @wd_m_map_entry(ptr "+arguments[0].text+", i64 "+current+", i64 "+("1" if name == "values" else "0")+")")
+            item = Value(node.element,self.instruction("load "+self.type(node.element)+", ptr "+source))
+            destination = self.instruction("call ptr @wd_m_seq_read(ptr "+owner+", i64 "+current+")")
+            self.store(item,destination)
+            next = self.instruction("add i64 "+current+", 1")
+            self.line("store i64 "+next+", ptr "+position)
+            self.jump(test)
+            self.open(end)
+            return result
+        if name == "slice":
+            operands = ["i64 "+arguments[1].text,"i64 "+arguments[2].text,"i64 1","i64 1","i64 1"]
+            if self.program.signatures.pool.types[arguments[0].type].kind == "Str":
+                return self.runtime_value(target,"wd_m_str_slice",["ptr "+self.spill(arguments[0])]+operands)
+            result = self.instruction("call ptr @wd_m_seq_slice(ptr %ctx, ptr "+arguments[0].text+", "+join(operands,", ")+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "str":
+            return self.stringify(arguments[0],false,module,token)
+        if name in ["find","starts_with","ends_with"]:
+            left = arguments[0]
+            right = arguments[1]
+            if name == "find":
+                return Value(target,self.instruction("call i64 @wd_m_find(ptr "+self.spill(left)+", ptr "+self.spill(right)+")"))
+            a = self.instruction("extractvalue %wd.str "+left.text+", 1")
+            b = self.instruction("extractvalue %wd.str "+right.text+", 1")
+            enough = self.instruction("icmp sge i64 "+a+", "+b)
+            result = self.temporary("i1")
+            yes = self.label()
+            end = self.label()
+            self.line("store i1 false, ptr "+result)
+            self.branch(enough,yes,end)
+            self.open(yes)
+            offset = "0" if name == "starts_with" else self.instruction("sub i64 "+a+", "+b)
+            view = self.instruction("extractvalue %wd.str "+left.text+", 0")
+            view = self.instruction("getelementptr i8, ptr "+view+", i64 "+offset)
+            partial = self.instruction("insertvalue %wd.str "+left.text+", ptr "+view+", 0")
+            partial = self.instruction("insertvalue %wd.str "+partial+", i64 "+b+", 1")
+            same = self.compare("==",Value(left.type,partial),right,module,token)
+            self.line("store i1 "+same+", ptr "+result)
+            self.jump(end)
+            self.open(end)
+            return Value(target,self.instruction("load i1, ptr "+result))
+        if name in ["replace","join","strip","byte_string","byte_value","split"]:
+            if name == "replace":
+                return self.runtime_value(target,"wd_m_str_replace",["ptr "+self.spill(item) for item in arguments])
+            if name == "join":
+                return self.runtime_value(target,"wd_m_str_join",["ptr "+arguments[0].text,"ptr "+self.spill(arguments[1])])
+            if name == "strip":
+                out = self.owned_slot(target)
+                self.line("call void @wd_m_str_strip(ptr "+out+", ptr "+self.spill(arguments[0])+")")
+                return Value(target,self.instruction("load %wd.str, ptr "+out))
+            if name == "byte_string":
+                return self.runtime_value(target,"wd_m_byte_str",["i64 "+arguments[0].text])
+            if name == "byte_value":
+                result = self.instruction("call i64 @wd_m_byte_value(ptr %ctx, ptr "+self.spill(arguments[0])+")")
+                self.propagate()
+                return Value(target,result)
+            if name == "split":
+                result = self.instruction("call ptr @wd_m_str_split(ptr %ctx, ptr "+self.spill(arguments[0])+", ptr "+self.spill(arguments[1])+")")
+                self.propagate()
+                return self.hold(Value(target,result),true)
+        if name == "range":
+            values = ["0",arguments[0].text,"1"] if len(arguments) == 1 else [arguments[0].text,arguments[1].text,"1"]
+            if len(arguments) == 3:
+                values[2] = arguments[2].text
+            bad = self.instruction("icmp eq i64 "+values[2]+", 0")
+            self.guard(bad,module,token,"R4005","range step cannot be zero")
+            result = "zeroinitializer"
+            for i in range(3):
+                result = self.instruction("insertvalue "+self.type(target)+" "+result+", i64 "+values[i]+", "+str(i))
+            return Value(target,result)
+        if name == "unwrap":
+            value = arguments[0]
+            present = self.instruction("extractvalue "+self.type(value.type)+" "+value.text+", 0")
+            bad = self.instruction("xor i1 "+present+", true")
+            self.guard(bad,module,token,"R4023","cannot unwrap None")
+            return Value(target,self.instruction("extractvalue "+self.type(value.type)+" "+value.text+", 1"))
+        if name in ["float","int"]:
+            value = arguments[0]
+            kind = self.program.signatures.pool.types[value.type].kind
+            if name == "float" and kind == "Int":
+                return self.convert(value,target)
+            if (name == "float" and kind == "Float") or (name == "int" and kind == "Int"):
+                return Value(target,value.text)
+            if name == "int" and kind == "Float":
+                low = self.instruction("fcmp uge double "+value.text+", 0x43E0000000000000")
+                high = self.instruction("fcmp ult double "+value.text+", 0xC3E0000000000000")
+                bad = self.instruction("or i1 "+low+", "+high)
+                self.guard(bad,module,token,"R4003","float is outside the signed 64-bit range")
+                return Value(target,self.instruction("fptosi double "+value.text+" to i64"))
+            if name == "int" and kind == "Str":
+                result = self.instruction("call i64 @wd_m_str_int(ptr %ctx, ptr "+self.spill(value)+")")
+                self.propagate()
+                return Value(target,result)
+            if name == "float" and kind == "Str":
+                result = self.instruction("call double @wd_m_str_float(ptr %ctx, ptr "+self.spill(value)+")")
+                self.propagate()
+                return Value(target,result)
+        if name in ["char_count","chars","char_slice"]:
+            self.site(module,token)
+            text = "ptr "+self.spill(arguments[0])
+            if name == "char_slice":
+                return self.runtime_value(target,"wd_m_char_slice",[text,"i64 "+arguments[1].text,"i64 "+arguments[2].text])
+            if name == "char_count":
+                result = self.instruction("call i64 @wd_m_char_count(ptr %ctx, "+text+")")
+                self.propagate()
+                return Value(target,result)
+            result = self.instruction("call ptr @wd_m_chars(ptr %ctx, "+text+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        if name == "error":
+            self.site(module,token)
+            self.line("call void @wd_m_error_code(ptr %ctx, ptr "+self.spill(arguments[0])+")")
+            self.propagate()
+            file = self.string(self.program.signatures.compilation.modules[module].file)
+            self.line("call void @wd.fail(ptr %ctx, %wd.str "+arguments[0].text+", %wd.str "+arguments[1].text+", %wd.str "+file+", i64 "+str(token.line)+", i64 "+str(token.column)+")")
+            failure = self.load(target,self.instruction("getelementptr %wd.ctx, ptr %ctx, i32 0, i32 1"))
+            self.line("call void @wd.clear(ptr %ctx)")
+            return failure
+        if name == "exit":
+            value = arguments[0].text
+            low = self.instruction("icmp slt i64 "+value+", 0")
+            high = self.instruction("icmp sgt i64 "+value+", 255")
+            bad = self.instruction("or i1 "+low+", "+high)
+            self.guard(bad,module,token,"R4003","exit code must be in 0..255")
+            narrow = self.instruction("trunc i64 "+value+" to i32")
+            self.line("call void @wd.request_exit(ptr %ctx, i32 "+narrow+")")
+            self.jump("unwind")
+            return Value(target,"")
+        self.unsupported(module,token,"builtin "+name)
+        return Value(target,"")
+
+    fn invocation(mut self, module: int, expression: int) -> Value:
+        call = self.program.facts[module].calls[expression]
+        reference = call.arguments[0]
+        type = self.program.facts[reference.module].types[reference.expression]
+        function = self.program.signatures.pool.types[type]
+        token = self.program.signatures.compilation.modules[module].tree.expressions[expression].token
+        mutable = function.kind == "Callable"
+        if function.kind == "Closure":
+            declaration = self.program.signatures.declarations[self.declarations[function.declaration]]
+            mutable = len(self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement].mutable_captures) > 0
+        place = Place("",[])
+        pointer = ""
+        if mutable and self.rooted(reference.module,reference.expression):
+            place = self.place(reference.module,reference.expression)
+            self.address(place,false)
+        else:
+            # Pure calls snapshot before argument effects. Stateful temporaries
+            # also need a home whose state survives for the complete call.
+            value = self.expression(reference.module,reference.expression)
+            pointer = self.owned_slot(type)
+            self.store(value,pointer)
+        arguments = [Value(item,"") for item in function.parameters]
+        for i in range(1,len(call.arguments)):
+            item = call.arguments[i]
+            position = call.order[i-1] if call.kind == "closure" else i-1
+            arguments[position] = self.convert(self.expression(item.module,item.expression),function.parameters[position])
+        if pointer == "":
+            pointer = self.address(place,true)
+        self.site(module,token)
+        code = "@wd.f"+str(function.declaration)
+        environment = pointer
+        if function.kind == "Callable":
+            owner = self.instruction("call ptr @wd_m_callable_unique(ptr %ctx, ptr "+pointer+")")
+            self.propagate()
+            environment = self.instruction("call ptr @wd_m_callable_data(ptr "+owner+")")
+            code = self.instruction("call ptr @wd_m_callable_code(ptr "+owner+")")
+        operands = ["ptr %ctx","ptr "+environment]+[self.type(item.type)+" "+item.text for item in arguments]
+        target = self.program.facts[module].types[expression]
+        command = "call "+self.type(target)+" "+code+"("+join(operands,", ")+")"
+        result = ""
+        if self.program.signatures.pool.types[target].kind == "Void":
+            self.line(command)
+        else:
+            result = self.instruction(command)
+        self.propagate()
+        return self.hold(Value(target,result),true)
+
+    fn make_cursor(mut self, source: Value, target: int) -> Value:
+        node = self.program.signatures.pool.types[source.type]
+        field = self.type(source.type)+" "+source.text
+        transfer = false
+        if node.kind == "Dict":
+            # Dictionary cursors own keys only, never keep value resources alive.
+            owner = self.instruction("call ptr @wd_m_map_keys(ptr %ctx, ptr "+source.text+", "+self.callbacks(node.key)+")")
+            self.propagate()
+            field = "ptr "+owner
+            transfer = true
+        aggregate = self.instruction("insertvalue "+self.type(target)+" zeroinitializer, "+field+", 0")
+        return self.hold(Value(target,aggregate),transfer)
+
+    fn native_step(mut self, pointer: str, cursor: int, element: int, module: int, token: lx.Token) -> tuple[str,Value]:
+        node = self.program.signatures.pool.types[cursor]
+        kind = node.kind
+        state = pointer
+        position = ""
+        if kind == "Cursor":
+            source = self.program.signatures.pool.types[node.element]
+            kind = source.kind
+            state = self.instruction("getelementptr "+self.type(cursor)+", ptr "+pointer+", i32 0, i32 0")
+            position = self.instruction("getelementptr "+self.type(cursor)+", ptr "+pointer+", i32 0, i32 1")
+        result = self.owned_slot(element)
+        self.store(Value(element,"zeroinitializer"),result)
+        available = self.temporary("i1")
+        self.line("store i1 false, ptr "+available)
+        current = ""
+        limit = ""
+        stride = "1"
+        value = ""
+        valid = ""
+        if kind == "Range":
+            type = self.type(self.kind_id("Range"))
+            range_state = self.instruction("load "+type+", ptr "+state)
+            current = self.instruction("extractvalue "+type+" "+range_state+", 0")
+            limit = self.instruction("extractvalue "+type+" "+range_state+", 1")
+            stride = self.instruction("extractvalue "+type+" "+range_state+", 2")
+            below = self.instruction("icmp slt i64 "+current+", "+limit)
+            above = self.instruction("icmp sgt i64 "+current+", "+limit)
+            positive = self.instruction("icmp sgt i64 "+stride+", 0")
+            valid = self.instruction("select i1 "+positive+", i1 "+below+", i1 "+above)
+        else:
+            current = self.instruction("load i64, ptr "+position)
+            value_type = "%wd.str" if kind == "Str" else "ptr"
+            value = self.instruction("load "+value_type+", ptr "+state)
+            limit = self.instruction("extractvalue %wd.str "+value+", 1") if kind == "Str" else self.instruction("call i64 @"+("wd_m_array_len" if kind == "Array" else "wd_m_seq_len")+"(ptr "+value+")")
+            valid = self.instruction("icmp slt i64 "+current+", "+limit)
+        body = self.label()
+        end = self.label()
+        self.branch(valid,body,end)
+        self.open(body)
+        item = Value(element,current)
+        next_value = ""
+        if kind == "Range":
+            pair = self.instruction("call {i64, i1} @llvm.sadd.with.overflow.i64(i64 "+current+", i64 "+stride+")")
+            next_value = self.instruction("extractvalue {i64, i1} "+pair+", 0")
+            overflow = self.instruction("extractvalue {i64, i1} "+pair+", 1")
+            next_value = self.instruction("select i1 "+overflow+", i64 "+limit+", i64 "+next_value)
+            position = self.instruction("getelementptr "+self.type(self.kind_id("Range"))+", ptr "+state+", i32 0, i32 0")
+        else:
+            next_value = self.instruction("add i64 "+current+", 1")
+            if kind == "Str":
+                bytes = self.instruction("extractvalue %wd.str "+value+", 0")
+                bytes = self.instruction("getelementptr i8, ptr "+bytes+", i64 "+current)
+                text = self.instruction("insertvalue %wd.str "+value+", ptr "+bytes+", 0")
+                item = Value(element,self.instruction("insertvalue %wd.str "+text+", i64 1, 1"))
+            else:
+                address = self.instruction("call ptr @"+("wd_m_array_flat" if kind == "Array" else "wd_m_seq_read")+"(ptr "+value+", i64 "+current+")")
+                item = Value(element,self.instruction("load "+self.type(element)+", ptr "+address))
+        self.store(item,result)
+        self.line("store i64 "+next_value+", ptr "+position)
+        self.line("store i1 true, ptr "+available)
+        self.jump(end)
+        self.open(end)
+        return (self.instruction("load i1, ptr "+available),self.load(element,result))
+
+    fn iteration_source(mut self, source: Value, module: int, expression: int) -> tuple[Root,int]:
+        protocol = self.program.facts[module].protocols[expression]
+        if protocol.make >= 0:
+            declaration = self.program.signatures.declarations[protocol.make]
+            result = self.instruction("call "+self.type(declaration.result)+" @wd.f"+str(declaration.symbol)+"(ptr %ctx, ptr "+self.spill(source)+")")
+            self.propagate()
+            source = self.hold(Value(declaration.result,result),true)
+        snapshot = self.owned_slot(source.type,false)
+        self.store(source,snapshot)
+        return (Root(source.type,snapshot),protocol.next)
+
+    fn iteration_next(mut self, cursor: Root, next: int, element: int, module: int, token: lx.Token) -> tuple[str,Value]:
+        if next < 0:
+            return self.native_step(cursor.pointer,cursor.type,element,module,token)
+        declaration = self.program.signatures.declarations[next]
+        type = self.type(declaration.result)
+        self.site(module,token)
+        value = self.instruction("call "+type+" @wd.f"+str(declaration.symbol)+"(ptr %ctx, ptr "+cursor.pointer+")")
+        self.propagate()
+        self.hold(Value(declaration.result,value),true)
+        return (self.instruction("extractvalue "+type+" "+value+", 0"),Value(element,self.instruction("extractvalue "+type+" "+value+", 1")))
+
+    fn comprehension_clause(mut self, module: int, index: int, position: int, output: str):
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[index]
+        type = self.program.facts[module].types[index]
+        node = self.program.signatures.pool.types[type]
+        dictionary = expr.kind == "DictComprehension"
+        head = 2 if dictionary else 1
+        if position == len(expr.clauses):
+            key = Value(-1,"")
+            if dictionary:
+                key = self.expression(module,expr.children[0])
+            value = self.convert(self.expression(module,expr.children[head-1]),node.element)
+            self.site(module,expr.token)
+            if dictionary:
+                pointer = self.instruction("call ptr @wd_m_map_edit(ptr %ctx, ptr "+output+", ptr "+self.spill(key)+", i64 1)")
+                self.propagate()
+                self.store(value,pointer)
+            else:
+                self.line("call void @wd_m_seq_append(ptr %ctx, ptr "+output+", ptr "+self.spill(value)+")")
+                self.propagate()
+            self.drain()
+            return
+        child = expr.children[head+position]
+        clause = expr.clauses[position]
+        if clause.name == "":
+            condition = self.expression(module,child)
+            self.drain()
+            yes = self.label()
+            end = self.label()
+            self.branch(condition.text,yes,end)
+            self.open(yes)
+            self.comprehension_clause(module,index,position+1,output)
+            self.jump(end)
+            self.open(end)
+            return
+        source = self.expression(module,child)
+        kind = self.program.signatures.pool.types[source.type].kind
+        if kind in ["Record","Cursor"]:
+            prepared = self.iteration_source(source,module,child)
+            self.drain()
+            test = self.label()
+            body = self.label()
+            end = self.label()
+            self.jump(test)
+            self.open(test)
+            iteration = self.program.facts[module].iterations[index][position]
+            item = self.iteration_next(prepared[0],prepared[1],iteration.type,module,clause.token)
+            self.branch(item[0],body,end)
+            self.open(body)
+            local_start = len(self.locals)
+            self.store(item[1],self.slot(iteration.symbol,iteration.type))
+            self.drain()
+            self.comprehension_clause(module,index,position+1,output)
+            self.clean(self.locals[local_start:])
+            self.jump(test)
+            self.open(end)
+            self.release_root(prepared[0])
+            return
+        start = "0"
+        stop = ""
+        step = "1"
+        positive = "true"
+        snapshot = ""
+        if kind == "Range":
+            start = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 0")
+            stop = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 1")
+            step = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 2")
+            positive = self.instruction("icmp sgt i64 "+step+", 0")
+        elif kind in ["List","Dict","Str","Array"]:
+            snapshot = self.owned_slot(source.type,false)
+            self.store(source,snapshot)
+            stop = self.instruction("extractvalue %wd.str "+source.text+", 1") if kind == "Str" else self.instruction("call i64 @"+{"List":"wd_m_seq_len","Dict":"wd_m_map_len","Array":"wd_m_array_len"}[kind]+"(ptr "+source.text+")")
+        else:
+            self.unsupported(module,clause.token,"comprehension iterator "+kind)
+        current = self.temporary("i64")
+        self.line("store i64 "+start+", ptr "+current)
+        self.drain()
+        test = self.label()
+        body = self.label()
+        end = self.label()
+        self.jump(test)
+        self.open(test)
+        item = self.instruction("load i64, ptr "+current)
+        below = self.instruction("icmp slt i64 "+item+", "+stop)
+        condition = below
+        if kind == "Range":
+            above = self.instruction("icmp sgt i64 "+item+", "+stop)
+            condition = self.instruction("select i1 "+positive+", i1 "+below+", i1 "+above)
+        self.branch(condition,body,end)
+        self.open(body)
+        local_start = len(self.locals)
+        iteration = self.program.facts[module].iterations[index][position]
+        value = Value(iteration.type,item)
+        if kind in ["List","Dict","Array"]:
+            pointer = self.instruction("call ptr @"+("wd_m_array_flat" if kind == "Array" else "wd_m_seq_read")+"(ptr "+source.text+", i64 "+item+")") if kind != "Dict" else self.instruction("call ptr @wd_m_map_entry(ptr "+source.text+", i64 "+item+", i64 0)")
+            value = Value(iteration.type,self.instruction("load "+self.type(iteration.type)+", ptr "+pointer))
+        elif kind == "Str":
+            pointer = self.instruction("extractvalue %wd.str "+source.text+", 0")
+            pointer = self.instruction("getelementptr i8, ptr "+pointer+", i64 "+item)
+            part = self.instruction("insertvalue %wd.str "+source.text+", ptr "+pointer+", 0")
+            value = Value(source.type,self.instruction("insertvalue %wd.str "+part+", i64 1, 1"))
+        self.store(value,self.slot(iteration.symbol,iteration.type))
+        self.comprehension_clause(module,index,position+1,output)
+        self.clean(self.locals[local_start:])
+        old = self.instruction("load i64, ptr "+current)
+        pair = self.instruction("call {i64, i1} @llvm.sadd.with.overflow.i64(i64 "+old+", i64 "+step+")")
+        next = self.instruction("extractvalue {i64, i1} "+pair+", 0")
+        overflow = self.instruction("extractvalue {i64, i1} "+pair+", 1")
+        self.line("store i64 "+next+", ptr "+current)
+        self.branch(overflow,end,test)
+        self.open(end)
+        if snapshot != "":
+            self.release_root(Root(source.type,snapshot))
+
+    fn comprehension(mut self, module: int, index: int) -> Value:
+        # A nested full expression owns its own temporary roots; do not drain
+        # the parent call's arguments while evaluating comprehension clauses.
+        parent = self.pending
+        self.pending = []
+        start = len(self.locals)
+        type = self.program.facts[module].types[index]
+        node = self.program.signatures.pool.types[type]
+        output = self.owned_slot(type,false)
+        if node.kind == "List":
+            self.store(Value(type,"@wd.empty."+str(type)),output)
+        else:
+            slot = self.map_slot(type,module,self.program.signatures.compilation.modules[module].tree.expressions[index].token)
+            self.store(Value(type,self.instruction("load ptr, ptr "+slot)),output)
+            self.drain()
+        self.comprehension_clause(module,index,0,output)
+        result = self.hold(Value(type,self.instruction("load ptr, ptr "+output)))
+        self.clean(self.locals[start:])
+        self.pending = parent+self.pending
+        return result
+
+    fn expression(mut self, module: int, index: int) -> Value:
+        facts = self.program.facts[module]
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[index]
+        target = facts.types[index]
+        self.require_type(target,module,expr.token)
+        if index in facts.calls:
+            return self.call(module,index)
+        kind = expr.kind
+        text = expr.token.text
+        if kind == "Name":
+            return self.load(target,self.slots[facts.symbols[index]])
+        if kind == "Closure":
+            aggregate = "zeroinitializer"
+            captures = self.program.closures[self.declarations[self.program.signatures.pool.types[target].declaration]].captures
+            for i in range(len(captures)):
+                capture = captures[i]
+                value = self.load(capture.type,self.slots[capture.symbol])
+                aggregate = self.instruction("insertvalue "+self.type(target)+" "+aggregate+", "+self.type(value.type)+" "+value.text+", "+str(i))
+            return Value(target,aggregate)
+        if kind in ["Integer","Bool"]:
+            return Value(target,text)
+        if kind == "Float":
+            if "e" in text or "E" in text:
+                parts = split(replace(text,"E","e"),"e")
+                text = parts[0]+("" if "." in parts[0] else ".0")+"e"+parts[1]
+            elif "." not in text:
+                text += ".0"
+            return Value(target,text)
+        if kind == "String":
+            return Value(target,self.string(text))
+        if kind == "None":
+            return Value(target,"0")
+        if kind in ["ListComprehension","DictComprehension"]:
+            return self.comprehension(module,index)
+        if kind == "List":
+            element = self.program.signatures.pool.types[target].element
+            if len(expr.children) == 0:
+                return Value(target,"@wd.empty."+str(target))
+            size = self.stride(element)
+            count = str(len(expr.children))
+            self.site(module,expr.token)
+            owner = self.instruction("call ptr @wd_m_seq_new(ptr %ctx, i64 "+size+", i64 "+count+", i64 "+count+", "+self.callbacks(element)+")")
+            self.propagate()
+            result = self.hold(Value(target,owner),true)
+            for i in range(len(expr.children)):
+                child = self.convert(self.expression(module,expr.children[i]),element)
+                pointer = self.instruction("call ptr @wd_m_seq_read(ptr "+owner+", i64 "+str(i)+")")
+                self.store(child,pointer)
+            return result
+        if kind == "Dict":
+            node = self.program.signatures.pool.types[target]
+            slot = self.map_slot(target,module,expr.token)
+            for i in range(0,len(expr.children),2):
+                key = self.expression(module,expr.children[i])
+                value = self.convert(self.expression(module,expr.children[i+1]),node.element)
+                self.site(module,expr.token)
+                pointer = self.instruction("call ptr @wd_m_map_edit(ptr %ctx, ptr "+slot+", ptr "+self.spill(key)+", i64 1)")
+                self.propagate()
+                self.store(value,pointer)
+            return Value(target,self.instruction("load ptr, ptr "+slot))
+        if kind == "Member":
+            pointer = self.projection(module,index)
+            if pointer != "":
+                return self.load(target,pointer)
+            base = self.expression(module,expr.children[0])
+            field = facts.symbols[index]
+            if self.program.signatures.pool.types[base.type].kind == "Error":
+                field = {"code":0,"message":1,"file":2,"line":3,"column":4}[text]
+            return Value(target,self.instruction("extractvalue "+self.type(base.type)+" "+base.text+", "+str(field)))
+        if kind == "Unary":
+            if facts.symbols[index] == 1:
+                return Value(target,"-9223372036854775808")
+            child = self.expression(module,expr.children[0])
+            if text == "+":
+                return child
+            if text == "not":
+                return Value(target,self.instruction("xor i1 "+child.text+", true"))
+            if text == "~":
+                return Value(target,self.instruction("xor i64 "+child.text+", -1"))
+            if text == "-":
+                if self.program.signatures.pool.types[target].kind == "Array":
+                    return self.operation("*",child,Value(self.kind_id("Int"),"-1"),target,module,expr.token)
+                if self.program.signatures.pool.types[target].kind == "Float":
+                    return Value(target,self.instruction("fneg double "+child.text))
+                bad = self.instruction("icmp eq i64 "+child.text+", -9223372036854775808")
+                self.guard(bad,module,expr.token,"R4001","integer overflow in negation")
+                return Value(target,self.instruction("sub i64 0, "+child.text))
+        if kind == "Tuple":
+            aggregate = "zeroinitializer"
+            types = self.program.signatures.pool.types[target].parameters
+            for i in range(len(expr.children)):
+                child = self.convert(self.expression(module,expr.children[i]),types[i])
+                aggregate = self.instruction("insertvalue "+self.type(target)+" "+aggregate+", "+self.type(child.type)+" "+child.text+", "+str(i))
+            return Value(target,aggregate)
+        if kind in ["Conditional","Binary"] and (kind == "Conditional" or text in ["and","or"]):
+            result = self.owned_slot(target)
+            condition = self.expression(module,expr.children[1] if kind == "Conditional" else expr.children[0])
+            yes = self.label()
+            no = self.label()
+            end = self.label()
+            self.branch(condition.text,yes,no)
+            self.open(yes)
+            value = self.convert(self.expression(module,expr.children[0]),target) if kind == "Conditional" else (self.expression(module,expr.children[1]) if text == "and" else condition)
+            self.store(value,result)
+            self.jump(end)
+            self.open(no)
+            value = self.convert(self.expression(module,expr.children[2]),target) if kind == "Conditional" else (condition if text == "and" else self.expression(module,expr.children[1]))
+            self.store(value,result)
+            self.jump(end)
+            self.open(end)
+            return self.load(target,result)
+        if kind in ["Binary","CompareChain"]:
+            left = self.expression(module,expr.children[0])
+            if kind == "Binary":
+                right = self.expression(module,expr.children[1])
+                return self.operation(text,left,right,target,module,expr.token)
+            result = self.temporary("i1")
+            self.line("store i1 false, ptr "+result)
+            end = self.label()
+            for i in range(len(expr.operators)):
+                right = self.expression(module,expr.children[i+1])
+                condition = self.compare(expr.operators[i],left,right,module,expr.token)
+                valid = self.label()
+                self.branch(condition,valid,end)
+                self.open(valid)
+                left = right
+            self.line("store i1 true, ptr "+result)
+            self.jump(end)
+            self.open(end)
+            return self.load(target,result)
+        if kind == "Index":
+            projected = self.projection(module,index)
+            if projected != "":
+                return self.load(target,projected)
+            local = self.local_element(module,index,target)
+            if local != "":
+                return self.load(target,local)
+            base = self.expression(module,expr.children[0])
+            if self.program.signatures.pool.types[base.type].kind == "Array":
+                coordinate = self.expression(module,expr.children[1])
+                if self.fixed_rank(coordinate):
+                    return self.load(target,self.array_element(base.text,coordinate,module,expr.token))
+                self.site(module,expr.token)
+                pointer = self.instruction("call ptr @wd_m_array_at(ptr %ctx, ptr "+base.text+", "+self.integer_span(coordinate)+")")
+                self.propagate()
+                return self.load(target,pointer)
+            node = self.program.signatures.pool.types[base.type]
+            if node.kind == "Tuple":
+                return Value(target,self.instruction("extractvalue "+self.type(base.type)+" "+base.text+", "+str(facts.symbols[index])))
+            if node.kind == "Str":
+                position = self.expression(module,expr.children[1]).text
+                length = self.instruction("extractvalue %wd.str "+base.text+", 1")
+                negative = self.instruction("icmp slt i64 "+position+", 0")
+                adjusted = self.instruction("add i64 "+position+", "+length)
+                position = self.instruction("select i1 "+negative+", i64 "+adjusted+", i64 "+position)
+                bad = self.instruction("icmp uge i64 "+position+", "+length)
+                self.guard(bad,module,expr.token,"R4006","index out of bounds")
+                data = self.instruction("extractvalue %wd.str "+base.text+", 0")
+                pointer = self.instruction("getelementptr i8, ptr "+data+", i64 "+position)
+                result = self.instruction("insertvalue %wd.str zeroinitializer, ptr "+pointer+", 0")
+                result = self.instruction("insertvalue %wd.str "+result+", i64 1, 1")
+                owner = self.instruction("extractvalue %wd.str "+base.text+", 2")
+                return Value(target,self.instruction("insertvalue %wd.str "+result+", ptr "+owner+", 2"))
+            if node.kind == "List":
+                position = self.expression(module,expr.children[1])
+                return self.load(target,self.element(base.text,self.position(base.text,position.text,module,expr.token),target))
+            if node.kind == "Dict":
+                key = self.expression(module,expr.children[1])
+                self.site(module,expr.token)
+                pointer = self.instruction("call ptr @wd_m_map_at(ptr %ctx, ptr "+base.text+", ptr "+self.spill(key)+")")
+                self.propagate()
+                return self.load(target,pointer)
+        if kind == "Slice":
+            base = self.expression(module,expr.children[0])
+            bounds = ["0","0","1"]
+            present = ["0","0"]
+            for i in range(3):
+                if expr.children[i+1] >= 0:
+                    bounds[i] = self.expression(module,expr.children[i+1]).text
+                    if i < 2:
+                        present[i] = "1"
+            self.site(module,expr.token)
+            operands = ["i64 "+x for x in bounds+present]
+            if self.program.signatures.pool.types[base.type].kind == "Str":
+                return self.runtime_value(target,"wd_m_str_slice",["ptr "+self.spill(base)]+operands)
+            if self.program.signatures.pool.types[base.type].kind == "Array":
+                result = self.instruction("call ptr @wd_m_array_slice(ptr %ctx, ptr "+base.text+", i64 0, "+join(operands,", ")+")")
+                self.propagate()
+                return self.hold(Value(target,result),true)
+            result = self.instruction("call ptr @wd_m_seq_slice(ptr %ctx, ptr "+base.text+", "+join(operands,", ")+")")
+            self.propagate()
+            return self.hold(Value(target,result),true)
+        self.unsupported(module,expr.token,"expression "+kind)
+        return Value(target,"")
+
+    fn block(mut self, module: int, body: list[int]):
+        tree = self.program.signatures.compilation.modules[module].tree
+        facts = self.program.facts[module]
+        scope_start = len(self.locals)
+        for index in body:
+            if self.ended:
+                break
+            stmt = tree.statements[index]
+            kind = stmt.kind
+            if kind in ["Function","Record","Import","Pass"]:
+                continue
+            if kind == "Assign":
+                type = facts.annotations[index]
+                self.require_type(type,module,stmt.token)
+                value = self.convert(self.expression(module,stmt.expressions[0]),type)
+                self.store(value,self.slot(facts.statements[index],type))
+            elif kind == "IndexAssign":
+                pins = len(self.pending)
+                value = self.convert(self.expression(module,stmt.expressions[1]),facts.annotations[index])
+                place = self.place(module,stmt.expressions[0])
+                self.settle(pins,[value]+self.path_values(place))
+                self.store(value,self.address(place,true,true))
+            elif kind == "AugAssign":
+                type = facts.annotations[index]
+                pins = len(self.pending)
+                place = self.place(module,stmt.expressions[0])
+                old = self.load(type,self.address(place,false))
+                right = self.expression(module,stmt.expressions[1])
+                value = self.operation(stmt.name,old,right,type,module,stmt.token)
+                self.settle(pins,[value]+self.path_values(place))
+                self.store(value,self.address(place,true))
+            elif kind == "Expression":
+                self.statement_call = stmt.expressions[0]
+                self.statement_module = module
+                self.statement_pins = len(self.pending)
+                self.expression(module,stmt.expressions[0])
+                self.statement_call = -1
+            elif kind == "Return":
+                if len(stmt.expressions) > 0:
+                    value = self.convert(self.expression(module,stmt.expressions[0]),facts.annotations[index])
+                    self.store(value,self.return_slot)
+                if len(self.finals) > 0:
+                    self.leave(1)
+                else:
+                    self.jump("return")
+            elif kind == "Raise":
+                value = self.expression(module,stmt.expressions[0])
+                if self.program.signatures.pool.types[value.type].kind == "Error":
+                    self.line("call void @wd.set_error(ptr %ctx, %wd.error "+value.text+")")
+                    self.jump(self.handler)
+                else:
+                    self.failure(module,stmt.token,"R4010",value.text)
+            elif kind == "If":
+                condition = self.expression(module,stmt.expressions[0])
+                self.drain()
+                yes = self.label()
+                no = self.label()
+                end = self.label()
+                self.branch(condition.text,yes,no)
+                self.open(yes)
+                self.block(module,stmt.body)
+                yes_ended = self.ended
+                if not self.ended:
+                    self.jump(end)
+                self.open(no)
+                self.block(module,stmt.otherwise)
+                no_ended = self.ended
+                if not self.ended:
+                    self.jump(end)
+                if not (yes_ended and no_ended):
+                    self.open(end)
+            elif kind in ["While","For"]:
+                test = self.label()
+                inside = self.label()
+                advance = self.label()
+                end = self.label()
+                current = ""
+                stop = ""
+                step = ""
+                positive = ""
+                source = Value(-1,"")
+                source_kind = "Range"
+                snapshot = ""
+                protocol_cursor = Root(-1,"")
+                protocol_next = -1
+                yielded_value = Value(-1,"")
+                if kind == "For":
+                    source = self.expression(module,stmt.expressions[0])
+                    source_kind = self.program.signatures.pool.types[source.type].kind
+                    start = "0"
+                    if source_kind == "Range":
+                        start = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 0")
+                        stop = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 1")
+                        step = self.instruction("extractvalue "+self.type(source.type)+" "+source.text+", 2")
+                        positive = self.instruction("icmp sgt i64 "+step+", 0")
+                    elif source_kind in ["List","Str","Dict","Array"]:
+                        snapshot = self.owned_slot(source.type,false)
+                        self.store(source,snapshot)
+                        if source_kind in ["List","Dict","Array"]:
+                            stop = self.instruction("call i64 @"+{"List":"wd_m_seq_len","Dict":"wd_m_map_len","Array":"wd_m_array_len"}[source_kind]+"(ptr "+source.text+")")
+                        else:
+                            stop = self.instruction("extractvalue %wd.str "+source.text+", 1")
+                    elif source_kind in ["Record","Cursor"]:
+                        prepared = self.iteration_source(source,module,stmt.expressions[0])
+                        protocol_cursor = prepared[0]
+                        protocol_next = prepared[1]
+                        source_kind = "Protocol"
+                        source = Value(protocol_cursor.type,"")
+                        snapshot = protocol_cursor.pointer
+                    else:
+                        self.unsupported(module,stmt.token,"iterator kind "+source_kind)
+                    if source_kind != "Protocol":
+                        current = self.temporary("i64")
+                        self.line("store i64 "+start+", ptr "+current)
+                    self.drain()
+                loop_start = len(self.locals)
+                self.jump(test)
+                self.open(test)
+                condition = ""
+                item = ""
+                if kind == "While":
+                    condition = self.expression(module,stmt.expressions[0]).text
+                    self.drain()
+                elif source_kind == "Protocol":
+                    advance_value = self.iteration_next(protocol_cursor,protocol_next,facts.annotations[index],module,stmt.token)
+                    condition = advance_value[0]
+                    yielded_value = advance_value[1]
+                else:
+                    item = self.instruction("load i64, ptr "+current)
+                    below = self.instruction("icmp slt i64 "+item+", "+stop)
+                    condition = below
+                    if source_kind == "Range":
+                        above = self.instruction("icmp sgt i64 "+item+", "+stop)
+                        condition = self.instruction("select i1 "+positive+", i1 "+below+", i1 "+above)
+                self.branch(condition,inside,end)
+                self.open(inside)
+                if kind == "For":
+                    value = yielded_value if source_kind == "Protocol" else Value(facts.annotations[index],item)
+                    if source_kind in ["List","Array"]:
+                        pointer = self.instruction("call ptr @"+("wd_m_array_flat" if source_kind == "Array" else "wd_m_seq_read")+"(ptr "+source.text+", i64 "+item+")")
+                        value = Value(facts.annotations[index],self.instruction("load "+self.type(facts.annotations[index])+", ptr "+pointer))
+                    elif source_kind == "Dict":
+                        pointer = self.instruction("call ptr @wd_m_map_entry(ptr "+source.text+", i64 "+item+", i64 0)")
+                        value = Value(facts.annotations[index],self.instruction("load "+self.type(facts.annotations[index])+", ptr "+pointer))
+                    elif source_kind == "Str":
+                        pointer = self.instruction("extractvalue %wd.str "+source.text+", 0")
+                        pointer = self.instruction("getelementptr i8, ptr "+pointer+", i64 "+item)
+                        part = self.instruction("insertvalue %wd.str "+source.text+", ptr "+pointer+", 0")
+                        value = Value(source.type,self.instruction("insertvalue %wd.str "+part+", i64 1, 1"))
+                    self.store(value,self.slot(facts.statements[index],facts.annotations[index]))
+                    if source_kind == "Protocol":
+                        self.drain()
+                append(self.loops,(advance,end))
+                append(self.loop_roots,loop_start)
+                self.block(module,stmt.body)
+                pop(self.loop_roots)
+                pop(self.loops)
+                if not self.ended:
+                    self.jump(advance)
+                self.open(advance)
+                if kind == "For" and source_kind != "Protocol":
+                    old = self.instruction("load i64, ptr "+current)
+                    next = ""
+                    overflow = "false"
+                    if source_kind == "Range":
+                        pair = self.instruction("call {i64, i1} @llvm.sadd.with.overflow.i64(i64 "+old+", i64 "+step+")")
+                        next = self.instruction("extractvalue {i64, i1} "+pair+", 0")
+                        overflow = self.instruction("extractvalue {i64, i1} "+pair+", 1")
+                    else:
+                        next = self.instruction("add i64 "+old+", 1")
+                    self.line("store i64 "+next+", ptr "+current)
+                    self.branch(overflow,end,test)
+                else:
+                    self.jump(test)
+                self.open(end)
+                self.clean(self.locals[loop_start:])
+                if snapshot != "":
+                    self.release_root(Root(source.type,snapshot))
+            elif kind in ["Break","Continue"]:
+                if len(self.finals) > 0 and self.finals[-1].loops == len(self.loops):
+                    self.leave(2 if kind == "Break" else 3)
+                else:
+                    self.exit_loop(kind == "Break")
+            elif kind == "With":
+                value = self.expression(module,stmt.expressions[0])
+                resource = self.program.signatures.pool.types[value.type].kind
+                if resource not in ["Stream","Task","Database","Statement","Transaction","TlsContext","PythonObject"]:
+                    self.unsupported(module,stmt.token,"resource scope type "+self.type(value.type))
+                self.site(module,stmt.token)
+                resource_name = "py" if resource == "PythonObject" else "task" if resource == "Task" else "db" if resource == "Database" else "stmt" if resource == "Statement" else "transaction" if resource == "Transaction" else "tls_context" if resource == "TlsContext" else "stream"
+                self.line("call void @wd_m_"+resource_name+"_check(ptr %ctx, ptr "+value.text+")")
+                self.propagate()
+                pin = self.owned_slot(value.type,false)
+                self.store(value,pin)
+                self.scopes[pin] = (module,stmt.token)
+                binding = self.slot(facts.statements[index],value.type)
+                self.store(value,binding)
+                self.drain()
+                self.block(module,stmt.body)
+                if not self.ended:
+                    self.release_root(Root(value.type,binding))
+                    self.release_root(Root(value.type,pin))
+                    self.propagate()
+            elif kind == "Finally":
+                cleanup = self.label()
+                failed = self.label()
+                flow = self.temporary("i32")
+                self.line("store i32 0, ptr "+flow)
+                error_type = self.kind_id("Error")
+                saved = self.owned_slot(error_type,false)
+                previous = self.handler
+                self.handler = failed
+                append(self.finals,Final(cleanup,flow,len(self.loops),len(self.locals),0))
+                self.block(module,stmt.body)
+                region = self.finals[-1]
+                pop(self.finals)
+                if not self.ended:
+                    self.jump(cleanup)
+                # An error leaving the try block waits in saved while the finally block runs.
+                self.open(failed)
+                self.handler = previous
+                self.line(";wd.cleanup.temps")
+                self.pending = []
+                self.clean(self.locals[region.roots:])
+                pointer = self.instruction("getelementptr %wd.ctx, ptr %ctx, i32 0, i32 1")
+                self.store(self.load(error_type,pointer),saved)
+                self.line("call void @wd.clear(ptr %ctx)")
+                self.drain()
+                self.line("store i32 4, ptr "+flow)
+                self.jump(cleanup)
+                self.open(cleanup)
+                self.block(module,stmt.otherwise)
+                if not self.ended:
+                    self.resume(flow,saved,region.uses)
+            elif kind == "Try":
+                caught = self.label()
+                end = self.label()
+                previous = self.handler
+                self.handler = caught
+                try_start = len(self.locals)
+                self.block(module,stmt.body)
+                try_roots = self.locals[try_start:]
+                if not self.ended:
+                    self.jump(end)
+                self.open(caught)
+                self.handler = previous
+                self.line(";wd.cleanup.temps")
+                self.pending = []
+                self.clean(try_roots)
+                pointer = self.instruction("getelementptr %wd.ctx, ptr %ctx, i32 0, i32 1")
+                failure = self.load(self.kind_id("Error"),pointer)
+                binding = self.slot(facts.statements[index],failure.type)
+                self.store(failure,binding)
+                self.line("call void @wd.clear(ptr %ctx)")
+                self.drain()
+                self.block(module,stmt.otherwise)
+                if not self.ended:
+                    self.release_root(Root(failure.type,binding))
+                    self.jump(end)
+                self.open(end)
+            else:
+                self.unsupported(module,stmt.token,"statement "+kind)
+            if not self.ended:
+                self.drain()
+        if not self.ended:
+            self.clean(self.locals[scope_start:])
+            if len(self.scopes) > 0:
+                self.propagate()
+
+    # Leaves the try block of the innermost finally block, closing its locals first as the block would.
+    fn leave(mut self, how: int):
+        self.drain()
+        self.clean(self.locals[self.finals[-1].roots:])
+        if len(self.scopes) > 0:
+            self.propagate()
+        self.finals[-1].uses = self.finals[-1].uses | (1 << how)
+        self.line("store i32 "+str(how)+", ptr "+self.finals[-1].flow)
+        self.jump(self.finals[-1].label)
+
+    fn exit_loop(mut self, breaking: bool):
+        self.clean(self.locals[self.loop_roots[-1]:])
+        self.drain()
+        if len(self.scopes) > 0:
+            self.propagate()
+        self.jump(self.loops[-1][1] if breaking else self.loops[-1][0])
+
+    # After a finally block: continues the return, break, continue or error that led into it.
+    fn resume(mut self, flow: str, saved: str, uses: int):
+        how_left = self.instruction("load i32, ptr "+flow)
+        for how in [1,2,3,4]:
+            if how < 4 and (uses & (1 << how)) == 0:
+                continue
+            taken = self.label()
+            rest = self.label()
+            self.branch(self.instruction("icmp eq i32 "+how_left+", "+str(how)),taken,rest)
+            self.open(taken)
+            if how == 1:
+                if len(self.finals) > 0:
+                    self.leave(1)
+                else:
+                    self.jump("return")
+            elif how < 4:
+                if len(self.finals) > 0 and self.finals[-1].loops == len(self.loops):
+                    self.leave(how)
+                else:
+                    self.exit_loop(how == 2)
+            else:
+                error_type = self.kind_id("Error")
+                failure = self.load(error_type,saved)
+                self.line("call void @wd.set_error(ptr %ctx, %wd.error "+failure.text+")")
+                self.release_root(Root(error_type,saved))
+                self.drain()
+                self.jump(self.handler)
+            self.open(rest)
+
+    fn begin(mut self):
+        self.lines = []
+        self.frame = []
+        self.slots = {}
+        self.counter = 0
+        self.current = "entry"
+        self.ended = false
+        self.handler = "unwind"
+        self.finals = []
+        self.loops = []
+        self.loop_roots = []
+        self.locals = []
+        self.temporaries = []
+        self.pending = []
+        self.return_slot = ""
+        self.scopes = {}
+
+    fn rendered(mut self) -> str:
+        all: list[str] = []
+        for root in (self.locals+self.temporaries)[::-1]:
+            all += self.cleanup(root)
+        temps = ["call void @wd.clean."+str(root.type)+"(ptr "+root.pointer+")" for root in self.temporaries]
+        text = join(self.frame+self.lines,"\n")
+        text = replace(text,";wd.cleanup.all",join(all,"\n  "))
+        return replace(text,";wd.cleanup.temps",join(temps,"\n  "))
+
+    fn foreign_callback(mut self, name: str, type: int):
+        # Each registered native thread owns an explicit borrowed scope stack.
+        # No mutable global callback target and no hosted TLS initialization.
+        signature = self.program.signatures.pool.types[type]
+        result = self.type(signature.element)
+        parameters: list[str] = []
+        arguments = ["ptr %ctx"]
+        for i in range(len(signature.parameters)):
+            parameter = self.type(signature.parameters[i])+" %a"+str(i)
+            append(parameters,parameter)
+            append(arguments,parameter)
+        fallback = "ret void" if result == "void" else "ret "+result+" zeroinitializer"
+        lines = ["entry:","  %scope = call ptr @wd_m_callback_find(ptr "+name+")","  %absent = icmp eq ptr %scope, null","  br i1 %absent, label %skip, label %check","check:","  %cp = getelementptr {ptr,ptr,ptr,ptr},ptr %scope,i32 0,i32 1","  %ctx = load ptr,ptr %cp","  %busy = call i64 @wd_rt_unwinding(ptr %ctx)","  %failed = icmp ne i64 %busy, 0","  br i1 %failed, label %skip, label %invoke","invoke:","  %fp = getelementptr {ptr,ptr,ptr,ptr},ptr %scope,i32 0,i32 2","  %function = load ptr,ptr %fp"]
+        command = "call "+result+" %function("+join(arguments,", ")+")"
+        append(lines,"  "+(command if result == "void" else "%value = "+command))
+        append(lines,"  %after = call i64 @wd_rt_unwinding(ptr %ctx)")
+        append(lines,"  %ok = icmp eq i64 %after, 0")
+        if result == "void":
+            append(lines,"  ret void")
+        else:
+            append(lines,"  %answer = select i1 %ok, "+result+" %value, "+result+" zeroinitializer")
+            append(lines,"  ret "+result+" %answer")
+        lines += ["skip:","  "+fallback]
+        append(self.globals,name+" = private constant i8 0")
+        append(self.globals,"define private "+result+" "+name+".invoke("+join(parameters,", ")+") {\n"+join(lines,"\n")+"\n}")
+
+    fn foreign_body(mut self, index: int):
+        declaration = self.program.signatures.declarations[index]
+        stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        symbols = self.program.facts[declaration.module].parameters[declaration.statement]
+        arguments: list[str] = []
+        parameters: list[str] = []
+        guards: list[tuple[str,str]] = []
+        self.site(declaration.module,stmt.token)
+        for i in range(len(declaration.parameters)):
+            actual = declaration.parameters[i].type
+            node = self.program.signatures.pool.types[actual]
+            value = "%p"+str(i)
+            if node.kind == "Str":
+                pointer = self.instruction("extractvalue %wd.str "+value+", 0")
+                count = self.instruction("extractvalue %wd.str "+value+", 1")
+                parameters += ["ptr","i64"]
+                arguments += ["ptr "+pointer,"i64 "+count]
+            elif node.kind == "Array":
+                slot = self.slots[symbols[i]]
+                pointer = self.instruction("call ptr @wd_m_array_borrow(ptr %ctx, ptr "+slot+", i64 "+("1" if stmt.parameters[i].mutable_borrow else "0")+")")
+                self.propagate()
+                owner = self.instruction("load ptr, ptr "+slot)
+                count = self.instruction("call i64 @wd_m_array_len(ptr "+owner+")")
+                parameters += ["ptr","i64"]
+                arguments += ["ptr "+pointer,"i64 "+count]
+            elif node.kind == "Function":
+                name = "@wd.cb."+str(declaration.symbol)+"."+str(i)
+                self.foreign_callback(name,actual)
+                append(guards,(name,value))
+                append(parameters,"ptr")
+                append(arguments,"ptr "+name+".invoke")
+            else:
+                append(parameters,self.type(actual))
+                append(arguments,self.type(actual)+" "+value)
+        result = self.type(declaration.result)
+        if stmt.name not in self.externals:
+            self.externals[stmt.name] = true
+            append(self.globals,"declare "+result+" @"+stmt.name+"("+join(parameters,", ")+")")
+        previous: list[str] = []
+        # Install callbacks only after every fallible buffer preflight succeeds.
+        for guard in guards:
+            scope = self.temporary("{ptr,ptr,ptr,ptr}")
+            append(previous,scope)
+            self.line("call void @wd_m_callback_push(ptr "+scope+", ptr "+guard[0]+", ptr %ctx, ptr "+guard[1]+")")
+        command = "call "+result+" @"+stmt.name+"("+join(arguments,", ")+")"
+        value = ""
+        if result == "void":
+            self.line(command)
+        else:
+            value = self.instruction(command)
+        for guard in previous[::-1]:
+            self.line("call void @wd_m_callback_pop(ptr "+guard+")")
+        self.propagate()
+        if result != "void":
+            self.line("store "+result+" "+value+", ptr "+self.return_slot)
+
+    fn function(mut self, index: int):
+        declaration = self.program.signatures.declarations[index]
+        unit = self.program.signatures.compilation.modules[declaration.module]
+        stmt = unit.tree.statements[declaration.statement]
+        self.require_type(declaration.result,declaration.module,stmt.token)
+        self.begin()
+        type = self.type(declaration.result)
+        if type != "void":
+            self.return_slot = self.temporary(type)
+        parameters = ["ptr %ctx"]
+        if index in self.program.closures:
+            append(parameters,"ptr %env")
+            for position in range(len(self.program.closures[index].captures)):
+                capture = self.program.closures[index].captures[position]
+                self.require_type(capture.type,declaration.module,stmt.token)
+                pointer = self.instruction("getelementptr %wd.c"+str(declaration.symbol)+", ptr %env, i32 0, i32 "+str(position))
+                self.slots[capture.symbol] = pointer
+        symbols = self.program.facts[declaration.module].parameters[declaration.statement]
+        for i in range(len(declaration.parameters)):
+            parameter = declaration.parameters[i]
+            self.require_type(parameter.type,declaration.module,stmt.token)
+            name = "%p"+str(i)
+            borrowed = (stmt.method and i == 0) or stmt.parameters[i].mutable_borrow
+            append(parameters,("ptr" if borrowed else self.type(parameter.type))+" "+name)
+            if borrowed:
+                self.slots[symbols[i]] = name
+            else:
+                # An incoming value initializes its home exactly once. There
+                # is no old value to drop. LLVM ASan can hoist argument stores
+                # to the entry, so a preceding zero store must not follow it.
+                pointer = self.slot(symbols[i],parameter.type,false)
+                self.retain(Value(parameter.type,name))
+                self.line("store "+self.type(parameter.type)+" "+name+", ptr "+pointer)
+        if stmt.external:
+            self.foreign_body(index)
+        else:
+            self.block(declaration.module,stmt.body)
+        if not self.ended:
+            self.jump("return")
+        self.open("unwind")
+        self.line(";wd.cleanup.all")
+        if type != "void" and self.managed(declaration.result):
+            self.release_root(Root(declaration.result,self.return_slot))
+        self.line("ret void" if type == "void" else "ret "+type+" zeroinitializer")
+        self.ended = true
+        self.open("return")
+        self.line(";wd.cleanup.all")
+        if len(self.scopes) > 0:
+            self.propagate()
+        if type == "void":
+            self.line("ret void")
+        else:
+            result = self.instruction("load "+type+", ptr "+self.return_slot)
+            self.line("ret "+type+" "+result)
+        self.ended = true
+        append(self.output,"define "+type+" @wd.f"+str(declaration.symbol)+"("+join(parameters,", ")+") {\nentry:\n"+self.rendered()+"\n}")
+
+    fn ownership(mut self) -> list[str]:
+        result: list[str] = []
+        for id in self.used_types:
+            if not self.managed(id):
+                continue
+            type = self.type(id)
+            node = self.program.signatures.pool.types[id]
+            if node.kind == "List":
+                stride = "1" if self.zero_size(node.element) else "ptrtoint (ptr getelementptr ("+self.type(node.element)+", ptr null, i64 1) to i64)"
+                append(result,"@wd.empty."+str(id)+" = private constant %wd.seq { { i64, i64, ptr } { i64 -1, i64 0, ptr null }, i64 0, i64 0, i64 "+stride+", "+self.callbacks(node.element)+" }")
+            for mode in ["retain","drop"]:
+                lines: list[str] = []
+                if node.kind in ["Str","List","Dict","Stream","Json","Callable","Array","Task","Database","Statement","Transaction","TlsContext","PythonObject"]:
+                    owner = "%v"
+                    if node.kind == "Str":
+                        append(lines,"  %o = extractvalue %wd.str %v, 2")
+                        owner = "%o"
+                    append(lines,"  call void @wd_m_"+("retain" if mode == "retain" else "release")+"(ptr "+owner+")")
+                else:
+                    fields: list[int] = []
+                    if node.kind in ["Optional","Step"]:
+                        # Absent payloads are always zero-initialized by this ABI.
+                        fields = [node.element]
+                    elif node.kind == "Tuple":
+                        fields = node.parameters
+                    elif node.kind == "Record":
+                        fields = [p.type for p in self.program.signatures.declarations[self.declarations[node.declaration]].parameters]
+                    elif node.kind == "Closure":
+                        fields = [p.type for p in self.program.closures[self.declarations[node.declaration]].captures]
+                    elif node.kind == "Cursor":
+                        fields = [node.element]
+                    elif node.kind == "Error":
+                        fields = [self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Str")]
+                    for i in range(len(fields)):
+                        if self.managed(fields[i]):
+                            position = 1 if node.kind in ["Optional","Step"] else i
+                            append(lines,"  %f"+str(i)+" = extractvalue "+type+" %v, "+str(position))
+                            append(lines,"  call void @wd."+mode+"."+str(fields[i])+"("+self.type(fields[i])+" %f"+str(i)+")")
+                append(result,"define void @wd."+mode+"."+str(id)+"("+type+" %v) {\n"+join(lines,"\n")+"\n  ret void\n}")
+                append(result,"define void @wd."+mode+".slot."+str(id)+"(ptr %p) {\n  %v = load "+type+", ptr %p\n  call void @wd."+mode+"."+str(id)+"("+type+" %v)\n  ret void\n}")
+            append(result,"define void @wd.clean."+str(id)+"(ptr %p) {\n  %v = load "+type+", ptr %p\n  store "+type+" zeroinitializer, ptr %p\n  call void @wd.drop."+str(id)+"("+type+" %v)\n  ret void\n}")
+            if node.kind == "Dict":
+                pair = "{ "+self.type(node.key)+", "+self.type(node.element)+" }"
+                fields = [node.key,node.element]
+                for mode in ["retain","drop"]:
+                    lines = ["  %entry = load "+pair+", ptr %p"]
+                    for i in range(2):
+                        if self.managed(fields[i]):
+                            append(lines,"  %f"+str(i)+" = extractvalue "+pair+" %entry, "+str(i))
+                            append(lines,"  call void @wd."+mode+"."+str(fields[i])+"("+self.type(fields[i])+" %f"+str(i)+")")
+                    append(result,"define void @wd.map."+mode+"."+str(id)+"(ptr %p) {\n"+join(lines,"\n")+"\n  ret void\n}")
+                key_type = self.type(node.key)
+                lines = ["  %a = load "+key_type+", ptr %ap","  %b = load "+key_type+", ptr %bp"]
+                if self.program.signatures.pool.types[node.key].kind == "Str":
+                    append(lines,"  %order = call i32 @wd.compare(%wd.str %a, %wd.str %b)")
+                else:
+                    append(lines,"  %same = icmp eq "+key_type+" %a, %b")
+                    append(lines,"  %less = icmp "+("ult" if key_type == "i1" else "slt")+" "+key_type+" %a, %b")
+                    append(lines,"  %different = select i1 %less, i32 -1, i32 1")
+                    append(lines,"  %order = select i1 %same, i32 0, i32 %different")
+                append(result,"define i32 @wd.key."+str(id)+"(ptr %ap, ptr %bp) {\n"+join(lines,"\n")+"\n  ret i32 %order\n}")
+        return result
+
+    fn erased_invocations(mut self) -> list[str]:
+        result: list[str] = []
+        for id in self.erasures:
+            node = self.program.signatures.pool.types[id]
+            parameters = ["ptr %ctx","ptr %data"]
+            arguments = ["ptr %ctx"]
+            if node.kind == "Closure":
+                append(arguments,"ptr %data")
+            for i in range(len(node.parameters)):
+                parameter = self.type(node.parameters[i])+" %a"+str(i)
+                append(parameters,parameter)
+                append(arguments,parameter)
+            code = "@wd.f"+str(node.declaration)
+            lines: list[str] = []
+            if node.kind == "Function":
+                append(lines,"  %fn = load ptr, ptr %data")
+                code = "%fn"
+            type = self.type(node.element)
+            prefix = "" if type == "void" else "%result = "
+            append(lines,"  "+prefix+"call "+type+" "+code+"("+join(arguments,", ")+")")
+            append(lines,"  ret void" if type == "void" else "  ret "+type+" %result")
+            append(result,"define "+type+" @wd.invoke."+str(id)+"("+join(parameters,", ")+") {\n"+join(lines,"\n")+"\n}")
+        return result
+
+    fn format_fields(self, id: int) -> list[int]:
+        node = self.program.signatures.pool.types[id]
+        if node.kind in ["List","Optional","Step"]:
+            return [node.element]
+        if node.kind == "Dict":
+            return [node.key,node.element]
+        if node.kind == "Tuple":
+            return node.parameters
+        if node.kind == "Record":
+            return [p.type for p in self.program.signatures.declarations[self.declarations[node.declaration]].parameters]
+        if node.kind == "Error":
+            return [self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Int"),self.kind_id("Int")]
+        return []
+
+    fn require_format(mut self, id: int, module: int, token: lx.Token):
+        if id in self.format_types:
+            return
+        self.format_types[id] = true
+        kind = self.program.signatures.pool.types[id].kind
+        if kind not in ["None","Bool","Int","Float","Str","List","Dict","Json","Optional","Tuple","Record","Error","Array","Function","Callable","Closure","Cursor","Range","Stream","Step","Task","Database","Statement","Transaction","TlsContext","PythonObject"]:
+            self.unsupported(module,token,"formatting "+kind)
+        for child in self.format_fields(id):
+            self.require_format(child,module,token)
+
+    fn format_descriptors(mut self) -> list[str]:
+        result: list[str] = []
+        kinds = {"None":0,"Bool":1,"Int":2,"Float":3,"Str":4,"List":5,"Dict":6,"Json":7,"Optional":8,"Tuple":9,"Record":10,"Error":11,"Array":12,"Function":13,"Callable":14,"Closure":15,"Cursor":16,"Range":17,"Stream":18,"Step":19,"Task":20,"Database":21,"Statement":22,"Transaction":23,"TlsContext":24,"PythonObject":25}
+        for id in self.format_types:
+            node = self.program.signatures.pool.types[id]
+            fields = self.format_fields(id)
+            names: list[str] = []
+            name = "zeroinitializer"
+            if node.kind == "Record":
+                declaration = self.program.signatures.declarations[self.declarations[node.declaration]]
+                names = [p.name for p in declaration.parameters]
+                name = self.string(self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement].name)
+            entries: list[str] = []
+            for i in range(len(fields)):
+                offset = "0"
+                if node.kind in ["Optional","Step","Tuple","Record","Error"]:
+                    offset = "ptrtoint (ptr getelementptr ("+self.type(id)+", ptr null, i32 0, i32 "+str(1 if node.kind in ["Optional","Step"] else i)+") to i64)"
+                label = self.string(names[i]) if len(names)>0 else "zeroinitializer"
+                append(entries,"{ %wd.str, i64, ptr } { %wd.str "+label+", i64 "+offset+", ptr @wd.format.type."+str(fields[i])+" }")
+            array = "@wd.format.fields."+str(id)
+            append(result,array+" = private constant ["+str(len(entries))+" x { %wd.str, i64, ptr }] ["+join(entries,", ")+"]")
+            append(result,"@wd.format.type."+str(id)+" = private constant { i64, i64, ptr, %wd.str } { i64 "+str(kinds[node.kind])+", i64 "+str(len(fields))+", ptr "+array+", %wd.str "+name+" }")
+        return result
+
+    fn json_descriptors(mut self) -> list[str]:
+        result: list[str] = []
+        kinds = {"None":0,"Bool":1,"Int":2,"Float":3,"Str":4,"List":5,"Dict":6,"Json":7,"Optional":8,"Tuple":9,"Record":10,"Error":11}
+        for id in self.used_types:
+            node = self.program.signatures.pool.types[id]
+            fields: list[int] = []
+            names: list[str] = []
+            if node.kind in ["List","Dict","Optional"]:
+                fields = [node.element]
+            elif node.kind == "Tuple":
+                fields = node.parameters
+            elif node.kind == "Record":
+                parameters = self.program.signatures.declarations[self.declarations[node.declaration]].parameters
+                fields = [p.type for p in parameters]
+                names = [p.name for p in parameters]
+            elif node.kind == "Error":
+                fields = [self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Str"),self.kind_id("Int"),self.kind_id("Int")]
+                names = ["code","message","file","line","column"]
+            entries: list[str] = []
+            for i in range(len(fields)):
+                name = self.string(names[i]) if len(names) > 0 else "zeroinitializer"
+                offset = "0"
+                if node.kind in ["Record","Tuple","Error","Optional"]:
+                    position = 1 if node.kind == "Optional" else i
+                    offset = "ptrtoint (ptr getelementptr ("+self.type(id)+", ptr null, i32 0, i32 "+str(position)+") to i64)"
+                append(entries,"{ %wd.str, i64, ptr } { %wd.str "+name+", i64 "+offset+", ptr @wd.json.type."+str(fields[i])+" }")
+            array = "@wd.json.fields."+str(id)
+            append(result,array+" = private constant ["+str(len(entries))+" x { %wd.str, i64, ptr }] ["+join(entries,", ")+"]")
+            append(result,"@wd.json.type."+str(id)+" = private constant { i64, i64, i64, ptr } { i64 "+str(get(kinds,node.kind,-1))+", i64 "+str(len(fields))+", i64 0, ptr "+array+" }")
+        return result
+
+    fn equal_lists(mut self):
+        index = 0
+        while index < len(self.equal_types):
+            request = self.equal_types[index]
+            index += 1
+            type = request[0]
+            node = self.program.signatures.pool.types[type]
+            element = node.element
+            dictionary = node.kind == "Dict"
+            self.begin()
+            length_function = "wd_m_map_len" if dictionary else "wd_m_seq_len"
+            length = self.instruction("call i64 @"+length_function+"(ptr %a)")
+            other = self.instruction("call i64 @"+length_function+"(ptr %b)")
+            same = self.instruction("icmp eq i64 "+length+", "+other)
+            self.branch(same,"test","different")
+            self.open("test")
+            current = self.instruction("phi i64 [ 0, %entry ], [ %next, %advance ]")
+            done = self.instruction("icmp eq i64 "+current+", "+length)
+            self.branch(done,"equal","item")
+            self.open("item")
+            a = ""
+            b = ""
+            if dictionary:
+                key = self.instruction("call ptr @wd_m_map_entry(ptr %a, i64 "+current+", i64 0)")
+                found = self.instruction("call i64 @wd_m_map_find(ptr %b, ptr "+key+")")
+                present = self.instruction("icmp sge i64 "+found+", 0")
+                self.branch(present,"values","different")
+                self.open("values")
+                a = self.instruction("call ptr @wd_m_map_entry(ptr %a, i64 "+current+", i64 1)")
+                b = self.instruction("call ptr @wd_m_map_entry(ptr %b, i64 "+found+", i64 1)")
+            else:
+                a = self.instruction("call ptr @wd_m_seq_read(ptr %a, i64 "+current+")")
+                b = self.instruction("call ptr @wd_m_seq_read(ptr %b, i64 "+current+")")
+            av = Value(element,self.instruction("load "+self.type(element)+", ptr "+a))
+            bv = Value(element,self.instruction("load "+self.type(element)+", ptr "+b))
+            value = self.compare("==",av,bv,request[1],request[2])
+            self.branch(value,"advance","different")
+            self.open("advance")
+            self.line("%next = add i64 "+current+", 1")
+            self.jump("test")
+            self.open("different")
+            self.line("ret i1 false")
+            self.ended = true
+            self.open("equal")
+            self.line("ret i1 true")
+            self.ended = true
+            append(self.output,"define i1 @wd.equal."+str(type)+"(ptr %a, ptr %b) {\nentry:\n"+self.rendered()+"\n}")
+
+    fn run(mut self, runtime: str) -> str:
+        entry = self.program.signatures.compilation.entry
+        self.collect_block(entry,self.program.signatures.compilation.modules[entry].tree.roots)
+        cursor = 0
+        while cursor < len(self.needed):
+            index = self.needed[cursor]
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            self.collect_block(declaration.module,stmt.body)
+            cursor += 1
+        for index in self.needed:
+            self.function(index)
+        self.begin()
+        append(self.frame,"  %ctx = alloca %wd.ctx")
+        self.line("store %wd.ctx zeroinitializer, ptr %ctx")
+        self.line("call void @wd_m_threads_init()")
+        self.block(entry,self.program.signatures.compilation.modules[entry].tree.roots)
+        if not self.ended:
+            self.jump("return")
+        self.open("unwind")
+        self.line(";wd.cleanup.all")
+        if self.python_used:
+            self.line("call void @wd_m_py_finish(ptr %ctx)")
+        exited = self.instruction("call i1 @wd.exited(ptr %ctx)")
+        self.branch(exited,"exit","report")
+        self.open("report")
+        self.line("call void @wd.report(ptr %ctx)")
+        self.line("call void @wd.clear(ptr %ctx)")
+        self.line("call void @wd.check_memory()")
+        self.line("ret i32 70")
+        self.ended = true
+        self.open("exit")
+        code = self.instruction("getelementptr %wd.ctx, ptr %ctx, i32 0, i32 6")
+        code = self.instruction("load i32, ptr "+code)
+        self.line("call void @wd.clear(ptr %ctx)")
+        self.line("call void @wd.check_memory()")
+        self.line("ret i32 "+code)
+        self.ended = true
+        self.open("return")
+        self.line(";wd.cleanup.all")
+        if self.python_used:
+            self.line("call void @wd_m_py_finish(ptr %ctx)")
+        if len(self.scopes) > 0 or self.python_used:
+            self.propagate()
+        self.line("call void @wd.clear(ptr %ctx)")
+        self.line("call void @wd.check_memory()")
+        self.line("ret i32 0")
+        self.ended = true
+        append(self.output,"define i32 @wd_main() {\nentry:\n"+self.rendered()+"\n}")
+        self.equal_lists()
+        records: list[str] = []
+        emitted: dict[int,bool] = {}
+        for type in self.used_types:
+            node = self.program.signatures.pool.types[type]
+            if node.kind == "Record" and node.declaration not in emitted:
+                emitted[node.declaration] = true
+                declaration = self.program.signatures.declarations[self.declarations[node.declaration]]
+                fields = [self.type(field.type) for field in declaration.parameters]
+                append(records,"%wd.r"+str(node.declaration)+" = type { "+join(fields,", ")+" }")
+            if node.kind == "Closure" and -node.declaration not in emitted:
+                emitted[-node.declaration] = true
+                fields = [self.type(field.type) for field in self.program.closures[self.declarations[node.declaration]].captures]
+                append(records,"%wd.c"+str(node.declaration)+" = type { "+join(fields,", ")+" }")
+        descriptors = self.json_descriptors()+self.format_descriptors()
+        optional: list[str] = []
+        if self.python_used:
+            append(optional,"define void @wd.python_scope_close(ptr %ctx,ptr %slot,%wd.str %file,i64 %line,i64 %column) {\n  %value = load ptr,ptr %slot\n  call void @wd.site(ptr %ctx,%wd.str %file,i64 %line,i64 %column)\n  call void @wd_m_py_close(ptr %ctx,ptr %value)\n  ret void\n}")
+        if self.system_libraries:
+            append(optional,"@wd.native.system_libraries = private constant i8 1")
+            append(optional,"define void @wd.tls_scope_close(ptr %ctx,ptr %slot,%wd.str %file,i64 %line,i64 %column) {\n  %value = load ptr,ptr %slot\n  call void @wd.site(ptr %ctx,%wd.str %file,i64 %line,i64 %column)\n  call void @wd_m_tls_context_close(ptr %ctx,ptr %value)\n  ret void\n}")
+            for kind in range(3):
+                name = ["database","statement","transaction"][kind]
+                append(optional,"define void @wd."+name+"_scope_close(ptr %ctx,ptr %slot,%wd.str %file,i64 %line,i64 %column) {\n  %value = load ptr,ptr %slot\n  call void @wd.site(ptr %ctx,%wd.str %file,i64 %line,i64 %column)\n  call void @wd_m_sqlite_scope_close(ptr %ctx,ptr %value,i64 "+str(kind)+")\n  ret void\n}")
+        return runtime+"\n"+join(optional+self.globals+records+descriptors+self.ownership()+self.erased_invocations()+self.output,"\n")+"\n"
+
+record Result:
+    text: str
+    diagnostic: src.Diagnostic
+
+fn emit(program: ir.Result, runtime: str) -> Result:
+    if program.diagnostic.code != "":
+        return Result("",program.diagnostic)
+    declarations: dict[int,int] = {}
+    for index in range(len(program.signatures.declarations)):
+        declarations[program.signatures.declarations[index].symbol] = index
+    generator = Generator(program,{},[],[],[],[],{},0,"entry",false,"unwind",[],declarations,src.success(),[],{},{},{},[],[],[],-1,-1,0,[],"",[],{},{},{},{},false,false,{"Void":"void","Int":"i64","Float":"double","Bool":"i1","None":"i8","Str":"%wd.str","Error":"%wd.error","Range":"{ i64, i64, i64 }","Function":"ptr","Callable":"ptr","List":"ptr","Dict":"ptr","Stream":"ptr","Json":"ptr","Array":"ptr","Task":"ptr","Database":"ptr","Statement":"ptr","Transaction":"ptr","TlsContext":"ptr","PythonObject":"ptr"},[])
+    try:
+        return Result(generator.run(runtime),src.success())
+    except err:
+        if generator.problem.code != "":
+            return Result("",generator.problem)
+        raise err

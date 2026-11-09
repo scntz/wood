@@ -1,0 +1,4 @@
+import shapes as shapes
+
+box = shapes.Box(2, 3)
+print(shapes.area(box))

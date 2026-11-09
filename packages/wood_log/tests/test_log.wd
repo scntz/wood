@@ -1,0 +1,23 @@
+import log as logging
+import std.path as path
+import std.fs as fs
+root = logging.logger("app", "warn")
+assert(logging.format_line(root, "info", "a\nb", {"k":"x y"}) == "info app: a\\nb k=x_y")
+directory = path.absolute("wood-log-test-output")
+fs.make_dirs(directory)
+file = path.combine(directory, "app.log")
+if path_exists(file):
+    fs.remove(file)
+sink = logging.logger("app", "info", file)
+logging.debug(sink, "hidden")
+logging.info(sink, "first")
+logging.warn(sink, "second", {"code":"7"})
+assert(read_text(file) == "info app: first\nwarn app: second code=7\n")
+fs.remove(file)
+fs.remove(directory)
+failed = false
+try:
+    logging.logger("x", "loud")
+except err:
+    failed = true
+assert(failed)

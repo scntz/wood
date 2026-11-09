@@ -1,0 +1,18 @@
+text = "a\0"+byte_string(255)+"\r\n🌳"
+for count in [0,1,8191,8192,8193,100000]:
+    data = (text*count)+"last"
+    write_text("native-text.bin",data)
+    assert(read_text("native-text.bin") == data)
+write_text("native-text.bin","")
+assert(read_text("native-text.bin") == "")
+for path in ["native-missing-file.bin","bad\0path"]:
+    try:
+        read_text(path)
+        assert(false)
+    except err:
+        assert(err.code == "R4008")
+        if path == "bad\0path":
+            assert(err.message == "path contains a NUL byte")
+        else:
+            assert(err.message == "cannot open file for reading: "+path)
+print("native binary read_text passed")

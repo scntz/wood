@@ -1,0 +1,16 @@
+import driver as driver
+import sources as src
+import modules as modules
+import syntax as ast
+import lexer as lx
+
+file = args()[0]
+write_text(file,"old captured text\n")
+unit = modules.Unit(file,"old captured text\n",0,ast.empty(),[])
+compilation = modules.Compilation([unit],0)
+diagnostic = src.located("E3007","test snapshot",file,0,lx.Token("","",0,1,1))
+write_text(file,"new on-disk text\n")
+assert(driver.diagnostic_source(diagnostic,compilation) == "old captured text\n")
+diagnostic.file = "missing.wd"
+assert(driver.diagnostic_source(diagnostic,compilation) == "")
+print("captured diagnostics passed")

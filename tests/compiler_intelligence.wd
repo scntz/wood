@@ -1,0 +1,118 @@
+import std.iter as it
+
+fn identity[T](value: T):
+    return value
+
+fn adder(offset: int):
+    return fn(value: int) => value + offset
+
+fn counter(start: int):
+    fn advance[mut start]():
+        start += 1
+        return start
+    return advance
+
+fn forward(value: int):
+    return later(value)
+fn later(value: int):
+    return value * 2
+
+fn promoted(flag: bool):
+    if flag:
+        return 2
+    return 3.5
+
+fn optional(flag: bool):
+    if flag:
+        return 7
+    return None
+
+fn nothing():
+    return None
+
+fn explicit_recursive(value: int) -> int:
+    if value == 0:
+        return 0
+    return inferred_recursive(value - 1)
+fn inferred_recursive(value: int):
+    return explicit_recursive(value)
+
+record Box[T]:
+    value: T
+    fn read(self):
+        return self.value
+    fn replace(mut self, value: T):
+        previous = self.value
+        self.value = value
+        return previous
+    fn transform[F](self, callback: F(T)):
+        return Box(callback(self.value))
+
+record Numbers:
+    current: int
+    stop: int
+    fn next(mut self):
+        if self.current >= self.stop:
+            empty: step[int] = finished()
+            return empty
+        value = self.current
+        self.current += 1
+        return yielded(value)
+
+record Sequence:
+    stop: int
+    fn iter(self):
+        return Numbers(0, self.stop)
+
+assert(identity((1,"wood")) == (1,"wood"))
+assert(identity([1,2]) == [1,2])
+add = adder(5)
+assert(add(7) == 12)
+state = counter(0)
+assert(state() == 1)
+snapshot = state
+assert(state() == 2 and snapshot() == 2)
+assert(forward(4) == 8)
+assert(promoted(true) == 2.0 and promoted(false) == 3.5)
+assert(unwrap(optional(true)) == 7 and optional(false) is None)
+assert(nothing() is None)
+assert(inferred_recursive(10) == 0)
+box = Box("original")
+assert(box.read() == "original")
+assert(box.replace("new") == "original" and box.read() == "new")
+assert(box.transform(fn(value) => len(value)).read() == 3)
+assert(it.collect(it.map(Sequence(5), fn(value) => value * 2)) == [0,2,4,6,8])
+assert(it.collect(Numbers(2,4)) == [2,3])
+
+# Unary observers return owned values and never consume the caller's payload.
+payload = yielded(["long native payload that exceeds small string storage"])
+assert(has_item(payload))
+copy = step_value(payload)
+copy[0] = "changed"
+assert(step_value(payload)[0] == "long native payload that exceeds small string storage")
+maybe: list[int] | None = [1,2]
+unwrapped = unwrap(maybe)
+append(unwrapped, 3)
+assert(unwrap(maybe) == [1,2])
+assert(len(step_value(yielded([1,2,3]))) == 3)
+try:
+    empty: step[str] = finished()
+    step_value(empty)
+    assert(false)
+except err:
+    assert(err.code == "R4024")
+try:
+    absent: str | None = None
+    unwrap(absent)
+    assert(false)
+except err:
+    assert(err.code == "R4023")
+
+cursor = iter(range(0,3))
+alias = cursor
+assert(step_value(next(cursor)) == 0)
+assert(step_value(next(alias)) == 0)
+assert(step_value(next(cursor)) == 1 and step_value(next(cursor)) == 2)
+assert(not has_item(next(cursor)) and not has_item(next(cursor)))
+
+print("compiler intelligence passed")

@@ -1,0 +1,78 @@
+# Binary streams. Handles share identity; use with for deterministic close.
+fn open(path: str, mode: str) -> stream:
+    return stream_open(path, mode)
+
+fn read(source: stream, count: int) -> str:
+    return stream_read(source, count)
+
+fn line(source: stream, limit: int) -> str:
+    return stream_read_line(source, limit)
+
+fn write(destination: stream, data: str):
+    stream_write(destination, data)
+
+fn flush(destination: stream):
+    stream_flush(destination)
+
+fn close(source: stream):
+    stream_close(source)
+
+fn closed(source: stream) -> bool:
+    return stream_closed(source)
+
+fn seek(source: stream, offset: int):
+    stream_seek(source, offset)
+
+fn tell(source: stream) -> int:
+    return stream_tell(source)
+
+fn read_exact(source: stream, count: int) -> str:
+    if count < 0 or count > 16777216:
+        raise "read_exact byte count must be in 0..16777216"
+    chunks: list[str] = []
+    remaining = count
+    while remaining > 0:
+        size = remaining
+        if size > 65536:
+            size = 65536
+        part = read(source, size)
+        if len(part) == 0:
+            raise "unexpected end of stream"
+        append(chunks, part)
+        remaining = remaining - len(part)
+    return join(chunks, "")
+
+fn read_all(source: stream, limit: int) -> str:
+    if limit < 0 or limit > 16777216:
+        raise "read_all byte limit must be in 0..16777216"
+    chunks: list[str] = []
+    remaining = limit
+    while true:
+        count = 65536
+        if remaining < count:
+            count = remaining + 1
+        part = read(source, count)
+        if len(part) == 0:
+            return join(chunks, "")
+        if len(part) > remaining:
+            raise "stream exceeds byte limit"
+        append(chunks, part)
+        remaining = remaining - len(part)
+    return ""
+
+fn copy(source: stream, destination: stream, limit: int) -> int:
+    if limit < 0:
+        raise "copy byte limit must be nonnegative"
+    total = 0
+    while true:
+        count = 65536
+        if limit - total < count:
+            count = limit - total + 1
+        part = read(source, count)
+        if len(part) == 0:
+            return total
+        if len(part) > limit - total:
+            raise "copy exceeds byte limit"
+        write(destination, part)
+        total = total + len(part)
+    return total

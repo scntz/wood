@@ -1,0 +1,25 @@
+# Existing lifecycle corpus, shared by C++ and the native task qualification.
+import std.task as tasks
+import std.time as time
+fn square(message: json) -> json:
+    n = json_int(message)
+    return json(n*n)
+fn cooperate(message: json) -> json:
+    while not tasks.cancelled():
+        time.sleep(0.001)
+    return message
+fn fail(message: json) -> json:
+    raise "worker failure"
+with tasks.spawn(square,json(12)) as work:
+    assert(json_int(tasks.wait(work,10000)) == 144)
+    assert(json_int(tasks.wait(work,10000)) == 144 and tasks.done(work))
+with tasks.spawn(cooperate,json(42)) as work:
+    tasks.cancel(work)
+    assert(json_int(tasks.wait(work,10000)) == 42)
+with tasks.spawn(fail,json_null()) as work:
+    try:
+        tasks.wait(work,10000)
+        assert(false)
+    except failure:
+        assert(failure.code == "R4010" and failure.message == "worker failure")
+print("task lifecycle boundary passed")

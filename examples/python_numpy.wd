@@ -1,0 +1,18 @@
+import python@numpy as np
+import std.python as py
+
+# Explicit copies preserve Wood's native value semantics. Python arrays retain
+# Python identity; no raw numeric buffer crosses this boundary.
+with np.call("array", [py.value([1.0, 2.0, 3.0, 4.0])]) as numbers:
+    with py.call(py.attr(numbers, "reshape"), [py.tuple([py.value(2), py.value(2)])]) as matrix:
+        print(py.to_json(py.call(py.attr(matrix, "tolist"))))
+        print(py.to_float(np.call("sum", [matrix])))
+        with np.call("matmul", [matrix, matrix]) as product:
+            print(py.to_json(py.call(py.attr(product, "tolist"))))
+    try:
+        py.call(py.attr(numbers, "reshape"), [py.value(3)])
+        assert(false, "reshape must fail")
+    except err:
+        assert(err.code == "R4031")
+        assert(find(err.message, "ValueError") >= 0)
+        print("caught Python ValueError")

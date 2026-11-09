@@ -1,0 +1,89 @@
+import std.csv as csv
+import std.iter as it
+
+# Independent byte-by-byte oracle. This deliberately uses no replace or join.
+fn reference(rows: list[list[str]], delimiter: str) -> str:
+    output = ""
+    for row in rows:
+        first = true
+        for field in row:
+            if not first:
+                output += delimiter
+            first = false
+            quote = len(row) == 1 and field == ""
+            for char in field:
+                if char == delimiter or char == '"' or char == "\r" or char == "\n":
+                    quote = true
+            if quote:
+                output += '"'
+            for char in field:
+                output += char
+                if quote and char == '"':
+                    output += '"'
+            if quote:
+                output += '"'
+        output += "\r\n"
+    return output
+
+fn verify(rows: list[list[str]], delimiter: str):
+    snapshot = rows
+    actual = csv.dump(rows, delimiter)
+    assert(actual == reference(rows, delimiter))
+    assert(csv.parse(actual, delimiter) == rows)
+    assert(rows == snapshot)
+    # Results and retained table snapshots survive independent nested mutation.
+    if len(rows) != 0 and len(rows[0]) != 0:
+        rows[0][0] = "changed"
+        assert(csv.parse(actual, delimiter) == snapshot)
+
+all_bytes = join([byte_string(i) for i in range(256)], "")
+for code in range(256):
+    delimiter = byte_string(code)
+    if delimiter not in ["\r", "\n", '"', "\0"]:
+        verify([[], [""], ["", ""], [all_bytes, '"""', "árbol😀"], [delimiter]], delimiter)
+    else:
+        try:
+            csv.dump([], delimiter)
+            assert(false)
+        except err:
+            assert(err.code == "R4010")
+            assert(err.message == "CSV delimiter must be one non-quote, non-newline, non-NUL byte")
+for invalid in ["", "::", "á"]:
+    try:
+        csv.dump([["text"]], invalid)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+
+# Fixed-seed varied widths, lengths and binary values; deterministic on all hosts.
+state = 574449
+for sample in range(120):
+    rows: list[list[str]] = []
+    for i in range(sample % 8):
+        row: list[str] = []
+        for j in range((sample + i) % 9):
+            field = ""
+            for k in range((sample * 7 + j * 13) % 97):
+                state = (state * 48271) % 2147483647
+                field += byte_string(state % 256)
+            append(row, field)
+        append(rows, row)
+    verify(rows, "," if sample % 2 == 0 else "\t")
+
+# Cross many fragment batches, including a very wide row and empty-only rows.
+verify([["value," + str(j), '"' * 32, ""] for j in range(600)], ",")
+verify([["x" * 64 for j in range(1200)]], "|")
+verify([[] for j in range(1200)], ",")
+verify([[""] for j in range(1200)], ",")
+
+# Native owned cursor semantics: callbacks receive independent values. Retained
+# results survive source mutation and repeated collection of the cursor snapshot.
+source = ["payload-" * 32, "second-" * 32]
+mapped = it.map(source, fn(value) => value + "!")
+source[0] = "changed"
+expected = ["payload-" * 32 + "!", "second-" * 32 + "!"]
+assert(it.collect(mapped) == expected)
+assert(it.collect(mapped) == expected)
+retained = it.fold(it.map(["a" * 128, "b" * 128], fn(value) => value), "", fn(total, value) => total + value)
+assert(retained == "a" * 128 + "b" * 128)
+print("CSV dump and owned pipelines passed")

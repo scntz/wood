@@ -1,0 +1,51 @@
+import std.num as num
+import std.linalg as la
+
+fn expect[F](action: F, code: str, message: str):
+    caught = false
+    try:
+        action()
+    except err:
+        assert(err.code == code,err.code + ": " + err.message)
+        assert(message in err.message,err.message)
+        caught = true
+    assert(caught,"numerical operation accepted invalid input")
+
+empty_shape: list[int] = []
+expect(fn() => num.zeros(empty_shape),"R4026","rank must be in 1..8")
+expect(fn() => num.zeros([1,1,1,1,1,1,1,1,1]),"R4026","rank must be in 1..8")
+expect(fn() => num.zeros([-1]),"R4026","dimensions must be nonnegative")
+expect(fn() => num.zeros([9223372036854775807,2]),"R4026","product must fit int")
+expect(fn() => num.zeros(2305843009213693952),"R4026","native allocation limits")
+source = num.reshape(num.from_list([1,2,3,4,5,6]),(2,3))
+expect(fn() => source[0],"R4026","one integer index")
+expect(fn() => source[-9223372036854775808,0],"R4006","index out of bounds")
+expect(fn() => source[2,0],"R4006","index out of bounds")
+expect(fn() => source[::0],"R4005","slice step cannot be zero")
+expect(fn() => num.slice(source,2,0,1),"R4006","index out of bounds")
+expect(fn() => num.transpose(source,[0,0]),"R4026","axes must form a permutation")
+expect(fn() => num.transpose(source,[0]),"R4026","permutation of all axes")
+expect(fn() => num.reshape(source,(4,2)),"R4026","preserve the number of elements")
+expect(fn() => source + num.ints((3,2)),"R4026","identical shapes")
+expect(fn() => source / 0,"R4002","division by zero in array")
+expect(fn() => num.dot(source,source),"R4026","equal-length rank-one")
+expect(fn() => num.dot(num.ones(2),num.ones(3)),"R4026","equal-length rank-one")
+expect(fn() => num.matmul(num.ones((2,3)),num.ones((2,3))),"R4026","(m,k) and (k,n)")
+expect(fn() => la.transform_points(num.ones(3),la.identity(4)),"R4026","(n,3)")
+matrix = la.identity(4)
+matrix[3,0] = 1.0
+expect(fn() => la.transform_points(num.ones((2,3)),matrix),"R4026","projective")
+large = num.from_list([9223372036854775807,0])
+expect(fn() => large+1,"R4001","addition")
+expect(fn() => num.sum(num.from_list([9223372036854775807,1])),"R4001","addition")
+expect(fn() => num.dot(large,num.ints(2,2)),"R4001","multiplication")
+expect(fn() => -num.from_list([-9223372036854775808]),"R4001","multiplication")
+assert(large[0] == 9223372036854775807 and source[0,0] == 1)
+value = 1e308
+infinity = value*value
+for invalid in [infinity,-infinity,infinity-infinity,9223372036854775808.0]:
+    expect(fn() => num.integers(num.from_list([invalid])),"R4003","signed 64-bit range")
+assert(num.integers(num.from_list([-9223372036854775808.0]))[0] == -9223372036854775808)
+assert(num.shape(num.matmul(num.zeros((2,0)),num.zeros((0,3)))) == [2,3])
+assert(num.sum(num.matmul(num.zeros((2,0)),num.zeros((0,3)))) == 0.0)
+print("native numerical failures passed")

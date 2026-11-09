@@ -1,0 +1,60 @@
+# Stream bounded JSON-lines logs through native lazy adapters and closures.
+# wood examples/log_report.wd -- INPUT OUTPUT MIN_MS MAX_MATCHES
+import std.io as io
+import std.iter as it
+
+record Event:
+    service: str
+    status: int
+    elapsed_ms: int
+record Summary:
+    requests: int
+    failures: int
+    elapsed_ms: int
+    fn add(mut self, event: Event):
+        self.requests += 1
+        if event.status >= 500:
+            self.failures += 1
+        self.elapsed_ms += event.elapsed_ms
+record ServiceSummary:
+    service: str
+    totals: Summary
+record Report:
+    matches: int
+    services: list[ServiceSummary]
+
+fn parse_event(line: str):
+    fields = json_dict(json_parse(line))
+    service = json_str(fields["service"])
+    status = json_int(fields["status"])
+    elapsed = json_int(fields["elapsed_ms"])
+    if service == "" or status < 100 or status > 599 or elapsed < 0:
+        raise "invalid log event"
+    return Event(service, status, elapsed)
+
+fn slower_than(minimum_ms: int):
+    return fn(item: Event) => item.elapsed_ms >= minimum_ms
+
+fn report(path: str, minimum_ms: int, maximum_matches: int):
+    if minimum_ms < 0 or maximum_matches < 0:
+        raise "minimum and maximum must be nonnegative"
+    groups: dict[str,Summary] = {}
+    matches = 0
+    with io.open(path, "r") as source:
+        events = it.map(it.lines(source, 65536), parse_event)
+        selected = it.filter(events, slower_than(minimum_ms))
+        for item in it.take(selected, maximum_matches):
+            if item.service not in groups:
+                groups[item.service] = Summary(0,0,0)
+            groups[item.service].add(item)
+            matches += 1
+    services = [ServiceSummary(name, groups[name]) for name in groups]
+    return Report(matches, services)
+
+arguments = args()
+if len(arguments) != 4:
+    raise "usage: log_report INPUT OUTPUT MIN_MS MAX_MATCHES"
+result = report(arguments[0], int(arguments[2]), int(arguments[3]))
+# Publish only after successful parsing/aggregation and closing the input.
+write_text(arguments[1], json_dump(result))
+print("matched", result.matches, "requests across", len(result.services), "services")

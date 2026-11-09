@@ -1,0 +1,34 @@
+# Fault-injection input for sanitize.cmake with CLOSE_FAULT=ON. Its real file
+# port closes each descriptor, then reports EIO to test cleanup propagation.
+fn returned() -> list[str]:
+    with stream_open("return-cleanup.bin","x") as output:
+        return ["owned-"+str(42)]
+
+fn primary():
+    with stream_open("primary-cleanup.bin","x") as output:
+        raise "primary-"+str(9)
+
+try:
+    value = returned()
+    assert(false)
+except err:
+    assert(err.code == "R4016" and err.message == "stream close failed (OS error 5)")
+try:
+    primary()
+    assert(false)
+except err:
+    assert(err.code == "R4010" and err.message == "primary-9")
+try:
+    for i in range(1):
+        with stream_open("break-cleanup.bin","x") as output:
+            break
+    assert(false)
+except err:
+    assert(err.code == "R4016")
+try:
+    with stream_open("normal-cleanup.bin","x") as output:
+        pass
+    assert(false)
+except err:
+    assert(err.code == "R4016")
+print("native scope failure cleanup passed")

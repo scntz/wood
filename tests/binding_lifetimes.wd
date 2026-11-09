@@ -1,0 +1,122 @@
+# Scope relocation and values escaping loop/comprehension/temporary lifetimes.
+import std.iter as it
+
+record Box:
+    items: list[str]
+    fn replace(mut self):
+        self.items = [str(i) for i in range(3)]
+
+fn reassign[T](value: T) -> T:
+    snapshot = value
+    value = [value for i in range(1)][0]
+    assert(value == snapshot)
+    return value
+
+fn captured() -> list[list[str]]:
+    values = [["old"]]
+    fn update[mut values]() -> list[list[str]]:
+        values = [[str(i) for i in range(3)] for j in range(2)]
+        return values
+    result = update()
+    assert(values == [["old"]])
+    assert(update() == result)
+    return result
+
+assert(reassign([["long payload " * 32]]) == [["long payload " * 32]])
+assert(captured() == [["0", "1", "2"], ["0", "1", "2"]])
+
+fn first_temporary() -> str:
+    for item in Box(["temporary " * 64]).items:
+        return item
+    return ""
+assert(first_temporary() == "temporary " * 64)
+
+fn returns_in_tuple() -> tuple[list[str]]:
+    return (["tuple source " * 32],)
+assert([item for item in returns_in_tuple()[0]] == ["tuple source " * 32])
+
+# A loop must retain its own source snapshot across mutation of the original.
+source = ["first " * 40, "second " * 40, "third " * 40]
+saved = source
+result: list[str] = []
+for item in source:
+    append(result, item)
+    source = []
+assert(result == saved and source == [])
+box = Box(saved)
+result = []
+for item in box.items:
+    box.replace()
+    append(result, item)
+assert(result == saved and box.items == ["0", "1", "2"])
+
+# Assignment to a loop binding changes only its local owned value.
+result = []
+for item in saved:
+    item = "new"
+    append(result, item)
+assert(result == ["new", "new", "new"])
+result = []
+for item in saved:
+    if len(item) > 0:
+        try:
+            raise "switch"
+        except err:
+            item += "!"
+    append(result, item)
+assert(result == [value + "!" for value in saved])
+
+result = []
+for item in saved:
+    for ignored in range(2):
+        item += "x"
+    append(result, item)
+assert(result == [value + "xx" for value in saved])
+assert(saved[0] == "first " * 40)
+
+# Shadow bindings, including a comprehension clause, are distinct symbols.
+result = []
+for item in saved:
+    ignored = [item for item in ["shadow"]]
+    for item in ["shadow"]:
+        assert(item == "shadow")
+    append(result, item)
+assert(result == saved)
+
+fn callbacks(values: list[str]) -> list[callable() -> str]:
+    result: list[callable() -> str] = []
+    for item in values:
+        append(result, fn() => item)
+    return result
+retained = callbacks(["captured a " * 32, "captured b " * 32])
+assert(retained[0]() == "captured a " * 32)
+assert(retained[1]() == "captured b " * 32)
+fn comprehension_callbacks(values: list[str]) -> list[callable() -> str]:
+    return [fn() => item for item in values]
+retained = comprehension_callbacks(["factory a " * 32, "factory b " * 32])
+assert(retained[0]() == "factory a " * 32)
+assert(retained[1]() == "factory b " * 32)
+
+fn mutable_callbacks(values: list[str]) -> list[callable() -> str]:
+    result: list[callable() -> str] = []
+    for item in values:
+        fn change[mut item]() -> str:
+            item += "!"
+            return item
+        append(result, change)
+    return result
+mutable = mutable_callbacks(saved)
+assert(mutable[0]() == saved[0] + "!")
+assert(mutable[0]() == saved[0] + "!!")
+assert(saved[0] == "first " * 40)
+
+# Owned step payloads and a copied cursor remain independent after input dies.
+cursor = iter(["step " * 48, "next " * 48])
+step = next(cursor)
+copy = cursor
+first = step_value(step)
+assert(step_value(next(cursor)) == "next " * 48)
+assert(step_value(next(copy)) == "next " * 48)
+assert(step_value(step) == first and first == "step " * 48)
+assert(it.collect(it.map(saved, fn(value) => value + "!")) == [value + "!" for value in saved])
+print("binding and iteration lifetimes passed")

@@ -1,0 +1,16 @@
+import presentation as presentation
+import notes.store as notes
+import std.sqlite as sql
+
+with sql.open(":memory:", 1000) as connection:
+    notes.initialize(connection)
+    assert(presentation.history(connection) == "")
+    for i in range(20):
+        assert(notes.add(connection, "a" * 65536) == i + 1)
+    view = presentation.history(connection)
+    assert(starts_with(view, "#20  "))
+    assert(len(view) < 524352)
+    assert(ends_with(view, "Earlier notes omitted from this bounded view."))
+    assert(len(notes.recent(connection)) == 20)
+    assert(len(json_str(notes.recent(connection)[0]["body"])) == 65536)
+print("bounded desktop history passed")

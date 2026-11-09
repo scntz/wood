@@ -1,0 +1,173 @@
+# Concrete native specialization, structured values, and Wood-native call binding.
+fn identity[T](item: T) -> T:
+    return item
+
+fn pair[A, B](left: A, right: B) -> tuple[A, B]:
+    return (left, right)
+
+fn transform[T, U](callback: fn(T) -> U, items: list[T]) -> list[U]:
+    return [callback(item) for item in items]
+
+fn square(item: int) -> int:
+    return item * item
+
+fn stringify(item: int) -> str:
+    return str(item)
+
+fn recurse[T](item: T, count: int) -> T:
+    if count == 0:
+        return item
+    return recurse(item, count - 1)
+
+fn first[T](items: list[T]) -> T | None:
+    if len(items) == 0:
+        return None
+    return items[0]
+
+fn fallback[T](item: T | None, otherwise: T) -> T:
+    if item is None:
+        return otherwise
+    return unwrap(item)
+
+fn format_row(code: int, /, label: str = 'item', *, count: int = 1, enabled: bool) -> tuple[int, str, int, bool]:
+    return (code, label, count, enabled)
+
+fn defaults(items: list[int] = [], data: dict[str, int] = {}, marker: int | None = None) -> tuple[list[int], dict[str, int], int | None]:
+    append(items, 7)
+    data['x'] = 1
+    return (items, data, marker)
+
+record Entry:
+    name: str
+    payload: tuple[int, list[str]]
+    previous: int | None
+
+assert(identity(4) == 4)
+assert(identity('word') == 'word')
+assert(identity((1, 'a')) == (1, 'a'))
+assert(identity(None) is None)
+assert(pair(right=3, left='a') == ('a', 3))
+assert(transform(square, [1,2,3]) == [1,4,9])
+assert(transform(stringify, [1,2]) == ['1','2'])
+assert(recurse(Entry('x', (1, ['a']), None), 20).name == 'x')
+assert(first([5]) == 5)
+assert(first([5]) is not None)
+empty: list[int] = []
+assert(first(empty) is None)
+assert(None is None and None == None)
+assert(fallback(first(empty), 9) == 9)
+assert(fallback(None, 8) == 8)
+assert(fallback(5, 8) == 5)
+chosen: int | None = None
+chosen = 10
+assert(unwrap(chosen) == 10)
+chosen = None
+caught = false
+try:
+    unwrap(chosen)
+except problem:
+    caught = problem.code == 'R4023'
+assert(caught)
+maybe = 7 if true else None
+assert(maybe == 7)
+assert((None if false else 'yes') == 'yes')
+assert(json_dump((1, None, first(empty), [first([2])])) == '[1,null,null,[2]]')
+assert(str(()) == '()' and str((1,)) == '(1,)')
+assert(str((None, ['x'])) == '(None, ["x"])')
+assert(len(()) == 0 and len((1, 'a', true)) == 3)
+assert((1, 'two', 3.0)[-2] == 'two')
+assert((1, 'two')[+0] == 1)
+assert((1,)[-0] == 1)
+assert(((None,),) == ((None,),))
+typed: tuple[float, list[int], str | None] = (1, [], 'ok')
+assert(typed[0] == 1.0 and typed[-1] == 'ok')
+copied = typed
+values = copied[1]
+append(values, 8)
+assert(len(typed[1]) == 0)
+assert(format_row(5, enabled=True) == (5, 'item', 1, true))
+assert(format_row(5, 'label', enabled=False, count=3) == (5, 'label', 3, false))
+assert(defaults() == ([7], {'x':1}, None))
+assert(defaults() == ([7], {'x':1}, None))
+assert(defaults(marker=5)[2] == 5)
+entry = Entry(previous=None, payload=(5, ['a']), name='named')
+assert(entry.payload[0] == 5 and entry.previous is None)
+callback: fn(int) -> int = identity
+assert(callback(11) == 11)
+callbacks: list[fn(str) -> str] = [identity]
+assert(callbacks[0]('hello') == 'hello')
+assert(transform(callback, [3]) == [3])
+order = [1,2]
+assert(pair(right=pop(order), left=pop(order)) == (1,2))
+assert(len(order) == 0)
+options: list[int | None] = [None, 3]
+append(options, None)
+options[0] = 4
+options[1] = None
+assert(options == [4,None,None])
+assert(None in options and 4 in options and 7 not in options)
+mapping: dict[str,int | None] = {'x': None}
+mapping['x'] = 2
+mapping['y'] = None
+assert(get(mapping, 'z', None) is None)
+assert(mapping == {'x':2, 'y':None})
+maybe_number: float | None = 2
+assert(unwrap(maybe_number) == 2.0)
+optional_text: str | None = 'hello'
+assert(str((optional_text,)) == '("hello",)')
+# Unpacking: assignments, swaps, single values, loops, and names that already exist.
+quotient, remainder = (17 // 5, 17 % 5)
+assert(quotient == 3 and remainder == 2)
+quotient, remainder = remainder, quotient
+assert((quotient, remainder) == (2, 3))
+label, amount, share = ('pears', 3, 0.5)
+assert(label == 'pears' and amount == 3 and share == 0.5)
+only, = ('one',)
+assert(only == 'one')
+visited = ''
+sum_of_counts = 0
+for word, count in [('a', 1), ('b', 2)]:
+    visited = visited + word
+    sum_of_counts += count
+assert(visited == 'ab' and sum_of_counts == 3)
+fn split_name(full: str) -> tuple[str, str]:
+    first_name, last_name = ('Ada', 'Lovelace') if full == 'Ada Lovelace' else ('', '')
+    return (last_name, first_name)
+assert(split_name('Ada Lovelace') == ('Lovelace', 'Ada'))
+# Narrowing: after a None check, the name is its payload type until it is assigned.
+fn greeting(name: str | None) -> str:
+    if name is None:
+        return 'nobody'
+    return 'hello ' + name
+assert(greeting('ada') == 'hello ada' and greeting(None) == 'nobody')
+fn doubled(value: int | None) -> int:
+    if value is not None and unwrap(value) > 0:
+        return value * 2
+    if value is None:
+        return -1
+    else:
+        return value
+assert(doubled(4) == 8 and doubled(None) == -1 and doubled(-3) == -3)
+reading: int | None = 5
+if reading is not None:
+    assert(reading + 1 == 6)
+    reading = None
+assert(reading is None)
+seen = ''
+entries: list[str | None] = ['a', None, 'b']
+for entry in entries:
+    if entry is None:
+        continue
+    seen = seen + entry
+assert(seen == 'ab')
+fn reset(value: int | None) -> bool:
+    if value is None:
+        return false
+    after = value + 1
+    value = None
+    return value is None and after == 6
+assert(reset(5) and not reset(None))
+legacy: int | None = 2
+if legacy is not None:
+    assert(unwrap(legacy) + legacy == 4)
+print('native typed interfaces passed')

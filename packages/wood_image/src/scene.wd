@@ -1,0 +1,144 @@
+# Draws a std.geometry mesh into an image: perspective, a depth buffer and one directional light.
+# A software renderer in pure wood, for thumbnails, previews and tools, not for real-time graphics.
+import image as img
+import std.geometry as geo
+import std.linalg as la
+import std.math as math
+import std.num as num
+
+record Camera:
+    position: la.Vec3
+    target: la.Vec3
+    # Vertical field of view, in degrees.
+    fov: float
+
+record Style:
+    color: img.Color
+    background: img.Color
+    # Direction the light travels, from the light toward the scene.
+    light: la.Vec3
+    # The share of the color kept in full shadow, from 0.0 to 1.0.
+    ambient: float
+
+fn camera(position: la.Vec3, target: la.Vec3, fov: float = 45.0) -> Camera:
+    return Camera(position, target, fov)
+
+fn style() -> Style:
+    return Style(img.rgb(196, 221, 94), img.rgb(18, 18, 17), la.Vec3(-0.4, -0.7, -0.6), 0.2)
+
+# Looks at the whole mesh from in front and a little above, at any scale.
+fn framing(mesh: geo.Mesh, fov: float = 45.0) -> Camera:
+    limits = geo.bounds(mesh)
+    center = limits[0].plus(limits[1]).scaled(0.5)
+    radius = limits[1].minus(limits[0]).length()*0.5
+    if radius == 0.0:
+        radius = 1.0
+    distance = radius/math.tan(math.radians(fov)*0.5)*1.25
+    offset = la.Vec3(0.45, 0.55, 1.0)
+    return Camera(center.plus(offset.scaled(distance/offset.length())), center, fov)
+
+fn _channel(value: int, amount: float) -> int:
+    result = int(float(value)*amount+0.5)
+    return 255 if result > 255 else 0 if result < 0 else result
+
+fn _shade(color: img.Color, amount: float) -> img.Color:
+    return img.Color(_channel(color.r, amount), _channel(color.g, amount), _channel(color.b, amount), color.a)
+
+fn _vertex(vertices: array[float], index: int) -> la.Vec3:
+    return la.Vec3(vertices[index,0], vertices[index,1], vertices[index,2])
+
+fn _lowest(a: float, b: float, c: float) -> float:
+    low = a if a < b else b
+    return low if low < c else c
+
+fn _highest(a: float, b: float, c: float) -> float:
+    high = a if a > b else b
+    return high if high > c else c
+
+fn render(mesh: geo.Mesh, width: int, height: int, view: Camera, look: Style) -> img.Image:
+    geo.validate(mesh)
+    if not (view.fov > 0.0 and view.fov < 180.0):
+        raise "camera field of view must be between 0 and 180 degrees"
+    if not (look.ambient >= 0.0 and look.ambient <= 1.0):
+        raise "ambient light must be between 0.0 and 1.0"
+    picture = img.filled(width, height, look.background)
+    forward = view.target.minus(view.position)
+    if forward.length() == 0.0:
+        raise "camera position and target must differ"
+    forward = forward.scaled(1.0/forward.length())
+    # World up, unless the camera looks straight along it.
+    up = la.Vec3(0.0, 1.0, 0.0)
+    if math.abs_float(forward.y) > 0.999:
+        up = la.Vec3(0.0, 0.0, 1.0)
+    right = forward.cross(up)
+    right = right.scaled(1.0/right.length())
+    above = right.cross(forward)
+    toward_light = look.light.scaled(-1.0/look.light.length())
+    focal = float(height)*0.5/math.tan(math.radians(view.fov)*0.5)
+    cx = float(width)*0.5
+    cy = float(height)*0.5
+    near = 0.000001
+    depth = num.full((width*height,), 1e308)
+    triangles = num.shape(mesh.triangles)[0]
+    for t in range(triangles):
+        a = _vertex(mesh.vertices, mesh.triangles[t,0])
+        b = _vertex(mesh.vertices, mesh.triangles[t,1])
+        c = _vertex(mesh.vertices, mesh.triangles[t,2])
+        normal = b.minus(a).cross(c.minus(a))
+        size = normal.length()
+        if size == 0.0:
+            continue
+        normal = normal.scaled(1.0/size)
+        ra = a.minus(view.position)
+        rb = b.minus(view.position)
+        rc = c.minus(view.position)
+        za = ra.dot(forward)
+        zb = rb.dot(forward)
+        zc = rc.dot(forward)
+        # Triangles crossing the camera plane are left out rather than clipped.
+        if za <= near or zb <= near or zc <= near:
+            continue
+        xa = cx+ra.dot(right)*focal/za
+        ya = cy-ra.dot(above)*focal/za
+        xb = cx+rb.dot(right)*focal/zb
+        yb = cy-rb.dot(above)*focal/zb
+        xc = cx+rc.dot(right)*focal/zc
+        yc = cy-rc.dot(above)*focal/zc
+        area = (xb-xa)*(yc-ya)-(yb-ya)*(xc-xa)
+        if area == 0.0:
+            continue
+        low_x = int(math.floor(_lowest(xa, xb, xc)))
+        high_x = int(math.ceil(_highest(xa, xb, xc)))
+        low_y = int(math.floor(_lowest(ya, yb, yc)))
+        high_y = int(math.ceil(_highest(ya, yb, yc)))
+        low_x = 0 if low_x < 0 else low_x
+        low_y = 0 if low_y < 0 else low_y
+        high_x = width-1 if high_x > width-1 else high_x
+        high_y = height-1 if high_y > height-1 else high_y
+        # A surface is lit from whichever side the camera sees.
+        facing = normal if normal.dot(ra) < 0.0 else normal.scaled(-1.0)
+        light = facing.dot(toward_light)
+        light = 0.0 if light < 0.0 else light
+        shaded = _shade(look.color, look.ambient+(1.0-look.ambient)*light)
+        inverse_a = 1.0/za
+        inverse_b = 1.0/zb
+        inverse_c = 1.0/zc
+        for y in range(low_y, high_y+1):
+            py = float(y)+0.5
+            for x in range(low_x, high_x+1):
+                px = float(x)+0.5
+                w0 = ((xb-px)*(yc-py)-(yb-py)*(xc-px))/area
+                w1 = ((xc-px)*(ya-py)-(yc-py)*(xa-px))/area
+                w2 = 1.0-w0-w1
+                if w0 < 0.0 or w1 < 0.0 or w2 < 0.0:
+                    continue
+                z = 1.0/(w0*inverse_a+w1*inverse_b+w2*inverse_c)
+                at = y*width+x
+                if z < depth[at]:
+                    depth[at] = z
+                    place = at*4
+                    picture.pixels[place] = shaded.r
+                    picture.pixels[place+1] = shaded.g
+                    picture.pixels[place+2] = shaded.b
+                    picture.pixels[place+3] = shaded.a
+    return picture

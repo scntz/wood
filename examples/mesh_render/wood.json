@@ -1,0 +1,1 @@
+{"format":1,"name":"mesh_render","version":"0.1.0","source":"src","entry":"main.wd","dependencies":{"image":{"path":"../../packages/wood_image","version":"0.2.0"}}}

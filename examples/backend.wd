@@ -1,0 +1,87 @@
+# Bounded concurrent HTTPS JSON service with durable, transactional SQLite data.
+# wood backend.wd -- database.db chain.pem key.pem port request_count ready_file
+import std.sqlite as sql
+import std.task as tasks
+import std.tls as tls
+import std.net as net
+import std.http as http
+
+fn response(status: int, reason: str, value: json) -> http.Response:
+    return http.Response(status, reason, [http.Header("Content-Type", "application/json")], json_dump(value))
+
+fn route(message: http.Request, path: str) -> http.Response:
+    if message.method == "GET" and message.target == "/health":
+        return response(200, "OK", json({"status": "ok"}))
+    with sql.open(path, 5000) as db:
+        if message.method == "GET" and message.target == "/items":
+            rows = sql.query(db, "SELECT id, name FROM items ORDER BY id LIMIT 1000", [], 1000, 1048576)
+            return response(200, "OK", json(rows))
+        if message.method == "POST" and message.target == "/items":
+            input = json_dict(json_parse(message.body))
+            names = json_list(input["names"])
+            if len(names) < 1 or len(names) > 100:
+                raise "expected 1..100 item names"
+            with sql.begin(db) as transaction_scope:
+                with sql.prepare(db, "INSERT INTO items(name) VALUES(?)") as insert:
+                    for value in names:
+                        name = json_str(value)
+                        if len(name) < 1 or len(name) > 256:
+                            raise "item name must contain 1..256 UTF-8 bytes"
+                        stmt_bind_text(insert, 1, name)
+                        assert(not stmt_step(insert))
+                        stmt_reset(insert)
+                sql.commit(transaction_scope)
+            return response(201, "Created", json({"created": len(names)}))
+    return response(404, "Not Found", json({"error": "not found"}))
+
+fn serve(raw: stream, payload: json) -> json:
+    config = json_dict(payload)
+    try:
+        with tls.server(json_str(config["certificate"]), json_str(config["key"])) as context:
+            with tls.accept(raw, context) as connection:
+                limits = http.Limits(16384, 1048576, 5000)
+                result = response(400, "Bad Request", json({"error": "invalid request"}))
+                try:
+                    message = http.read_request(connection, limits)
+                    result = route(message, json_str(config["database"]))
+                except err:
+                    result = response(400, "Bad Request", json({"error": "invalid request"}))
+                http.write_response(connection, result, false, limits)
+                return json(true)
+    except err:
+        eprint("connection failed:", err.code)
+        return json(false)
+
+fn drain(jobs: list[task]) -> int:
+    completed = 0
+    for work in jobs:
+        if json_bool(tasks.wait(work, 30000)):
+            completed = completed + 1
+        tasks.close(work)
+    return completed
+
+fn run(arguments: list[str]):
+    if len(arguments) != 6:
+        raise "usage: backend database.db chain.pem key.pem port request_count ready_file"
+    count = int(arguments[4])
+    if count < 1 or count > 10000:
+        raise "request_count must be in 1..10000"
+    # Fail startup before advertising readiness if certificates or DB are invalid.
+    with tls.server(arguments[1], arguments[2]) as context:
+        with sql.open(arguments[0], 5000) as db:
+            sql.execute(db, "CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)", [])
+        with net.listen("127.0.0.1", int(arguments[3]), 10000) as listener:
+            write_text(arguments[5], str(net.port(listener)) + "\n")
+            config = json({"database": arguments[0], "certificate": arguments[1], "key": arguments[2]})
+            jobs: list[task] = []
+            completed = 0
+            for index in range(count):
+                with net.accept(listener) as connection:
+                    append(jobs, tasks.spawn_io(serve, connection, config))
+                if len(jobs) == 8:
+                    completed = completed + drain(jobs)
+                    jobs = []
+            completed = completed + drain(jobs)
+            print(json_dump({"accepted": count, "completed": completed}))
+
+run(args())

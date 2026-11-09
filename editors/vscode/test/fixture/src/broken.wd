@@ -1,0 +1,2 @@
+fn wrong() -> int:
+    return "this is a deliberate error for the diagnostics test"

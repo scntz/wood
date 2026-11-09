@@ -1,0 +1,40 @@
+# Private, sequential C ABI to existing OS support; no frontend work is native.
+import project as project
+extern fn wood_driver_call(request: str) -> int
+extern fn wood_driver_response(mut output: array[int]) -> int
+
+fn call(op: str, fields: dict[str,json] = {}) -> json:
+    fields["op"] = json(op)
+    size = wood_driver_call(json_dump(fields))
+    if size < 0 or size > 65536:
+        raise "invalid hosted-driver response size"
+    bytes = array_full(size,0)
+    if wood_driver_response(bytes) != size:
+        raise "invalid hosted-driver response"
+    reply = project.object(json_parse(join([byte_string(value) for value in bytes],"")))
+    if not json_bool(reply["ok"]):
+        raise "__WOOD_DRIVER__"+project.string(reply["code"])+":"+project.string(reply["message"])
+    return reply["value"]
+
+fn string(op: str, fields: dict[str,json] = {}) -> str:
+    return project.string(call(op,fields))
+
+fn temporary(parent: str = "") -> str:
+    return string("temp",{"parent":json(parent)})
+
+fn release(directory: str):
+    call("release",{"path":json(directory)})
+
+fn same(left: str, right: str) -> bool:
+    return json_bool(call("same",{"left":json(left),"right":json(right)}))
+
+fn publish(source: str, target: str):
+    call("publish",{"from":json(source),"to":json(target)})
+
+fn atomic(target: str, content: str):
+    call("atomic",{"path":json(target),"content":json(content)})
+
+fn process(arguments: list[str], log: str, timeout: int, limit: int, inherit_stdin: bool = true) -> int:
+    if not inherit_stdin and not json_bool(call("process_stdin_policy")):
+        raise "driver process bridge does not support compiler stdin isolation"
+    return json_int(call("process",{"args":json(arguments),"log":json(log),"timeout":json(timeout),"limit":json(limit),"inherit_stdin":json(inherit_stdin)}))

@@ -1,0 +1,16 @@
+import units.mass as mass
+
+record Reading:
+    label: str
+    grams: int
+
+fn _total(values: list[Reading]) -> int:
+    result = 0
+    for value in values:
+        result = result + value.grams
+    return result
+
+fn mean_kilograms(values: list[Reading]) -> float:
+    if len(values) == 0:
+        raise "measurements: at least one reading is required"
+    return mass.kilograms(_total(values)) / len(values)

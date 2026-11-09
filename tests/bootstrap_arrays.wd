@@ -1,0 +1,95 @@
+import std.num as num
+import std.iter as it
+
+record Buffer[T]:
+    values: array[T]
+    fn reversed(self):
+        return Buffer(self.values[::-1])
+    fn write(mut self, index: int, value: T):
+        self.values[index] = value
+
+original = Buffer(num.from_list([1,2,3]))
+reversed = original.reversed()
+reversed.write(0,9)
+assert(num.to_list(original.values) == [1,2,3])
+assert(num.to_list(reversed.values) == [9,2,1])
+matrix = num.reshape(num.from_list([1,2,3,4,5,6]),(2,3))
+transposed = num.transpose(matrix)
+cursor = iter(transposed)
+transposed[0,0] = 99
+assert(it.collect(cursor) == [1,4,2,5,3,6])
+assert([x for x in matrix[::-1]] == [4,5,6,1,2,3])
+assert(num.shape(+matrix) == [2,3])
+assert(num.to_list(2.0/matrix) == [2.0,1.0,2.0/3.0,0.5,0.4,1.0/3.0])
+empty: array[float] = array_from_list([])
+assert(len(empty) == 0 and num.sum(empty) == 0.0)
+assert(num.rank(num.ints((1,1,1,1,1,1,1,1))) == 8)
+for scenario in range(13):
+    code = "R4026"
+    failed = false
+    try:
+        if scenario == 0:
+            array_full([],0)
+        elif scenario == 1:
+            array_full([-1],0)
+        elif scenario == 2:
+            array_full([1,1,1,1,1,1,1,1,1],0)
+        elif scenario == 3:
+            array_full([9223372036854775807,2],0)
+        elif scenario == 4:
+            array_full(9223372036854775807,0)
+        elif scenario == 5:
+            num.reshape(matrix,5)
+        elif scenario == 6:
+            num.transpose(matrix,[0,0])
+        elif scenario == 7:
+            matrix[0]
+        elif scenario == 8:
+            code = "R4006"
+            matrix[2,0]
+        elif scenario == 9:
+            code = "R4006"
+            matrix[-3,0] = 1
+        elif scenario == 10:
+            code = "R4006"
+            num.slice(matrix,2,0,1)
+        elif scenario == 11:
+            code = "R4005"
+            matrix[::0]
+        else:
+            matrix + num.ints((1,3))
+    except err:
+        assert(err.code == code,"scenario "+str(scenario)+": "+err.code)
+        failed = true
+    assert(failed)
+assert(num.to_list(matrix) == [1,2,3,4,5,6])
+
+# Final-return moves may consume only owned, once-read locals. Comprehensions
+# can read one syntax occurrence repeatedly; captures outlive one invocation.
+fn repeated(values: array[int]):
+    return num.from_list([values[0] for index in range(4)])
+fn both(values: array[int]):
+    return values + values
+fn captured_array():
+    values = num.from_list([1,2])
+    fn read():
+        return values + 1
+    return read
+fn use_callback(operation: callable() -> array[int]):
+    return operation()
+fn closure_return(values: array[int]):
+    return use_callback(fn()=>values + 1)
+fn recover(values: array[int]):
+    try:
+        return values + 1
+    except err:
+        assert(values[0] == 9223372036854775807)
+    return values
+assert(num.to_list(repeated(num.from_list([7]))) == [7,7,7,7])
+assert(num.to_list(both(num.from_list([1,2]))) == [2,4])
+reader = captured_array()
+assert(num.to_list(reader()) == [2,3] and num.to_list(reader()) == [2,3])
+assert(num.to_list(closure_return(num.from_list([2,3]))) == [3,4])
+overflow = num.from_list([9223372036854775807])
+assert(recover(overflow) == overflow)
+print("native hosted array safety passed")

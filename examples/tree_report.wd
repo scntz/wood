@@ -1,0 +1,43 @@
+import std.fs as fs
+import std.path as path
+
+record File:
+    path: str
+    bytes: int
+
+record Inventory:
+    root: str
+    count: int
+    bytes: int
+    files: list[File]
+
+fn wood_source(file: str) -> bool:
+    return ends_with(file, ".wd")
+
+fn any_file(file: str) -> bool:
+    return true
+
+fn inventory(root: str, include: fn(str) -> bool, budget: int) -> Inventory:
+    files: list[File] = []
+    total = 0
+    for file in fs.find_files(root, include, budget):
+        bytes = fs.size(file)
+        total = total + bytes
+        append(files, File(file, bytes))
+    return Inventory(path.absolute(root), len(files), total, files)
+
+arguments = args()
+if len(arguments) != 3:
+    eprint("usage: tree_report.wd ROOT all|wood ENTRY_BUDGET")
+    exit(2)
+include = any_file
+if arguments[1] == "wood":
+    include = wood_source
+elif arguments[1] != "all":
+    eprint("filter must be all or wood")
+    exit(2)
+try:
+    print(json_dump(inventory(arguments[0], include, int(arguments[2]))))
+except err:
+    eprint(err.code, err.message)
+    exit(1)

@@ -1,0 +1,101 @@
+# Value semantics, mutation ordering, inference, callbacks and native JSON.
+record Counter:
+    value: int
+    fn add(mut self, delta: int = 1):
+        self.value += delta
+    fn read(self):
+        return self.value
+    fn next(mut self):
+        self.value+=1
+        return self.value
+
+record Holder:
+    values: list[Counter]
+    fn adjust(mut self) -> int:
+        append(self.values,Counter(4))
+        return 3
+
+fn square(value: int):
+    return value*value
+
+fn apply(work: fn(int)->int, value: int):
+    return work(value)
+
+fn maybe(flag: bool):
+    if flag:
+        return None
+    return 7
+
+fn combine(a:int,b:int):
+    return a*10+b
+
+original = Counter(2)
+changed = original
+changed.add(delta=3)
+assert(original.read()==2 and changed.read()==5)
+sequence=Counter(0)
+assert(combine(b=sequence.next(),a=sequence.next())==21)
+holder = Holder([Counter(1)])
+holder.values[0].add(holder.adjust())
+assert(holder.values[0].value==4 and len(holder.values)==2)
+before = holder
+holder.values[0].value += holder.adjust()
+assert(before.values[0].value==4 and holder.values[0].value==7)
+callbacks = [square]
+index = 0
+assert(callbacks[index](5)==25 and apply(square,6)==36)
+assert(maybe(true) is None and unwrap(maybe(false))==7)
+numbers: list[float] = [1,2.5]
+append(numbers,3)
+assert(numbers[0]==1.0 and numbers[2]==3.0)
+groups: dict[str,list[int]] = {}
+groups["first"] = []
+append(groups["first"],9)
+assert(get(groups,"missing",[])==[])
+assert(join([],",")=="")
+assert(json_dump([])=="[]" and json_dump({})=="{}")
+total = 0
+for value in range(5,-1,-2):
+    total += value
+assert(total==9)
+assert("abcdef"[::-2]=="fdb")
+assert(3*"a"=="aaa" and "a"*3=="aaa" and [2]*2==[2,2])
+assert((1,"tuple")[-1]=="tuple")
+assert(-9223372036854775808 < 0 and (7 // -2)==-4 and (7 % -2)==-1)
+empty: list[bool]=[]
+assert(not (false and pop(empty)))
+try:
+    overflow = 9223372036854775807
+    overflow += 1
+    assert(false)
+except err:
+    assert(err.code=="R4001")
+fn checked_name(name: str) -> int:
+    if name == "":
+        raise error("app.empty", "a name is required")
+    return len(name)
+fn passed_on() -> int:
+    try:
+        return checked_name("")
+    except err:
+        print("handling", err.code)
+        raise
+fn cleaned(limit: int) -> int:
+    count = 0
+    for i in range(limit):
+        try:
+            if i == 1:
+                continue
+            if i == 3:
+                return count
+            count += 10
+        finally:
+            print("finally", i)
+    return count
+try:
+    passed_on()
+except err:
+    print(err.code, err.message, err.line)
+assert(cleaned(5) == 20)
+print(json_dump(holder))
+print("native compiler application passed",total)

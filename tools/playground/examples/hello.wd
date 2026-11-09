@@ -1,0 +1,6 @@
+# Change anything, then press Run.
+name = "wood"
+print("hello, " + name)
+
+for i in range(3):
+    print("line", i)

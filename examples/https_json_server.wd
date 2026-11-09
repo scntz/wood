@@ -1,0 +1,49 @@
+# Sequential HTTPS JSON service. Supply your own certificate chain/private key.
+# Explicit bind address, bounded messages, no application authentication.
+import std.http as http
+import std.net as net
+import std.tls as tls
+
+fn route(message: http.Request) -> http.Response:
+    headers = [http.Header("Content-Type", "application/json")]
+    if message.target == "/health" and message.method in ["GET", "HEAD"]:
+        return http.Response(200, "OK", headers, json_dump({"status": "ok"}))
+    if message.target == "/sum" and message.method == "POST":
+        total = 0
+        for value in json_list(json_parse(message.body)):
+            total += json_int(value)
+        return http.Response(200, "OK", headers, json_dump({"sum": total}))
+    return http.Response(404, "Not Found", headers, json_dump({"error": "route not found"}))
+
+arguments = args()
+if len(arguments) < 5 or len(arguments) > 6:
+    eprint("usage: https_json_server address port certificate_chain private_key requests [ready_file]")
+    eprint("requests=0 serves until interrupted; port=0 selects a free port")
+    exit(1)
+maximum = int(arguments[4])
+if maximum < 0:
+    raise "requests must be nonnegative"
+limits = http.Limits(16384, 1048576, 30000)
+with tls.server(arguments[2], arguments[3]) as context:
+    with net.listen(arguments[0], int(arguments[1]), 60000) as listener:
+        if len(arguments) == 6:
+            write_text(arguments[5], str(net.port(listener)) + "\n")
+        print("listening with TLS on", arguments[0], net.port(listener))
+        served = 0
+        while maximum == 0 or served < maximum:
+            with net.accept(listener) as raw:
+                try:
+                    with tls.accept(raw, context) as connection:
+                        result = http.Response(400, "Bad Request", [http.Header("Content-Type", "application/json")], json_dump({"error": "invalid request"}))
+                        head_only = false
+                        try:
+                            message = http.read_request(connection, limits)
+                            result = route(message)
+                            head_only = message.method == "HEAD"
+                        except err:
+                            pass
+                        http.write_response(connection, result, head_only, limits)
+                except err:
+                    # Keep source paths and TLS/provider details out of responses.
+                    eprint("connection rejected:", err.code)
+            served += 1

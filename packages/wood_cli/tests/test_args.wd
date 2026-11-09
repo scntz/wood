@@ -1,0 +1,33 @@
+import args as cli
+
+options = [cli.flag("help", "h"), cli.flag("verbose", "v"), cli.flag("quiet", "q"), cli.value("output", "o"), cli.value("include", "I", true)]
+parsed = cli.parse(["-vq", "--output=", "-Ialpha", "--include", "β", "-3", "-", "", "--", "--help"], options)
+assert(parsed.has("verbose") and parsed.has("quiet") and not parsed.has("help"))
+assert(parsed.optional("output") is not None and parsed.one("output", "fallback") == "")
+assert(parsed.optional("missing") is None and parsed.one("missing", "fallback") == "fallback")
+assert(parsed.many("include") == ["alpha", "β"])
+assert(parsed.positionals == ["-3", "-", "", "--help"])
+copy = parsed.many("include")
+append(copy, "new")
+assert(parsed.many("include") == ["alpha", "β"])
+assert(cli.parse(["-vofile", "--include=x=y"], options).one("output") == "file")
+assert(cli.parse(["--output", "--help"], options).one("output") == "--help")
+assert(cli.parse(["--", "--unknown"], options).positionals == ["--unknown"])
+assert(cli.parse([], options).many("include") == [])
+assert(starts_with(cli.help("report", options), "Usage: report"))
+assert(find(cli.help("report", options), "-o, --output VALUE") >= 0)
+for bad in [["--unknown"], ["-z"], ["--output"], ["-o"], ["--help=yes"], ["-vv"], ["--output=a", "--output=b"]]:
+    caught = false
+    try:
+        cli.parse(bad, options)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+for bad in [[cli.flag("", "")], [cli.flag("1bad")], [cli.flag("bad_name")], [cli.flag("good", "ab")], [cli.flag("x"), cli.flag("x")], [cli.flag("x", "a"), cli.flag("y", "a")]]:
+    caught = false
+    try:
+        cli.parse([], bad)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+print("official CLI argument contracts passed")

@@ -1,0 +1,142 @@
+import std.http as http
+import std.io as io
+import std.net as net
+
+fn response(wire: str, method: str, header_limit: int, body_limit: int) -> http.Response:
+    with net.listen("127.0.0.1", 0, 1000) as listener:
+        with net.connect("127.0.0.1", net.port(listener), 1000) as sender:
+            with net.accept(listener) as receiver:
+                io.write(sender, wire)
+                net.shutdown_write(sender)
+                return http.read_response(receiver, method, http.Limits(header_limit, body_limit, 1000))
+
+fn request(wire: str) -> http.Request:
+    with net.listen("127.0.0.1", 0, 1000) as listener:
+        with net.connect("127.0.0.1", net.port(listener), 1000) as sender:
+            with net.accept(listener) as receiver:
+                io.write(sender, wire)
+                net.shutdown_write(sender)
+                return http.read_request(receiver, http.Limits(8192, 1024, 1000))
+
+fn bad_response(wire: str):
+    failed = false
+    try:
+        response(wire, "GET", 8192, 1024)
+    except err:
+        failed = true
+    assert(failed, "invalid response accepted")
+
+fn bad_request(wire: str):
+    failed = false
+    try:
+        request(wire)
+    except err:
+        failed = true
+    assert(failed, "invalid request accepted")
+
+plain = response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nX-Test: one\r\nx-test:\ttwo \t\r\n\r\na\0bc", "GET", 8192, 4)
+assert(plain.status == 200 and plain.reason == "OK")
+assert(plain.body == "a\0bc")
+assert(http.header_values(plain.headers, "X-Test") == ["one", "two"])
+chunked = response("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n2;name=token\r\nab\r\n2; quoted=\"a;\\\"b\"\r\ncd\r\n0\r\n\r\n", "GET", 8192, 4)
+assert(chunked.body == "abcd")
+assert(response("HTTP/1.0 200 \r\n\r\nlast", "GET", 8192, 4).body == "last")
+assert(response("HTTP/1.1 204 No Content\r\n\r\n", "GET", 8192, 0).body == "")
+assert(response("HTTP/1.1 304 Not Modified\r\nContent-Length: 2000\r\n\r\n", "GET", 8192, 0).body == "")
+assert(response("HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n", "HEAD", 8192, 0).body == "")
+assert(response("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", "GET", 8192, 0).status == 200)
+parsed = request("POST /items?q=one HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 3\r\n\r\nx\0y")
+assert(parsed.method == "POST" and parsed.target == "/items?q=one" and parsed.body == "x\0y")
+assert(request("GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n").body == "")
+assert(request("POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n").body == "a")
+assert(request("GET /utf8/%C3%A1?q=yes HTTP/1.1\r\nHost: localhost\r\n\r\n").target == "/utf8/%C3%A1?q=yes")
+
+exact_head = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+assert(response(exact_head, "GET", len(exact_head), 0).body == "")
+failed = false
+try:
+    response(exact_head, "GET", len(exact_head) - 1, 0)
+except err:
+    failed = true
+assert(failed)
+headers: list[str] = []
+for i in range(128):
+    append(headers, "X: a\r\n")
+assert(len(response("HTTP/1.1 200 OK\r\n" + join(headers, "") + "\r\n", "GET", 8192, 0).headers) == 128)
+append(headers, "X: a\r\n")
+bad_response("HTTP/1.1 200 OK\r\n" + join(headers, "") + "\r\n")
+heads: list[str] = []
+for i in range(8):
+    append(heads, "HTTP/1.1 100 Continue\r\n\r\n")
+assert(response(join(heads, "") + exact_head, "GET", 8192, 0).status == 200)
+append(heads, "HTTP/1.1 100 Continue\r\n\r\n")
+bad_response(join(heads, "") + exact_head)
+
+for wire in [
+    "HTTP/1.1 200 OK\n\n",
+    "HTTP/1.1 20 OK\r\n\r\n",
+    "HTTP/1.1 600 Bad\r\n\r\n",
+    "HTTP/1.1 200 OK\r\n Content-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length : 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX: bad\0value\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 0, 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: +0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 9223372036854775808\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1025\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZ\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n401\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\naxx",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;bad=\r\na\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;x=\"unclosed\r\na\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trailer: value\r\n\r\n",
+    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 100 Continue\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 101 Switching Protocols\r\n\r\n"
+]:
+    bad_response(wire)
+for wire in [
+    "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n",
+    "GET / HTTP/1.1\r\n\r\n",
+    "GET / HTTP/1.1\r\nHost: localhost\r\nHost: localhost\r\n\r\n",
+    "GET / HTTP/1.1\r\nHost:\r\n\r\n",
+    "GET / HTTP/1.1\r\nHost: localhost,evil\r\n\r\n",
+    "GET / HTTP/1.1\r\nHost: localhost:0\r\n\r\n",
+    "GET http://localhost/ HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "GET /fragment#x HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "GET /bad% HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "GET /bad%xy HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "GET /bad<uri HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "GET  / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    "POST / HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n\r\n",
+    "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n"
+]:
+    bad_request(wire)
+
+with net.listen("127.0.0.1", 0, 1000) as listener:
+    with net.connect("127.0.0.1", net.port(listener), 1000) as client:
+        with net.accept(listener) as server:
+            http.write_response(server, http.Response(200, "OK", [http.Header("X-Test", "yes")], "result"), false, http.Limits(8192, 1024, 1000))
+            result = http.read_response(client, "GET", http.Limits(8192, 1024, 1000))
+            assert(result.body == "result")
+            try:
+                http.write_response(server, http.Response(200, "OK\r\nInjected: bad", [], ""), false, http.Limits(8192, 1024, 1000))
+                assert(false)
+            except err:
+                assert(starts_with(err.message, "HTTP:"))
+            try:
+                http.write_response(server, http.Response(200, "OK", [http.Header("Content-Length", "100")], ""), false, http.Limits(8192, 1024, 1000))
+                assert(false)
+            except err:
+                assert(starts_with(err.message, "HTTP:"))
+            # A partial line cannot keep a logical HTTP read alive indefinitely.
+            io.write(server, "HTTP/1.1 200 OK\r\nX: unfinished")
+            try:
+                http.read_response(client, "GET", http.Limits(8192, 1024, 15))
+                assert(false)
+            except err:
+                assert(err.code == "R4018" or (err.code == "R4010" and err.message == "HTTP: message deadline exceeded"))
+print("native HTTP passed")

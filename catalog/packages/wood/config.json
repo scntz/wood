@@ -1,0 +1,31 @@
+{
+  "owner": "wood",
+  "name": "config",
+  "package": "wood_config",
+  "tier": "official",
+  "description": "INI-style configuration with environment overrides and typed getters.",
+  "readme": "# wood_config 0.1.0\n\nApplication configuration in pure Wood. Listed in the catalog as `wood@config`.\n\n```sh\nwood add wood@config\n```\n\n```wood\nimport config.config as config\n\nsettings = config.load(\"app.conf\", \"MYAPP_\")\nport = config.number(settings, \"server.port\", 8080)\ndebug = config.flag(settings, \"server.debug\")\n```\n\n```ini\n# app.conf\n[server]\nport = 9000\ndebug = yes\n```\n\nWith the prefix `MYAPP_`, the variable `MYAPP_SERVER_PORT` overrides `server.port`.\n`number` and `flag` raise an error naming the key when a value has the wrong type,\nrather than guessing. A missing file is treated as empty, so defaults still apply.\n\nStatus: experimental. The format is a small INI subset, with no quoting, multi-line\nvalues or includes.\n\nLicensed MIT OR Apache-2.0.\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_config/README.md",
+  "categories": [
+    "system",
+    "tooling"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import config.config as config\n\nsettings = config.load(\"app.conf\", \"MYAPP_\")\nport = config.number(settings, \"server.port\", 8080)\n",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "published": "2026-11-01",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_config-0.1.0.woodpkg",
+        "sha256": "36d795f60f1c008ae5904a04cb98409bbeddd43fe30e7f0ea17fac06bebbbc34"
+      }
+    }
+  ]
+}

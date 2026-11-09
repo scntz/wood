@@ -1,0 +1,133 @@
+# Versioned lossless test/tooling projection; allocation order is deliberately absent.
+import syntax as ast
+import lexer as lx
+
+record Event:
+    tag: str
+    value_hex: str
+    offset: int
+    line: int
+    column: int
+
+record Task:
+    kind: str
+    index: int
+    text: str
+
+fn hex_text(text: str) -> str:
+    digits = "0123456789abcdef"
+    pieces: list[str] = []
+    for c in text:
+        value = byte_value(c)
+        append(pieces,digits[value // 16]+digits[value % 16])
+    return join(pieces,"")
+
+fn flag(value: bool) -> str:
+    if value:
+        return "1"
+    return "0"
+
+record Writer:
+    tree: ast.Tree
+    tasks: list[Task]
+    events: list[Event]
+
+    fn put(mut self, tag: str, value: str):
+        append(self.events,Event(tag,hex_text(value),0,0,0))
+
+    fn located(mut self, tag: str, value: str, token: lx.Token):
+        append(self.events,Event(tag,hex_text(value),token.offset,token.line,token.column))
+
+    fn push(mut self, kind: str, index: int):
+        append(self.tasks,Task(kind,index,""))
+
+    fn value(mut self, tag: str, text: str):
+        append(self.tasks,Task(tag,-2,text))
+
+    fn group(mut self, tag: str, kind: str, indices: list[int]):
+        for i in range(len(indices)-1,-1,-1):
+            self.push(kind,indices[i])
+        self.value(tag,str(len(indices)))
+
+    fn strings(mut self, tag: str, values: list[str]):
+        self.put(tag,str(len(values)))
+        for value in values:
+            self.put("text",value)
+
+    fn type_event(mut self, index: int):
+        if index < 0:
+            self.put("type","null")
+        else:
+            type = self.tree.types[index]
+            self.put("type",type.kind)
+            self.put("name",type.name)
+            self.group("type_parameters","type",type.parameters)
+            self.push("type",type.key)
+            self.push("type",type.element)
+
+    fn expr_event(mut self, index: int):
+        if index < 0:
+            self.put("expr","null")
+        else:
+            expr = self.tree.expressions[index]
+            self.located("expr",expr.kind,expr.token)
+            self.put("text",expr.token.text)
+            self.strings("keywords",expr.keywords)
+            self.strings("operators",expr.operators)
+            self.put("clauses",str(len(expr.clauses)))
+            for clause in expr.clauses:
+                self.located("clause",clause.name,clause.token)
+            self.push("stmt",expr.function)
+            self.group("type_arguments","type",expr.type_arguments)
+            self.group("children","expr",expr.children)
+
+    fn stmt_event(mut self, index: int):
+        if index < 0:
+            self.put("stmt","null")
+        else:
+            stmt = self.tree.statements[index]
+            self.located("stmt",stmt.kind,stmt.token)
+            self.put("name",stmt.name)
+            self.put("module",stmt.module)
+            self.put("relative",str(stmt.relative))
+            self.put("flags",flag(stmt.external)+flag(stmt.method)+flag(stmt.mutating)+flag(stmt.inferred_return)+flag(stmt.expression_body))
+            self.strings("type_parameters",stmt.type_parameters)
+            self.strings("mutable_captures",stmt.mutable_captures)
+            self.put("imports",str(len(stmt.imports)))
+            for name in stmt.imports:
+                self.located("import",name.name,name.token)
+                self.put("alias",name.alias)
+            self.group("otherwise","stmt",stmt.otherwise)
+            self.group("body","stmt",stmt.body)
+            self.group("expressions","expr",stmt.expressions)
+            for i in range(len(stmt.parameters)-1,-1,-1):
+                # Parameter indices use their owning statement and a separate task.
+                append(self.tasks,Task("parameter",index,str(i)))
+            self.value("parameters",str(len(stmt.parameters)))
+            self.push("type",stmt.annotation)
+            self.push("type",stmt.return_type)
+
+    fn run(mut self) -> list[Event]:
+        self.group("program","stmt",self.tree.roots)
+        while len(self.tasks) > 0:
+            task = pop(self.tasks)
+            if task.kind == "parameter":
+                parameter = self.tree.statements[task.index].parameters[int(task.text)]
+                self.located("parameter",parameter.name,parameter.token)
+                self.put("mode",parameter.mode)
+                self.put("mutable_borrow",flag(parameter.mutable_borrow))
+                self.push("expr",parameter.default_value)
+                self.push("type",parameter.type)
+            elif task.index == -2:
+                self.put(task.kind,task.text)
+            elif task.kind == "type":
+                self.type_event(task.index)
+            elif task.kind == "expr":
+                self.expr_event(task.index)
+            else:
+                self.stmt_event(task.index)
+        return self.events
+
+fn events(tree: ast.Tree) -> list[Event]:
+    writer = Writer(tree,[],[])
+    return writer.run()

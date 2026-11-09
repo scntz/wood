@@ -1,0 +1,626 @@
+[
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stream_timeout(tcp_listen('127.0.0.1',0,1),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstream_timeout()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstream_timeout(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstream_timeout(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstream_timeout(tcp_listen('127.0.0.1',0,1),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tcp_connect('x',1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_connect()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_connect(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_connect(true,1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_connect('x',true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_connect('x',1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tcp_listen('x',1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_listen()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_listen(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_listen(true,1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_listen('x',true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_listen('x',1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tcp_accept(tcp_listen('127.0.0.1',0,1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_accept()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_accept(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_accept(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tcp_port(tcp_listen('127.0.0.1',0,1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_port()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_port(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_port(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tcp_shutdown_write(tcp_listen('127.0.0.1',0,1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_shutdown_write()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_shutdown_write(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntcp_shutdown_write(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_open('x',1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_open()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_open(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_open(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_open('x',true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_close(db_open(':memory:',1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_close()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_close(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_close(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_closed(db_open(':memory:',1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_closed()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_closed(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_closed(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_changes(db_open(':memory:',1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_changes()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_changes(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_changes(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_last_id(db_open(':memory:',1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_last_id()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_last_id(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_last_id(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_prepare(db_open(':memory:',1),'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_prepare()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_prepare(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_prepare(true,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_prepare(db_open(':memory:',1),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_begin(db_open(':memory:',1))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_begin()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_begin(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_begin(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_commit(db_begin(db_open(':memory:',1)))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_commit()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_commit(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_commit(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_rollback(db_begin(db_open(':memory:',1)))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_rollback()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_rollback(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_rollback(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return db_version()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_version(1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ndb_version(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tls_version()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_version(1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_version(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_close(db_prepare(db_open(':memory:',1),'SELECT 1'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_close()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_close(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_close(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_reset(db_prepare(db_open(':memory:',1),'SELECT 1'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_reset()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_reset(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_reset(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_step(db_prepare(db_open(':memory:',1),'SELECT 1'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_step()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_step(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_step(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_bind_int(db_prepare(db_open(':memory:',1),'SELECT 1'),1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_int()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_int(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_int(true,1,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_int(db_prepare(db_open(':memory:',1),'SELECT 1'),true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_int(db_prepare(db_open(':memory:',1),'SELECT 1'),1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_bind_float(db_prepare(db_open(':memory:',1),'SELECT 1'),1,1.0)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_float()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_float(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_float(true,1,1.0)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_float(db_prepare(db_open(':memory:',1),'SELECT 1'),true,1.0)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_float(db_prepare(db_open(':memory:',1),'SELECT 1'),1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_bind_text(db_prepare(db_open(':memory:',1),'SELECT 1'),1,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_text()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_text(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_text(true,1,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_text(db_prepare(db_open(':memory:',1),'SELECT 1'),true,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_text(db_prepare(db_open(':memory:',1),'SELECT 1'),1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_bind_blob(db_prepare(db_open(':memory:',1),'SELECT 1'),1,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_blob()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_blob(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_blob(true,1,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_blob(db_prepare(db_open(':memory:',1),'SELECT 1'),true,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_blob(db_prepare(db_open(':memory:',1),'SELECT 1'),1,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_bind_null(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_null()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_null(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_null(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_bind_null(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_columns(db_prepare(db_open(':memory:',1),'SELECT 1'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_columns()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_columns(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_columns(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_name(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_name()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_name(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_name(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_name(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_kind(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_kind()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_kind(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_kind(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_kind(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_text(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_text()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_text(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_text(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_text(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_blob(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_blob()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_blob(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_blob(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_blob(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_int(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_int()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_int(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_int(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_int(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return stmt_float(db_prepare(db_open(':memory:',1),'SELECT 1'),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_float()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_float(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_float(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nstmt_float(db_prepare(db_open(':memory:',1),'SELECT 1'),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tls_context_new('x','x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_new()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_new(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_new(true,'x')\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_new('x',true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tls_context_close(tls_context_new('cert','key'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_close()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_close(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_context_close(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tls_accept(tcp_listen('127.0.0.1',0,1),tls_context_new('cert','key'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_accept()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_accept(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_accept(true,tls_context_new('cert','key'))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_accept(tcp_listen('127.0.0.1',0,1),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return tls_connect('x',1,'x',1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect(true,1,'x',1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect('x',true,'x',1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect('x',1,true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntls_connect('x',1,'x',true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_spawn(work,json_null())\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn(true,json_null())\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn(work,true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_spawn_io(io_work,tcp_listen('127.0.0.1',0,1),json_null())\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn_io()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn_io(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn_io(true,tcp_listen('127.0.0.1',0,1),json_null())\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn_io(io_work,true,json_null())\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_spawn_io(io_work,tcp_listen('127.0.0.1',0,1),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_wait(task_spawn(work,json_null()),1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_wait()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_wait(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_wait(true,1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_wait(task_spawn(work,json_null()),true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_done(task_spawn(work,json_null()))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_done()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_done(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_done(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_cancel(task_spawn(work,json_null()))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_cancel()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_cancel(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_cancel(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_close(task_spawn(work,json_null()))\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_close()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_close(missing)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_close(true)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\nfn run():\n    return task_cancelled()\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_cancelled(1)\n"
+  },
+  {
+    "source": "fn work(value:json)->json:\n    return value\nfn io_work(connection:stream,value:json)->json:\n    return value\ntask_cancelled(missing)\n"
+  },
+  {
+    "source": "with 1 as resource:\n    pass\n"
+  },
+  {
+    "source": "with true as resource:\n    pass\n"
+  },
+  {
+    "source": "with json_null() as resource:\n    pass\n"
+  },
+  {
+    "source": "with [1] as resource:\n    pass\n"
+  },
+  {
+    "source": "with None as resource:\n    pass\n"
+  },
+  {
+    "source": "with 'text' as resource:\n    pass\n"
+  },
+  {
+    "source": "fn identity[T](value:T)->T:\n    return value\ntask_spawn(identity,json_null())\n"
+  },
+  {
+    "source": "task_spawn(fn(value:json)=>value,json_null())\n"
+  }
+]

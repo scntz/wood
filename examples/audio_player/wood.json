@@ -1,0 +1,1 @@
+{"format":1,"name":"audio_player","version":"0.1.0","source":"src","entry":"main.wd","dependencies":{"audio":{"path":"../../packages/wood_audio","version":"0.1.0"}}}

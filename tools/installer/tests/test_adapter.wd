@@ -1,0 +1,32 @@
+import installer._native as native
+import std.path as path
+import std.fs as fs
+
+arguments = args()
+root = path.absolute(arguments[0])
+source = path.absolute(arguments[1])
+abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+assert(native.digest(source) == abc)
+native.check(native.wood_setup_open(root, 1), "open test root")
+assert(native.wood_setup_open(root, 1) < 0)
+for unsafe in ["../escape", "a/../../escape", "/absolute", "a\\b", "C:/x", "", "a/./b", "a\0b"]:
+    assert(native.wood_setup_kind(unsafe) < 0)
+    assert(native.wood_setup_write(unsafe, "bad", 0) < 0)
+native.check(native.wood_setup_write("owned", "original", 0), "create owned")
+assert(native.wood_setup_write("owned", "replacement", 0) < 0)
+assert(read_text(path.combine(root, "owned")) == "original")
+assert(native.wood_setup_extract(source, 0, 3, "owned", abc) < 0)
+assert(read_text(path.combine(root, "owned")) == "original")
+assert(native.wood_setup_extract(source, 0, 4, "short", abc) < 0)
+assert(native.wood_setup_kind("short") == 0)
+assert(native.wood_setup_extract(source, 0, 3, "bad-hash", "0" * 64) < 0)
+assert(native.wood_setup_kind("bad-hash") == 0)
+native.check(native.wood_setup_extract(source, 0, 3, "correct", abc), "extract test file")
+assert(read_text(path.combine(root, "correct")) == "abc")
+assert(native.wood_setup_kind("missing/child") == 0)
+native.check(native.wood_setup_close(), "close root")
+native.check(native.wood_setup_open(root, 0), "reopen root")
+assert(native.wood_setup_kind("owned") == 1)
+native.wood_setup_close()
+assert(native.wood_setup_write("after-close", "bad", 0) < 0)
+print("installer adapter contracts passed")

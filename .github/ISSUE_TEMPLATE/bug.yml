@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible compiler, runtime or tooling problem.
+body:
+  - type: markdown
+    attributes:
+      value: "For security issues follow SECURITY.md. Remove private data and paths."
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: The output of `wood --version`, OS and architecture, selected backend and toolchain versions. For native installs include the runtime ABI; redact private paths.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal source and exact command
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include diagnostics and exit status, with private details redacted.
+    validations:
+      required: true

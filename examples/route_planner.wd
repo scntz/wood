@@ -1,0 +1,82 @@
+# Weighted directed routes, using native Wood Queue and Heap specializations.
+from std.collections import Queue, heap
+
+record Edge:
+    destination: str
+    cost: int
+record Visit:
+    place: str
+    cost: int
+record Route:
+    place: str
+    cost: int
+    path: list[str]
+
+fn cheaper(left: Visit, right: Visit) -> bool:
+    return left.cost < right.cost or (left.cost == right.cost and left.place < right.place)
+
+fn read_graph(value: json) -> dict[str,list[Edge]]:
+    graph: dict[str,list[Edge]] = {}
+    for name in json_dict(value):
+        graph[name] = []
+    for name in graph:
+        for item in json_list(json_dict(value)[name]):
+            fields = json_dict(item)
+            destination = json_str(fields["to"])
+            cost = json_int(fields["cost"])
+            if destination not in graph:
+                raise "unknown destination: " + destination
+            if cost < 0:
+                raise "route costs must be nonnegative"
+            append(graph[name], Edge(destination, cost))
+    return graph
+
+fn reachable(graph: dict[str,list[Edge]], start: str) -> int:
+    pending = Queue([start], [])
+    seen = {start: true}
+    while pending.size() != 0:
+        place = pending.pop()
+        for edge in graph[place]:
+            if edge.destination not in seen:
+                seen[edge.destination] = true
+                pending.push(edge.destination)
+    return len(seen)
+
+fn routes(graph: dict[str,list[Edge]], start: str) -> list[Route]:
+    frontier = heap([Visit(start, 0)], cheaper)
+    distances = {start: 0}
+    previous: dict[str,str] = {}
+    while frontier.size() != 0:
+        current = frontier.pop()
+        if current.cost != distances[current.place]:
+            continue
+        for edge in graph[current.place]:
+            cost = current.cost + edge.cost
+            if edge.destination not in distances or cost < distances[edge.destination]:
+                distances[edge.destination] = cost
+                previous[edge.destination] = current.place
+                frontier.push(Visit(edge.destination, cost))
+    result: list[Route] = []
+    for destination in graph:
+        if destination in distances:
+            path = [destination]
+            cursor = destination
+            while cursor != start:
+                cursor = previous[cursor]
+                append(path, cursor)
+            append(result, Route(destination, distances[destination], path[::-1]))
+    return result
+
+fn run(input_path: str, output_path: str):
+    request = json_dict(json_parse(read_text(input_path)))
+    graph = read_graph(request["graph"])
+    start = json_str(request["start"])
+    if start not in graph:
+        raise "unknown start: " + start
+    # Validate and compute before opening the output, preserving it on failure.
+    report = {"reachable": json(reachable(graph, start)), "routes": json(routes(graph, start))}
+    write_text(output_path, json_dump(report) + "\n")
+
+if len(args()) != 2:
+    raise "usage: route_planner.wd -- input.json output.json"
+run(args()[0], args()[1])

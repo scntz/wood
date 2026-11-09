@@ -1,0 +1,266 @@
+# Capture values, lifetimes, and concrete/erased callable representations.
+import std.iter as it
+import std.functional as eager
+import std.collections as collections
+import std.io as io
+
+fn adder(offset: int) -> callable(int) -> int:
+    return fn(value) => value + offset
+
+fn counter(start: int) -> callable() -> int:
+    value = start
+    fn increment[mut value]() -> int:
+        value += 1
+        return value
+    return increment
+
+fn compose[A,B,C,F,G](first: F(A) -> B, second: G(B) -> C) -> callable(A) -> C:
+    return fn(value) => second(first(value))
+
+fn identity[T](value: T) -> T:
+    return value
+
+fn maker(base: int) -> callable(int) -> callable(int) -> int:
+    return fn(x) => fn(y: int) => base + x + y
+
+record Counter:
+    value: int
+    fn add(mut self, amount: int) -> int:
+        self.value += amount
+        return self.value
+    fn reader(self) -> callable() -> int:
+        return fn() => self.value
+    fn writer(self) -> callable(int) -> int:
+        local = self
+        return fn [mut local](x) => local.add(x)
+
+# A reusable iterable and a separately constructed mutable cursor.
+record Span:
+    first: int
+    last: int
+    fn iter(self) -> SpanCursor:
+        return SpanCursor(self.first, self.last)
+record SpanCursor:
+    current: int
+    stop: int
+    fn next(mut self) -> step[int]:
+        if self.current >= self.stop:
+            return finished()
+        result = self.current
+        self.current += 1
+        return yielded(result)
+
+base = 7
+add = fn(x: int) => x + base
+base = 99
+assert(add(3) == 10)
+assert(add(x=3) == 10)
+assert(adder(8)(2) == 10)
+assert(maker(1)(2)(3) == 6)
+assert(compose(fn(x: int) => x * 2, fn(x: int) => str(x))(4) == "8")
+
+values = [1,2]
+snapshot = fn() => values
+values[0] = 99
+assert(snapshot() == [1,2])
+returned = snapshot()
+append(returned, 3)
+assert(snapshot() == [1,2])
+
+state = counter(10)
+assert(state() == 11)
+copy = state
+assert(copy() == 12)
+assert(copy() == 13)
+assert(state() == 12)
+# Captures are owned, including explicit mutable captures.
+box = Counter(1)
+advance = fn [mut box](x: int) => box.add(x)
+assert(advance(2) == 3)
+assert(advance(4) == 7)
+assert(box.value == 1)
+assert(box.reader()() == 1)
+writer = box.writer()
+assert(writer(3) == 4)
+assert(writer(3) == 7)
+
+record Actions[F]:
+    items: list[F]
+    fn clear(mut self) -> int:
+        self.items = []
+        return 4
+pure_actions = Actions([add])
+# Snapshot a pure target before a later structural effect.
+assert(pure_actions.items[0](pure_actions.clear()) == 11)
+assert(len(pure_actions.items) == 0)
+stateful_actions = Actions([advance])
+try:
+    # No element reference may survive the later resize.
+    stateful_actions.items[0](stateful_actions.clear())
+    assert(false)
+except err:
+    assert(err.code == "R4006")
+assert(len(stateful_actions.items) == 0)
+
+# Local named functions use declaration defaults and keyword binding.
+fn local_api(seed: int) -> int:
+    fn combine(left: int = 2, *, right: int = 3) -> int:
+        return seed + left * right
+    assert(combine() == seed + 6)
+    assert(combine(right=4, left=5) == seed + 20)
+    fn fresh(values: list[int] = []) -> int:
+        append(values, seed)
+        return len(values)
+    assert(fresh() == 1)
+    assert(fresh() == 1)
+    return combine(4, right=2)
+assert(local_api(5) == 13)
+
+callbacks: list[callable(int) -> int] = [adder(1), fn(x) => x * 2]
+absent_callback: (callable(int) -> int) | None = None
+assert(absent_callback == None)
+assert(callbacks[0](3) == 4)
+assert(callbacks[1](3) == 6)
+record Action[F]:
+    call: F
+    fn run(mut self, value: int) -> F.Result:
+        return self.call(value)
+job = Action(adder(4))
+assert(job.run(3) == 7)
+stack: collections.Stack[callable() -> int] = collections.Stack([])
+stack.push(counter(20))
+callback = stack.pop()
+assert(callback() == 21)
+
+# Empty steps and None/optional-None items are distinct.
+empty: step[int] = finished()
+assert(not has_item(empty))
+try:
+    step_value(empty)
+    assert(false)
+except err:
+    assert(err.code == "R4024")
+none_item = yielded(None)
+assert(has_item(none_item))
+assert(step_value(none_item) is None)
+optional: int | None = None
+optional_item = yielded(optional)
+assert(has_item(optional_item))
+assert(step_value(optional_item) is None)
+assert(it.collect([optional_item]) == [optional_item])
+
+cursor = iter([1,2,3])
+assert(step_value(next(cursor)) == 1)
+cursor_copy = iter(cursor)
+assert(step_value(next(cursor_copy)) == 2)
+assert(step_value(next(cursor)) == 2)
+assert(it.collect(cursor) == [3])
+assert(step_value(next(cursor)) == 3)
+assert(not has_item(next(cursor)))
+assert(not has_item(next(cursor)))
+source = [4,5]
+owned = iter(source)
+source[0] = 9
+append(source, 6)
+assert(it.collect(owned) == [4,5])
+assert(it.collect("abc") == ["a","b","c"])
+assert(it.collect({"b":1,"a":2}) == ["b","a"])
+assert(it.collect(range(5, -2, -2)) == [5,3,1,-1])
+r = range(3)
+assert(step_value(next(r)) == 0)
+assert([i for i in r] == [1,2])
+assert(step_value(next(r)) == 1)
+assert(it.collect(Span(2,5)) == [2,3,4])
+assert(it.collect(it.map(Span(2,5), fn(x) => x * x)) == [4,9,16])
+
+scale = 3
+pipeline = it.take(it.map(it.filter(range(100), fn(x) => x % 2 == 0), fn(x) => x * scale), 4)
+assert(it.collect(pipeline) == [0,6,12,18])
+assert(it.collect(pipeline) == [0,6,12,18])
+assert(it.fold(pipeline, 0, fn(total,item) => total + item) == 36)
+assert(it.collect(it.drop(pipeline, 2)) == [12,18])
+assert(it.collect(it.take(range(10), 0)) == [])
+assert(it.collect(it.drop(range(10), 100)) == [])
+assert(it.collect(it.zip([1,2], ['a','b','c'])) == [(1,'a'),(2,'b')])
+assert(it.collect(it.chain([1,2], [3])) == [1,2,3])
+assert(it.collect(it.enumerate(['a','b'], start=4)) == [(4,'a'),(5,'b')])
+assert(it.collect(it.enumerate([1], start=9223372036854775807)) == [(9223372036854775807,1)])
+assert(it.count(pipeline) == 4)
+assert(it.any(pipeline, fn(x) => x == 12))
+assert(not it.all(pipeline, fn(x) => x > 0))
+assert(step_value(it.find_first(pipeline, fn(x) => x >= 12)) == 12)
+assert(not has_item(it.find_first(pipeline, fn(x) => x > 100)))
+empty_list: list[int] = []
+assert(it.all(empty_list, fn(x: int) => false))
+assert(not it.any(empty_list, fn(x: int) => true))
+assert(eager.map(fn(x: int) => x + scale, [1,2]) == [4,5])
+assert(eager.filter(fn(x: int) => x > scale, [1,5]) == [5])
+assert(eager.fold(fn(a: int,b: int) => a + b, [1,2], 3) == 6)
+assert(eager.map(identity, [1,2]) == [1,2])
+
+# Deterministic mixed pipelines checked against an independent eager loop model.
+for seed in range(100):
+    data = [(seed * 17 + index * 23) % 101 - 50 for index in range(80)]
+    divisor = seed % 5 + 2
+    offset = seed % 9 - 4
+    skipped = seed % 7
+    taken = seed % 13
+    expected: list[int] = []
+    accepted = 0
+    for value in data:
+        if value % divisor == 0:
+            if accepted >= skipped and len(expected) < taken:
+                append(expected, value * 3 + offset)
+            accepted += 1
+    actual = it.take(it.drop(it.map(it.filter(data, fn(x) => x % divisor == 0), fn(x) => x * 3 + offset), skipped), taken)
+    assert(it.collect(actual) == expected)
+    assert(it.fold(actual, 0, fn(a,b) => a + b) == it.fold(expected, 0, fn(a,b) => a + b))
+    assert(it.collect(it.zip(it.enumerate(actual), actual)) == [((i,expected[i]),expected[i]) for i in range(len(expected))])
+
+if true:
+    n = 0
+    fn produce[mut n]() -> step[int]:
+        if n == 4:
+            return finished()
+        n += 1
+        return yielded(n)
+    generated = it.from_fn(produce)
+    assert(it.collect(generated) == [1,2,3,4])
+    assert(n == 0)
+    # A producer which errors if a consumer reads past its requested prefix.
+    count = 0
+    fn bounded[mut count]() -> step[int]:
+        count += 1
+        if count > 3:
+            raise "consumer read too far"
+        return yielded(count)
+    assert(it.collect(it.take(it.from_fn(bounded), 3)) == [1,2,3])
+    assert(it.any(it.from_fn(bounded), fn(x) => x == 2))
+    assert(not it.all(it.from_fn(bounded), fn(x) => x < 2))
+    assert(step_value(it.find_first(it.from_fn(bounded), fn(x) => x == 2)) == 2)
+
+# Explicit next mutates; for/comprehensions own an iteration snapshot.
+walking = SpanCursor(0,4)
+assert(step_value(next(walking)) == 0)
+seen: list[int] = []
+for item in walking:
+    if item == 2:
+        continue
+    append(seen, item)
+    if item == 3:
+        break
+assert(seen == [1,3])
+assert(step_value(next(walking)) == 1)
+
+for amount in [-1,-4]:
+    try:
+        it.take(range(2), amount)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+try:
+    it.collect(it.enumerate([1,2], start=9223372036854775807))
+    assert(false)
+except err:
+    assert(err.code == "R4001")
+print("native closures and lazy iterators passed")

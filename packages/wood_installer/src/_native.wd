@@ -1,0 +1,47 @@
+# Private, sequential installer adapter; not a general-purpose filesystem API.
+extern fn wood_setup_open(root: str, create: int) -> int
+extern fn wood_setup_close() -> int
+extern fn wood_setup_nonce(mut output: array[int]) -> int
+extern fn wood_setup_platform() -> int
+extern fn wood_setup_executable(mut output: array[int]) -> int
+extern fn wood_setup_make_executable(file: str) -> int
+extern fn wood_setup_kind(relative: str) -> int
+extern fn wood_setup_mkdir(relative: str) -> int
+extern fn wood_setup_remove(relative: str, directory: int) -> int
+extern fn wood_setup_write(relative: str, content: str, overwrite: int) -> int
+extern fn wood_setup_hash(file: str, offset: int, size: int, mut output: array[int]) -> int
+extern fn wood_setup_hash_bytes(content: str, mut output: array[int]) -> int
+extern fn wood_setup_extract(file: str, offset: int, size: int, relative: str, expected: str) -> int
+
+fn check(status: int, operation: str) -> int:
+    if status < 0:
+        if status == -125:
+            raise "setup: cancelled"
+        if status <= -1000000:
+            stages = {1: "temporary creation", 2: "write", 3: "flush", 4: "atomic rename"}
+            stage = -status // 1000000
+            raise "setup: " + operation + " failed during " + get(stages, stage, "publication") + " (Windows error " + str(-status % 1000000) + ")"
+        raise "setup: " + operation + " failed (native status " + str(status) + ")"
+    return status
+
+fn digest(file: str, offset: int = 0, size: int = -1) -> str:
+    output = array_full(64, 0)
+    check(wood_setup_hash(file, offset, size, output), "hash " + file)
+    return join([byte_string(value) for value in output], "")
+
+fn nonce() -> str:
+    output = array_full(64, 0)
+    check(wood_setup_nonce(output), "create transaction identifier")
+    return join([byte_string(value) for value in output], "")
+
+fn bytes_digest(content: str) -> str:
+    output = array_full(64, 0)
+    check(wood_setup_hash_bytes(content, output), "hash metadata")
+    return join([byte_string(value) for value in output], "")
+
+fn executable() -> str:
+    output = array_full(131072, 0)
+    size = check(wood_setup_executable(output), "locate setup executable")
+    if size > len(output):
+        raise "setup: invalid executable path length"
+    return join([byte_string(output[i]) for i in range(size)], "")

@@ -1,0 +1,129 @@
+fn _delimiter(delimiter: str):
+    if len(delimiter) != 1 or delimiter in ["\r", "\n", '"', "\0"]:
+        raise "CSV delimiter must be one non-quote, non-newline, non-NUL byte"
+
+fn parse(text: str, delimiter: str) -> list[list[str]]:
+    _delimiter(delimiter)
+    rows: list[list[str]] = []
+    row: list[str] = []
+    pieces: list[str] = []
+    # States: 0 field start, 1 unquoted, 2 quoted, 3 closed quote.
+    state = 0
+    start = 0
+    i = 0
+    pending = false
+    while i < len(text):
+        char = text[i]
+        if state == 2:
+            if char == '"':
+                append(pieces, slice(text, start, i))
+                if i + 1 < len(text) and text[i + 1] == '"':
+                    append(pieces, '"')
+                    i = i + 2
+                    start = i
+                else:
+                    state = 3
+                    i = i + 1
+            else:
+                i = i + 1
+            continue
+        if state == 3 and char != delimiter and char != "\r" and char != "\n":
+            raise "unexpected byte after closing CSV quote at offset " + str(i)
+        if char == delimiter:
+            if state != 3:
+                append(pieces, slice(text, start, i))
+            append(row, join(pieces, ""))
+            pieces = []
+            state = 0
+            pending = true
+            i = i + 1
+            start = i
+        elif char == "\r" or char == "\n":
+            if pending or len(row) > 0:
+                if state != 3:
+                    append(pieces, slice(text, start, i))
+                append(row, join(pieces, ""))
+            append(rows, row)
+            row = []
+            pieces = []
+            state = 0
+            pending = false
+            i = i + 1
+            if char == "\r" and i < len(text) and text[i] == "\n":
+                i = i + 1
+            start = i
+        elif char == '"':
+            if state != 0:
+                raise "quote in unquoted CSV field at offset " + str(i)
+            state = 2
+            pending = true
+            i = i + 1
+            start = i
+        else:
+            state = 1
+            pending = true
+            i = i + 1
+    if state == 2:
+        raise "unterminated quoted CSV field"
+    if pending or len(row) > 0:
+        if state != 3:
+            append(pieces, slice(text, start, i))
+        append(row, join(pieces, ""))
+        append(rows, row)
+    return rows
+
+fn dump(rows: list[list[str]], delimiter: str) -> str:
+    _delimiter(delimiter)
+    # Join bounded batches instead of creating a string/list for every row.
+    # Pending quote/separator bytes share a small prefix, rather than separate
+    # list slots. No reference to an input field escapes its value snapshot.
+    pieces: list[str] = []
+    chunks: list[str] = []
+    for row in rows:
+        pending = ""
+        first = true
+        for field in row:
+            if not first:
+                pending += delimiter
+            first = false
+            has_quotes = '"' in field
+            quoted = has_quotes or delimiter in field or "\r" in field or "\n" in field or (len(row) == 1 and field == "")
+            if quoted:
+                pending += '"'
+            if has_quotes:
+                append(pieces, pending)
+                append(pieces, replace(field, '"', '""'))
+            elif pending != "" or field != "":
+                append(pieces, pending + field)
+            pending = '"' if quoted else ""
+            if len(pieces) >= 128:
+                append(chunks, join(pieces, ""))
+                pieces = []
+        append(pieces, pending + "\r\n")
+        if len(pieces) >= 128:
+            append(chunks, join(pieces, ""))
+            pieces = []
+    if len(pieces) != 0:
+        append(chunks, join(pieces, ""))
+    return join(chunks, "")
+
+fn read_table(text: str, delimiter: str) -> list[dict[str, str]]:
+    rows = parse(text, delimiter)
+    if len(rows) == 0 or len(rows[0]) == 0:
+        raise "CSV table requires a header row"
+    header = rows[0]
+    unique: dict[str, bool] = {}
+    for name in header:
+        if name in unique:
+            raise "duplicate CSV header: " + name
+        unique[name] = true
+    result: list[dict[str, str]] = []
+    for i in range(1, len(rows)):
+        row = rows[i]
+        if len(row) != len(header):
+            raise "CSV row width differs from header at row " + str(i + 1)
+        mapped: dict[str, str] = {}
+        for column in range(len(header)):
+            mapped[header[column]] = row[column]
+        append(result, mapped)
+    return result

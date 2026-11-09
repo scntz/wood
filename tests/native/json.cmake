@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.25)
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef id)
+set(TEST_DIR "${TEST_DIR}/json-${id}")
+file(MAKE_DIRECTORY "${TEST_DIR}")
+foreach(case IN ITEMS valid invalid)
+set(TEST_CASE "${TEST_DIR}/${case}")
+file(MAKE_DIRECTORY "${TEST_CASE}")
+set(file "${TEST_CASE}/error á quoted.wd")
+if(case STREQUAL "valid")
+file(WRITE "${file}" [=[raise "quote \" backslash \\ newline\n unicode á"
+]=])
+else()
+file(WRITE "${file}" [=[raise "bytes:"+byte_string(255)+byte_string(192)+byte_string(175)+byte_string(237)+byte_string(160)+byte_string(128)+byte_string(244)+byte_string(144)+byte_string(128)+byte_string(128)+byte_string(226)+byte_string(130)+" valid:😀"
+]=])
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" -DEMITTER=${EMITTER} -DSTDLIB=${STDLIB}
+    -DINPUT=${file} -DOUTPUT=${TEST_CASE}/error -DTARGET=linux-x86_64
+    -DLLC=${LLC} -DOPT=${OPT} -DLINKER=${LINKER} -DOPTIMIZATION=${LEVEL}
+    -DRUNTIME_OBJECT=${RUNTIME_OBJECT}
+    -P "${SOURCE_DIR}/tools/build-native.cmake"
+    RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 180)
+if(NOT status STREQUAL "0")
+    message(FATAL_ERROR "Native JSON build failed: ${out}${err}")
+endif()
+execute_process(COMMAND "${TEST_CASE}/error" RESULT_VARIABLE actual_status OUTPUT_VARIABLE actual_out ERROR_VARIABLE actual TIMEOUT 30)
+execute_process(COMMAND "${PRODUCTION}" "${file}" --cxx /usr/bin/g++ --diagnostics=json
+    RESULT_VARIABLE expected_status OUTPUT_VARIABLE expected_out ERROR_VARIABLE expected TIMEOUT 180)
+if(NOT actual_status STREQUAL "70" OR NOT expected_status STREQUAL "70" OR NOT actual_out STREQUAL "" OR NOT expected_out STREQUAL "")
+    message(FATAL_ERROR "JSON diagnostic exits differ: ${actual_status}/${expected_status}: ${actual}${expected}")
+endif()
+string(JSON size LENGTH "${actual}")
+if(NOT size EQUAL 6)
+    message(FATAL_ERROR "Native diagnostic schema differs")
+endif()
+foreach(field IN ITEMS severity code message file line column)
+    string(JSON a GET "${actual}" ${field})
+    string(JSON b GET "${expected}" ${field})
+    if(NOT a STREQUAL b)
+        message(FATAL_ERROR "Native JSON ${field} differs: ${actual}${expected}")
+    endif()
+endforeach()
+file(WRITE "${TEST_CASE}/native.json" "${actual}")
+file(WRITE "${TEST_CASE}/production.json" "${expected}")
+endforeach()
+message(STATUS "Native Unicode/control/invalid-byte JSON diagnostics match production fields")

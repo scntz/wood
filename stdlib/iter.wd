@@ -1,0 +1,168 @@
+# Owned, lazy native cursors. No intermediate collections are constructed.
+import std.io as io
+
+# The enclosing with scope owns this stream. Copies share its handle.
+record Lines:
+    source: stream
+    limit: int
+    done: bool
+    fn next(mut self) -> step[str]:
+        if self.done:
+            return finished()
+        line = io.line(self.source, self.limit)
+        if line == "":
+            self.done = true
+            return finished()
+        return yielded(line)
+
+record Generate[F]:
+    producer: F
+    done: bool
+    fn next(mut self) -> F.Result:
+        if self.done:
+            return finished()
+        item = self.producer()
+        if not has_item(item):
+            self.done = true
+        return item
+
+record Map[I,F]:
+    source: I
+    transform: F
+    fn next(mut self) -> step[F.Result]:
+        item = next(self.source)
+        if not has_item(item):
+            return finished()
+        return yielded(self.transform(step_value(item)))
+
+record Filter[I,F]:
+    source: I
+    predicate: F
+    fn next(mut self) -> step[I.Item]:
+        while true:
+            item = next(self.source)
+            if not has_item(item):
+                return item
+            if self.predicate(step_value(item)):
+                return item
+        return finished()
+
+record Take[I]:
+    source: I
+    remaining: int
+    fn next(mut self) -> step[I.Item]:
+        if self.remaining == 0:
+            return finished()
+        item = next(self.source)
+        if has_item(item):
+            self.remaining -= 1
+        else:
+            self.remaining = 0
+        return item
+
+record Drop[I]:
+    source: I
+    remaining: int
+    fn next(mut self) -> step[I.Item]:
+        while self.remaining != 0:
+            item = next(self.source)
+            if not has_item(item):
+                self.remaining = 0
+                return item
+            self.remaining -= 1
+        return next(self.source)
+
+record Enumerate[I]:
+    source: I
+    index: int
+    first: bool
+    fn next(mut self) -> step[tuple[int,I.Item]]:
+        item = next(self.source)
+        if not has_item(item):
+            return finished()
+        if self.first:
+            self.first = false
+        else:
+            self.index += 1
+        return yielded((self.index, step_value(item)))
+
+record Zip[A,B]:
+    left: A
+    right: B
+    exhausted: bool
+    fn next(mut self) -> step[tuple[A.Item,B.Item]]:
+        if self.exhausted:
+            return finished()
+        left = next(self.left)
+        if not has_item(left):
+            self.exhausted = true
+            return finished()
+        right = next(self.right)
+        if not has_item(right):
+            self.exhausted = true
+            return finished()
+        return yielded((step_value(left), step_value(right)))
+
+record Chain[A,B]:
+    left: A
+    right: B
+    left_done: bool
+    fn next(mut self) -> step[A.Item]:
+        if not self.left_done:
+            item = next(self.left)
+            if has_item(item):
+                return item
+            self.left_done = true
+        return next(self.right)
+
+fn map[S,F](source: S, transform: F(S.Item)) -> Map[S.Iterator,F]:
+    return Map(iter(source), transform)
+fn from_fn[T,F](producer: F() -> step[T]) -> Generate[F]:
+    return Generate(producer, false)
+fn lines(source: stream, limit: int = 1048576) -> Lines:
+    if limit < 1:
+        raise "line limit must be positive"
+    return Lines(source, limit, false)
+fn filter[S,F](source: S, predicate: F(S.Item) -> bool) -> Filter[S.Iterator,F]:
+    return Filter(iter(source), predicate)
+fn take[S](source: S, amount: int) -> Take[S.Iterator]:
+    if amount < 0:
+        raise "take amount must be nonnegative"
+    return Take(iter(source), amount)
+fn drop[S](source: S, amount: int) -> Drop[S.Iterator]:
+    if amount < 0:
+        raise "drop amount must be nonnegative"
+    return Drop(iter(source), amount)
+fn enumerate[S](source: S, start: int = 0) -> Enumerate[S.Iterator]:
+    return Enumerate(iter(source), start, true)
+fn zip[A,B](left: A, right: B) -> Zip[A.Iterator,B.Iterator]:
+    return Zip(iter(left), iter(right), false)
+fn chain[A,B](left: A, right: B) -> Chain[A.Iterator,B.Iterator]:
+    return Chain(iter(left), iter(right), false)
+fn collect[S](source: S) -> list[S.Item]:
+    return [item for item in source]
+fn fold[S,A,F](source: S, initial: A, combine: F(A,S.Item) -> A) -> A:
+    result = initial
+    for item in source:
+        result = combine(result, item)
+    return result
+fn count[S](source: S) -> int:
+    result = 0
+    for item in source:
+        result += 1
+    return result
+fn any[S,F](source: S, predicate: F(S.Item) -> bool) -> bool:
+    for item in source:
+        if predicate(item):
+            return true
+    return false
+fn all[S,F](source: S, predicate: F(S.Item) -> bool) -> bool:
+    for item in source:
+        if not predicate(item):
+            return false
+    return true
+fn find_first[S,F](source: S, predicate: F(S.Item) -> bool) -> step[S.Item]:
+    for item in source:
+        if predicate(item):
+            return yielded(item)
+    return finished()

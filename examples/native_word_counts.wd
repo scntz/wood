@@ -1,0 +1,14 @@
+# wood run examples/native_word_counts.wd < input.txt
+import std.time as time
+counts: dict[str,int] = {}
+started = time.perf_counter_ns()
+lines = 0
+while not eof():
+    for word in split(strip(read_line())," "):
+        if word != "":
+            counts[word] = get(counts,word,0)+1
+    lines += 1
+remove(counts,"ignore")
+assert(time.perf_counter_ns() >= started)
+print("lines:",lines)
+print("counts:",counts)

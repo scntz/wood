@@ -1,0 +1,8 @@
+import std.http as http
+import std.https as https
+
+arguments = args()
+if len(arguments) != 4:
+    raise "usage: https_client host port target ca_file"
+reply = https.get(arguments[0], int(arguments[1]), arguments[2], http.Limits(16384, 1048576, 5000), arguments[3])
+print(json_dump({"status": json(reply.status), "body": json(reply.body)}))

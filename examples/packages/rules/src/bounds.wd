@@ -1,0 +1,4 @@
+fn nonnegative(value: int) -> int:
+    if value < 0:
+        raise "measurement must be nonnegative"
+    return value

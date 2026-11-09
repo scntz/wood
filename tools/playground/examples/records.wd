@@ -1,0 +1,13 @@
+record Product:
+    name: str
+    cents: int
+
+    fn label(self) -> str:
+        return self.name + ": $" + str(self.cents // 100)
+
+products = [Product("book", 1200), Product("pen", 200)]
+total = 0
+for product in products:
+    print(product.label())
+    total = total + product.cents
+print("total:", total)

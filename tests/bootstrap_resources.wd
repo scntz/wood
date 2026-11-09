@@ -1,0 +1,38 @@
+import std.sqlite as sql
+
+fn closed_on_return(db: database) -> database:
+    with db as connection:
+        return connection
+
+fn returned_statement(db: database) -> statement:
+    with sql.prepare(db,"SELECT 1") as cursor:
+        return cursor
+
+db = sql.open(":memory:",1000)
+alias = db
+with db as connection:
+    sql.execute(db,"CREATE TABLE entries(value INTEGER)",[])
+    # Both loop exits must roll back and release nested resource scopes.
+    for index in range(3):
+        with sql.begin(db) as scope:
+            sql.execute(db,"INSERT INTO entries VALUES(?)",[json(index)])
+            if index == 0:
+                continue
+            break
+    assert(json_int(sql.query(db,"SELECT count(*) AS n FROM entries",[],1,100)[0]["n"]) == 0)
+    cursor = returned_statement(db)
+    try:
+        stmt_step(cursor)
+        assert(false)
+    except err:
+        assert(err.code == "R4020")
+assert(sql.closed(alias))
+try:
+    with alias as closed:
+        assert(false)
+except err:
+    assert(err.code == "R4020")
+another = sql.open(":memory:",1000)
+assert(sql.closed(closed_on_return(another)))
+assert(sql.closed(another))
+print("native hosted resource scopes passed")

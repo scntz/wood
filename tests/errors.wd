@@ -1,0 +1,126 @@
+# error(code, message), bare raise and finally. The printed lines are the order finally blocks ran in.
+# Program-defined codes keep their own code, message and origin.
+fn lookup(name: str) -> int:
+    if name == "":
+        raise error("app.empty_name", "a name is required")
+    return len(name)
+try:
+    lookup("")
+except err:
+    assert(err.code == "app.empty_name" and err.message == "a name is required")
+    assert(err.line == 5 and err.column == 15)
+    assert(str(err) == "app.empty_name: a name is required")
+made = error("store.missing", "no such row")
+assert(made.code == "store.missing" and made.line == 13)
+for bad in ["", "1abc", "has space", "R4010", "x" * 65]:
+    try:
+        made = error(bad, "m")
+        assert(false)
+    except err:
+        assert(err.code == "R4003")
+
+# A bare raise passes on the error being handled, unchanged.
+fn reraise() -> int:
+    try:
+        return int("twelve")
+    except err:
+        print("seen " + err.code)
+        for err in ["shadow"]:
+            print(err)
+        raise
+try:
+    reraise()
+except outer:
+    assert(outer.code == "R4003" and outer.line == 25)
+
+# finally runs on every way out of the try statement.
+fn returned() -> str:
+    try:
+        return "body"
+    finally:
+        print("returned")
+assert(returned() == "body")
+fn raised():
+    try:
+        raise error("app.fail", "boom")
+    finally:
+        print("raised")
+try:
+    raised()
+except err:
+    assert(err.code == "app.fail")
+fn handled() -> int:
+    try:
+        raise "inner"
+    except err:
+        print("handler " + err.message)
+        return 7
+    finally:
+        print("handled")
+assert(handled() == 7)
+total = 0
+for i in range(5):
+    try:
+        if i == 1:
+            continue
+        if i == 3:
+            break
+        total += i
+    finally:
+        print("loop " + str(i))
+assert(total == 2)
+fn nested() -> list[int]:
+    result: list[int] = []
+    try:
+        try:
+            append(result, 1)
+            return result
+        finally:
+            print("inner")
+    finally:
+        print("outer")
+assert(nested() == [1])
+fn replaced():
+    try:
+        raise "first"
+    finally:
+        raise error("app.second", "second")
+try:
+    replaced()
+except err:
+    assert(err.code == "app.second")
+caught = 0
+for i in range(3):
+    try:
+        try:
+            if i == 1:
+                raise "odd"
+        finally:
+            print("cleanup " + str(i))
+    except err:
+        caught += 1
+assert(caught == 1)
+fn counted() -> int:
+    n = 0
+    try:
+        n = 1
+    finally:
+        for j in range(10):
+            if j == 2:
+                break
+            print("finally loop " + str(j))
+    return n
+assert(counted() == 1)
+fn overridden() -> int:
+    try:
+        return 1
+    finally:
+        raise error("app.cleanup", "cleanup failed")
+try:
+    overridden()
+    assert(false)
+except err:
+    assert(err.code == "app.cleanup")
+finally = 3
+assert(finally == 3)
+print("errors passed")

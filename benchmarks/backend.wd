@@ -1,0 +1,20 @@
+# Prepared inserts, one transaction, exact aggregate checksum. No disk I/O.
+import std.sqlite as sql
+import std.time as time
+
+started = time.perf_counter_ns()
+with sql.open(":memory:", 5000) as db:
+    sql.execute(db, "CREATE TABLE numbers(value INTEGER NOT NULL)", [])
+    with sql.begin(db) as scope:
+        with sql.prepare(db, "INSERT INTO numbers(value) VALUES(?)") as insert:
+            for value in range(1, 100001):
+                stmt_bind_int(insert, 1, value)
+                assert(not stmt_step(insert))
+                stmt_reset(insert)
+        sql.commit(scope)
+    with sql.prepare(db, "SELECT count(*), sum(value) FROM numbers") as cursor:
+        assert(stmt_step(cursor))
+        assert(stmt_int(cursor, 0) == 100000)
+        assert(stmt_int(cursor, 1) == 5000050000)
+elapsed = time.perf_counter_ns() - started
+print(json_dump({"rows": 100000, "checksum": 5000050000, "elapsed_ns": elapsed}))

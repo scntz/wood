@@ -1,0 +1,172 @@
+# Project trust policy for the hosted emitter; production writes/reviews wood.lock.
+import std.path as path
+import std.fs as fs
+import project as project
+import frontend as frontend
+import modules as mod
+import sources as src
+import sha256 as sha
+
+record Verified:
+    snapshot: project.Snapshot
+    document: json | None
+
+fn relative(file: str, root: str) -> str:
+    # Both paths are canonical. Host path identity handles Windows case rules.
+    ancestors: dict[str,int] = {}
+    current = root
+    count = 0
+    while true:
+        ancestors[path.identity(current)] = count
+        parent = path.parent(current)
+        if parent == current:
+            break
+        current = parent
+        count += 1
+    pieces: list[str] = []
+    current = file
+    while path.identity(current) not in ancestors:
+        append(pieces,path.name(current))
+        parent = path.parent(current)
+        if parent == current:
+            raise "package paths have no common filesystem root"
+        current = parent
+    result: list[str] = []
+    for i in range(ancestors[path.identity(current)]):
+        append(result,"..")
+    for i in range(len(pieces)-1,-1,-1):
+        append(result,pieces[i])
+    if len(result) == 0:
+        return "."
+    return join(result,"/")
+
+fn source_files(root: str, max_files: int = 4096, max_entries: int = 65536) -> list[str]:
+    if max_files < 0 or max_entries < 0:
+        raise "invalid dependency inventory limits"
+    if fs.kind(root) != "directory":
+        raise "dependency source root is not a directory"
+    pending = [root]
+    result: list[str] = []
+    remaining = max_entries
+    while len(pending) > 0:
+        current = pop(pending)
+        kind = fs.kind(current)
+        if kind == "symlink":
+            raise "filesystem links are not allowed in dependency sources: "+current
+        if kind == "directory":
+            names = fs.entries(current,remaining)
+            remaining -= len(names)
+            for name in names:
+                append(pending,path.combine(current,name))
+        elif kind == "file" and ends_with(path.name(current),".wd"):
+            if len(result) >= max_files:
+                raise "dependency source inventory exceeds file limit"
+            append(result,current)
+        elif kind == "missing":
+            raise "entry disappeared during dependency inventory: "+current
+    return result
+
+fn inventory(snapshot: project.Snapshot, standards: dict[str,str]) -> json:
+    configured = snapshot.configured
+    if configured.diagnostic.code != "":
+        raise configured.diagnostic.message
+    if len(snapshot.manifests) == 0:
+        raise "dependency inventory requires a project"
+    root = configured.packages[0].root
+    rows: dict[str,json] = {}
+    bytes = 0
+    for i in range(len(configured.packages)):
+        package = configured.packages[i]
+        files: dict[str,str] = {}
+        if i != 0:
+            for file in source_files(package.source_root):
+                content = src.read(file,16777216)
+                bytes += len(content)
+                if bytes > 134217728:
+                    raise "dependency sources exceed 128 MiB"
+                files[relative(file,package.root)] = sha.digest(content)
+        dependencies: dict[str,str] = {}
+        for alias in package.dependencies:
+            dependencies[alias] = relative(configured.packages[package.dependencies[alias]].root,root)
+        row: dict[str,json] = {}
+        row["root"] = json(relative(package.root,root))
+        row["name"] = json(package.name)
+        row["version"] = json(package.version)
+        row["manifest_sha256"] = json(sha.digest(snapshot.manifests[package.root]))
+        row["sources"] = json(files)
+        row["dependencies"] = json(dependencies)
+        rows[relative(package.root,root)] = json(row)
+    packages: list[json] = []
+    for name in json_dict(json(rows)):
+        append(packages,rows[name])
+    standard: dict[str,str] = {}
+    for name in standards:
+        standard[name] = sha.digest(standards[name])
+    result: dict[str,json] = {}
+    result["format"] = json(1)
+    result["compiler"] = json("0.4.0")
+    result["stdlib"] = json(standard)
+    result["packages"] = json(packages)
+    return json(result)
+
+fn without_remote(document: json) -> json:
+    # GitHub commit and Python wheel pins are package-manager metadata; content checks are unchanged.
+    data = project.object(document)
+    result: dict[str,json] = {}
+    for name in data:
+        if name not in ["remote","python"]:
+            result[name] = data[name]
+    return json(result)
+
+fn prepare(snapshot: project.Snapshot, standards: dict[str,str], required: bool = false) -> Verified:
+    if snapshot.configured.diagnostic.code != "":
+        raise snapshot.configured.diagnostic.message
+    if len(snapshot.manifests) == 0:
+        if required:
+            raise "--locked requires a project"
+        return Verified(snapshot,None)
+    file = path.combine(snapshot.configured.packages[0].root,"wood.lock")
+    if not path_exists(file):
+        if required:
+            raise "wood.lock is required; run 'wood lock' and review it"
+        return Verified(snapshot,None)
+    locked = json_parse(src.read(file,16777216))
+    if json_dump(without_remote(locked)) != json_dump(inventory(snapshot,standards)):
+        raise "wood.lock differs from manifests or dependency sources; run 'wood lock' and review the change"
+    return Verified(snapshot,locked)
+
+fn verify_loaded(verified: Verified, compilation: mod.Compilation):
+    if verified.document is None:
+        return
+    configured = verified.snapshot.configured
+    rows = json_list(project.member(project.object(unwrap(verified.document)),"packages"))
+    for unit in compilation.modules:
+        if unit.package == 0 or starts_with(unit.file,"<"):
+            continue
+        package = configured.packages[unit.package]
+        root = relative(package.root,configured.packages[0].root)
+        checked = false
+        for value in rows:
+            row = project.object(value)
+            if project.string(project.member(row,"root")) == root:
+                sources = project.object(project.member(row,"sources"))
+                name = relative(unit.file,package.root)
+                if name not in sources or project.string(sources[name]) != sha.digest(unit.source):
+                    raise "dependency changed after lock verification: "+unit.file
+                checked = true
+                break
+        if not checked:
+            raise "compiled dependency is absent from wood.lock: "+unit.file
+
+fn load(input: str, standards: dict[str,str], required: bool = false) -> frontend.Result:
+    snapshot = project.snapshot(input)
+    if snapshot.configured.diagnostic.code != "":
+        return frontend.rejected(snapshot.configured.diagnostic)
+    try:
+        verified = prepare(snapshot,standards,required)
+        loaded = frontend.load_configured(snapshot.configured,standards,input)
+        if loaded.diagnostic.code == "":
+            verify_loaded(verified,loaded.compilation)
+        return loaded
+    except err:
+        return frontend.rejected(src.Diagnostic("D5001",err.message,input,0,0,0,0))

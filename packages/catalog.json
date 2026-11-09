@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "license": "MIT OR Apache-2.0",
+  "packages": [
+    {"name":"wood_audio","version":"0.1.0","directory":"wood_audio","modules":["buffer","device","wav"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":true,"status":"experimental"},
+    {"name":"wood_cli","version":"0.1.0","directory":"wood_cli","modules":["args"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":false,"status":"development"},
+    {"name":"wood_config","version":"0.1.0","directory":"wood_config","modules":["config"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":false,"status":"experimental"},
+    {"name":"wood_image","version":"0.2.0","directory":"wood_image","modules":["codecs","image","scene"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":false,"status":"experimental"},
+    {"name":"wood_log","version":"0.1.0","directory":"wood_log","modules":["log"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":false,"status":"experimental"},
+    {"name":"wood_process","version":"0.1.0","directory":"wood_process","modules":["process"],"platforms":["windows-x86_64","linux-x86_64"],"native_adapter":false,"status":"experimental"},
+    {"name":"wood_windowsgui","version":"0.2.0","directory":"wood_windowsgui","modules":["widgets"],"platforms":["windows-x86_64"],"native_adapter":true,"status":"experimental"}
+  ]
+}

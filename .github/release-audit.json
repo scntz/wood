@@ -1,0 +1,54 @@
+{
+  "maximum_file_bytes": 1048576,
+  "forbidden_paths": "(?i)(^|/)(build[^/]*|out|install|node_modules|__pycache__|[.]vs|[.]vscode|[.]idea)/|(^|/)([.]env(?![.]example$)[^/]*|credentials[.]json|secrets[.]json|id_rsa[^/]*|id_ed25519[^/]*)(/|$)|^benchmarks/results/|[.](exe|dll|o|pdb|lib|a|so|dylib|pyc|zip|log|tmp|pfx|p12)$",
+  "patterns": [
+    {
+      "name": "private-key",
+      "regex": "-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
+    },
+    {
+      "name": "GitHub-token",
+      "regex": "(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})"
+    },
+    {
+      "name": "AWS-access-id",
+      "regex": "(?:AKIA|ASIA)[0-9A-Z]{16}"
+    },
+    {
+      "name": "API-secret",
+      "regex": "sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}"
+    },
+    {
+      "name": "private-Windows-home",
+      "regex": "(?i)[a-z]:[\\\\/]+Users[\\\\/]+(?!developer(?:[\\\\/]|\\b)|Public(?:[\\\\/]|\\b)|Default(?:[\\\\/]|\\b))[^\\\\/\\s\"'<>]+"
+    },
+    {
+      "name": "private-Unix-home",
+      "regex": "/(?:home|Users)/(?!developer(?:/|\\b))[^/\\s\"\\\\]+/"
+    }
+  ],
+  "reviewed_binary_assets": [
+    {
+      "path": "docs/assets/logo.png",
+      "sha256": "ddbfb02ca752f6bbf8420667c9b9e96c4da97386eb44021c933459929b9385b8"
+    }
+  ],
+  "public_test_keys": [
+    {
+      "path": "tests/fixtures/tls/expired-key.pem",
+      "sha256": "08b99b2bcaaf7f2d64b5796bb61bd15ffb4225dce9e2033c5e0003dae2f1e410"
+    },
+    {
+      "path": "tests/fixtures/tls/server-key.pem",
+      "sha256": "d8f96ad7fa9dc0709a6177a790bc5a8cf5505d6242783d436a0eaff9ffc9ae29"
+    },
+    {
+      "path": "tests/fixtures/tls/wrong-key.pem",
+      "sha256": "35a5ae1c2c5f12ccdfec809b551583f75899296d146b79b31eb282f417bf1321"
+    },
+    {
+      "path": "tests/fixtures/tls/encrypted-key.pem",
+      "sha256": "c30deb43e06a941353a498ff94c11505fe8edf64c1ae9a4b04abe8ec4cf500e0"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+ "format": 1,
+ "purpose": "Cross-check of Mandelbrot, the only workload where wood clearly beat MSVC in the run recorded with commit 0081ad5, against the two common Linux C++ compilers",
+ "script": "benchmarks/languages/check_linux.sh",
+ "system": "Debian 13 x86-64 on the same hardware",
+ "workload": "mandelbrot",
+ "arguments": [
+  "1000",
+  "100"
+ ],
+ "answer": "386485",
+ "rounds": 11,
+ "versions": {
+  "wood": "wood 1.0.0-alpha.1 (language 0.4.0, native runtime ABI 4)",
+  "gcc": "g++ (Debian 14.2.0-19) 14.2.0",
+  "clang": "Debian clang version 19.1.7 (3+b1)"
+ },
+ "flags": {
+  "wood": "wood build -O2",
+  "gcc": "g++ -O3 -DNDEBUG -std=c++20",
+  "gcc_o2": "g++ -O2 -DNDEBUG -std=c++20",
+  "clang": "clang++ -O3 -DNDEBUG -std=c++20"
+ },
+ "results_ms": {
+  "wood": {
+   "median": 123.2,
+   "min": 120.0,
+   "max": 126.9
+  },
+  "gcc": {
+   "median": 128.4,
+   "min": 126.3,
+   "max": 133.4
+  },
+  "gcc_o2": {
+   "median": 126.0,
+   "min": 124.2,
+   "max": 129.1
+  },
+  "clang": {
+   "median": 125.9,
+   "min": 124.4,
+   "max": 129.5
+  }
+ },
+ "conclusion": "The ranges overlap, so this is not a clear win for wood.",
+ "wood_source": "0081ad50a2c2894d0bcc98dd8939ff7c0dbd3e50"
+}

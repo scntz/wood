@@ -1,0 +1,81 @@
+import codecs as codecs
+import image as img
+import std.env as env
+
+# Altered files must decode or raise an ordinary error, with no crash and no unbounded allocation.
+# Chunk checksums are recomputed, so that altered PNG data reaches the decoder rather than stopping at the CRC.
+# WOOD_FUZZ_ITERATIONS runs longer than the default regression pass.
+fn crc_table() -> list[int]:
+    table: list[int] = []
+    for n in range(256):
+        value = n
+        for bit in range(8):
+            value = (3988292384 ^ (value >> 1)) if value & 1 == 1 else value >> 1
+        append(table, value)
+    return table
+
+fn big_endian(value: int) -> str:
+    return byte_string((value >> 24) & 255) + byte_string((value >> 16) & 255) + byte_string((value >> 8) & 255) + byte_string(value & 255)
+
+fn chunk(name: str, body: str, table: list[int]) -> str:
+    crc = 4294967295
+    for byte in name + body:
+        crc = table[(crc ^ byte_value(byte)) & 255] ^ (crc >> 8)
+    return big_endian(len(body)) + name + body + big_endian(crc ^ 4294967295)
+
+record Random:
+    state: int
+
+    fn below(mut self, bound: int) -> int:
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        return (self.state >> 8) % bound
+
+    fn mutate(mut self, source: str) -> str:
+        text = source
+        for round in range(1 + self.below(3)):
+            at = self.below(len(text) + 1)
+            choice = self.below(4)
+            if choice == 0 and at < len(text):
+                text = text[:at] + byte_string(self.below(256)) + text[at+1:]
+            elif choice == 1:
+                text = text[:at] + text[at+1+self.below(8):]
+            elif choice == 2:
+                text = text[:at] + byte_string(255) + byte_string(255) + byte_string(255) + text[at:]
+            else:
+                text = text[:at]
+        return text
+
+    # Rewrites the IHDR and IDAT bodies with altered copies and valid checksums.
+    fn altered_png(mut self, source: str, table: list[int]) -> str:
+        size = byte_value(source[33]) << 24 | byte_value(source[34]) << 16 | byte_value(source[35]) << 8 | byte_value(source[36])
+        header = self.mutate(source[16:29])
+        data = self.mutate(source[41:41+size])
+        return source[:8] + chunk("IHDR", header, table) + chunk("IDAT", data, table) + chunk("IEND", "", table)
+
+picture = img.filled(8, 8, img.Color(10, 20, 30, 255))
+png = codecs.encode_png(picture)
+bmp = codecs.encode_bmp(picture)
+assert(codecs.decode_png(png).width == 8)
+assert(codecs.decode_bmp(bmp).width == 8)
+table = crc_table()
+random = Random(20261103)
+iterations = 400
+configured = env.get("WOOD_FUZZ_ITERATIONS")
+if configured != None:
+    iterations = int(unwrap(configured))
+accepted = 0
+rejected = 0
+for i in range(iterations):
+    for text in [random.mutate(png), random.altered_png(png, table)]:
+        try:
+            codecs.decode_png(text)
+            accepted += 1
+        except err:
+            rejected += 1
+    try:
+        codecs.decode_bmp(random.mutate(bmp))
+        accepted += 1
+    except err:
+        rejected += 1
+assert(accepted + rejected == iterations * 3)
+assert(rejected > 0)

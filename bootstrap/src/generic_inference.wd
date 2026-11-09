@@ -1,0 +1,103 @@
+# Structural deduction follows production's invariant type-parameter rules.
+import type_system as ts
+import sources as src
+import lexer as lx
+import signatures as sig
+
+record Solver:
+    pool: ts.Pool
+    arguments: dict[str,int]
+    origins: dict[int,int]
+    problem: src.Diagnostic | None
+    file: str
+    source: int
+    resolver: sig.Resolver
+    concrete_types: dict[int,int]
+
+    fn fail(mut self, code: str, message: str, token: lx.Token):
+        self.problem = src.located(code,message,self.file,self.source,token)
+        raise "bootstrap generic inference rejection"
+
+    fn origin(self, symbol: int) -> int:
+        return self.origins[symbol] if symbol in self.origins else symbol
+
+    fn equivalent(self, a: int, b: int) -> bool:
+        if a == b:
+            return true
+        left = self.pool.types[a]
+        right = self.pool.types[b]
+        if left.kind != right.kind or left.name != right.name or len(left.parameters) != len(right.parameters):
+            return false
+        if self.origin(left.declaration) != self.origin(right.declaration):
+            return false
+        if (left.element < 0) != (right.element < 0) or (left.key < 0) != (right.key < 0):
+            return false
+        if left.element >= 0 and not self.equivalent(left.element,right.element):
+            return false
+        if left.key >= 0 and not self.equivalent(left.key,right.key):
+            return false
+        for index in range(len(left.parameters)):
+            if not self.equivalent(left.parameters[index],right.parameters[index]):
+                return false
+        return true
+
+    fn require(mut self, actual: int, expected: int, token: lx.Token):
+        resolver = self.resolver
+        resolver.pool = self.pool
+        try:
+            expected = resolver.resolve_type(expected,self.source,token,self.arguments)
+            if expected in self.concrete_types:
+                expected = self.concrete_types[expected]
+        except err:
+            if resolver.problem is not None:
+                self.problem = unwrap(resolver.problem)
+            raise err
+        self.pool = resolver.pool
+        if self.pool.assignable(expected,actual) or self.equivalent(actual,expected):
+            return
+        wanted = self.pool.display(expected)
+        received = self.pool.display(actual)
+        self.fail("E3002","expected "+wanted+", got "+received+("; these types contain distinct nominal record declarations" if wanted == received else ""),token)
+
+    fn infer(mut self, pattern: int, actual: int, token: lx.Token):
+        if actual == 0:
+            return
+        left = self.pool.types[pattern]
+        right = self.pool.types[actual]
+        if left.kind == "Signature":
+            if right.kind not in ["Function","Callable","Closure"] or len(left.parameters) != len(right.parameters):
+                self.fail("E3028","argument does not match callable pattern "+self.pool.display(pattern),token)
+            if left.name in self.arguments and self.arguments[left.name] != actual:
+                self.fail("E3024","conflicting callable types for "+left.name,token)
+            self.arguments[left.name] = actual
+            for index in range(len(left.parameters)):
+                self.infer(left.parameters[index],right.parameters[index],token)
+                expected = self.pool.substitute(left.parameters[index],self.arguments)
+                self.require(right.parameters[index],expected,token)
+            if left.element != 0:
+                self.infer(left.element,right.element,token)
+                expected = self.pool.substitute(left.element,self.arguments)
+                self.require(right.element,expected,token)
+            return
+        if left.kind == "Parameter":
+            if right.kind == "Void":
+                self.fail("E3024","cannot infer type parameter '"+left.name+"' from "+self.pool.display(actual),token)
+            if left.name in self.arguments and self.arguments[left.name] != actual:
+                self.fail("E3024","conflicting types for '"+left.name+"': "+self.pool.display(self.arguments[left.name])+" and "+self.pool.display(actual),token)
+            self.arguments[left.name] = actual
+            return
+        if left.kind == "Optional":
+            if right.kind != "None":
+                self.infer(left.element,right.element if right.kind == "Optional" else actual,token)
+            return
+        if left.kind != right.kind and not (left.kind in ["Function","Callable","Closure"] and right.kind in ["Function","Callable","Closure"]):
+            return
+        if left.kind == "Record" and self.origin(left.declaration) != self.origin(right.declaration):
+            return
+        if left.element >= 0:
+            self.infer(left.element,right.element,token)
+        if left.key >= 0:
+            self.infer(left.key,right.key,token)
+        if len(left.parameters) == len(right.parameters):
+            for index in range(len(left.parameters)):
+                self.infer(left.parameters[index],right.parameters[index],token)

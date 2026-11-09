@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security policy
+    url: https://github.com/scntz/wood/security/policy
+    about: wood is no longer maintained; read the security policy before relying on it.

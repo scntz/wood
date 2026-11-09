@@ -1,0 +1,276 @@
+import std.num as num
+import std.iter as it
+import std.io as io
+import std.net as net
+
+# A step containing handles (directly or in containers) must keep its owners
+# alive across the rest of a return expression. A peer can observe early close.
+fn discard_resource(handle: stream) -> int:
+    return 0
+fn discard_resources(handles: list[stream]) -> int:
+    return 0
+fn still_open(peer: stream) -> int:
+    try:
+        io.read(peer, 1)
+    except err:
+        assert(err.code == "R4018")
+        return 1
+    return 0
+fn resource_step(listener: stream, number: int) -> int:
+    item = yielded(net.connect("127.0.0.1", number, 1000))
+    peer = net.accept(listener)
+    net.set_timeout(peer, 30)
+    return discard_resource(step_value(item)) + still_open(peer)
+fn resource_list_step(listener: stream, number: int) -> int:
+    item = yielded([net.connect("127.0.0.1", number, 1000)])
+    peer = net.accept(listener)
+    net.set_timeout(peer, 30)
+    return discard_resources(step_value(item)) + still_open(peer)
+with net.listen("127.0.0.1", 0, 1000) as listener:
+    assert(resource_step(listener, net.port(listener)) == 1)
+    assert(resource_list_step(listener, net.port(listener)) == 1)
+
+# Projections of temporary records must not retain unrelated resource fields
+# across subsequent operands or indexes. Stable named owners can still borrow.
+record ResourceProjection:
+    text: str
+    labels: list[str]
+    owner: stream
+record ProjectionServer:
+    listener: stream
+    peer: stream | None
+    fn make(mut self) -> ResourceProjection:
+        client = net.connect("127.0.0.1", net.port(self.listener), 1000)
+        self.peer = net.accept(self.listener)
+        net.set_timeout(unwrap(self.peer), 30)
+        return ResourceProjection("closed", ["closed","open"], client)
+    fn status(self) -> str:
+        try:
+            io.read(unwrap(self.peer), 1)
+        except err:
+            assert(err.code == "R4018")
+            return "open"
+        return "closed"
+    fn position(self) -> int:
+        if self.status() == "closed":
+            return 0
+        return 1
+    fn bound(self) -> int:
+        if self.status() == "closed":
+            return 6
+        return 0
+with net.listen("127.0.0.1", 0, 1000) as listener:
+    server = ProjectionServer(listener, None)
+    assert(server.make().text == server.status())
+    assert(server.make().labels[server.position()] == "closed")
+    assert(server.make().text[:server.bound()] == "closed")
+
+# Canonical unit-stride lowering preserves exclusive bounds, progression,
+# continue/break and signed endpoints without overflowing a final increment.
+assert([value for value in range(9223372036854775804, 9223372036854775807)] == [9223372036854775804,9223372036854775805,9223372036854775806])
+assert([value for value in range(-9223372036854775805, -9223372036854775808, -1)] == [-9223372036854775805,-9223372036854775806,-9223372036854775807])
+assert([value for value in range(5, 2)] == [])
+assert([value for value in range(2, 5, -1)] == [])
+progress: list[int] = []
+for value in range(-2, 4, 1):
+    if value == 0:
+        continue
+    append(progress, value)
+    value = 999
+assert(progress == [-2,-1,1,2,3])
+progress = []
+for value in range(3, -4, -1):
+    if value == 0:
+        break
+    append(progress, value)
+    value = -999
+assert(progress == [3,2,1])
+record Bounds:
+    calls: int
+    fn lower(mut self) -> int:
+        self.calls += 1
+        return self.calls
+    fn upper(mut self) -> int:
+        self.calls *= 10
+        return self.calls + 3
+bounds = Bounds(0)
+total = 0
+for value in range(bounds.lower(), bounds.upper(), 1):
+    total += value
+assert(total == 78 and bounds.calls == 10)
+try:
+    for value in range(0, 3, 0):
+        assert(false)
+    assert(false)
+except err:
+    assert(err.code == "R4005")
+
+record State:
+    text: str
+    items: list[int]
+    mapping: dict[int,int]
+    calls: int
+    fn change(mut self, replacement: str) -> str:
+        previous = self.text
+        self.text = replacement
+        self.calls += 1
+        return previous
+    fn index(mut self) -> int:
+        append(self.items, 99)
+        self.calls += 1
+        return -1
+    fn key(mut self) -> int:
+        self.mapping[0] = 99
+        self.calls += 1
+        return 0
+    fn stop(mut self) -> int:
+        self.text = "changed"
+        self.calls += 1
+        return 4
+    fn bound(mut self) -> str:
+        self.text = "z"
+        self.calls += 1
+        return "n"
+
+fn fresh() -> State:
+    return State("original", [1,2], {0:7}, 0)
+
+state = fresh()
+assert(true, state.change("changed"))
+assert(state.text == "changed" and state.calls == 1)
+state = fresh()
+assert(state.text == state.change("changed"))
+assert(state.text == "changed" and state.calls == 1)
+state = fresh()
+assert(state.text + state.change("changed") == "originaloriginal")
+state = fresh()
+assert(state.text[:state.stop()] == "orig")
+assert(state.text == "changed" and state.calls == 1)
+state = State("m", [], {}, 0)
+assert("a" < state.text < state.bound())
+assert(state.text == "z" and state.calls == 1)
+state = fresh()
+assert(state.items[state.index()] == 2)
+assert(state.items == [1,2,99] and state.calls == 1)
+assert(state.mapping[state.key()] == 7)
+assert(state.mapping[0] == 99 and state.calls == 2)
+assert(fresh().text + "!" == "original!")
+assert(fresh().text[:4] == "orig")
+assert(fresh().text == fresh().text)
+
+# Old last-use array lowering incorrectly consumed the source on iteration one.
+fn repeated_array(source: array[int]) -> list[array[int]]:
+    return [source + 1 for index in range(3)]
+results = repeated_array(num.ints(3, 7))
+for result in results:
+    assert(num.to_list(result) == [8,8,8])
+fn repeated_mapping(source: array[int]) -> dict[int,array[int]]:
+    return {index: source + 1 for index in range(3)}
+mapped = repeated_mapping(num.ints(3, 7))
+for index in range(3):
+    assert(num.to_list(mapped[index]) == [8,8,8])
+
+fn repeated_string(source: str) -> list[str]:
+    return [source + str(index) for index in range(3)]
+assert(repeated_string("long original value") == ["long original value0", "long original value1", "long original value2"])
+fn repeated_step(source: step[str]) -> list[str]:
+    return [step_value(source) for index in range(3)]
+assert(repeated_step(yielded("long original value")) == ["long original value", "long original value", "long original value"])
+fn repeated_list(source: list[int]) -> list[list[int]]:
+    return [source + [index] for index in range(3)]
+assert(repeated_list([7]) == [[7,0],[7,1],[7,2]])
+
+fn finish_string(source: str) -> str:
+    owned = source + " owned"
+    return owned + " result"
+fn twice(source: str) -> str:
+    return source + source
+fn finish_step(source: step[str]) -> str:
+    return step_value(source) + "!"
+fn temporary_step(source: str) -> str:
+    return step_value(yielded(source)) + "!"
+original = "native snapshot " * 20
+fn tuple_text() -> tuple[str]:
+    return ("native snapshot " * 20,)
+fn tuple_array() -> tuple[array[int]]:
+    return (num.ints(3, 7),)
+fn tuple_list() -> tuple[list[int]]:
+    return ([1,2,3],)
+fn tuple_state() -> tuple[State]:
+    return (State("native snapshot " * 20, [1,2,3], {0:7}, 0),)
+fn tuple_callback():
+    captured = "native snapshot " * 20
+    return (fn(value: int) => len(captured) + value,)
+assert(len(tuple_text()[0]) == len(original))
+assert(tuple_array()[0][1] == 7)
+assert(num.to_list(+tuple_array()[0]) == [7,7,7])
+assert(tuple_list()[0][1] == 2)
+assert(len(tuple_state()[0].text) == len(original))
+assert(tuple_state()[0].items[1] == 2)
+assert(tuple_state()[0].mapping[0] == 7)
+assert(tuple_state()[0].text[:6] == "native")
+assert(tuple_state()[0].text + "!" == original + "!")
+assert("a" < tuple_state()[0].text < "z")
+callback_tuples = [tuple_callback()]
+assert(callback_tuples[0][0](2) == len(original) + 2)
+assert(tuple_callback()[0](3) == len(original) + 3)
+assert(State(original, [], {}, 0).text + "!" == original + "!")
+assert(State(original, [], {}, 0).text[:6] == "native")
+assert(finish_string(original) == original + " owned result")
+assert(twice(original) == original + original)
+token = yielded(original)
+assert(finish_step(token) == original + "!")
+assert(step_value(token) == original)
+assert(temporary_step(original) == original + "!")
+assert(original == "native snapshot " * 20)
+
+fn fail_text() -> str:
+    raise "stop"
+fn handled(source: str) -> str:
+    try:
+        return source + fail_text()
+    except err:
+        assert(err.message == "stop")
+        assert(source == "native snapshot " * 20)
+    return source
+assert(handled(original) == original)
+fn failed_step(source: step[str]) -> str:
+    try:
+        return step_value(source) + fail_text()
+    except err:
+        assert(step_value(source) == original_length())
+    return step_value(source)
+fn original_length() -> str:
+    return "native snapshot " * 20
+assert(failed_step(token) == original)
+
+# Snapshots survive assignment, nested mutation, iterator capture and return.
+fn append_result(source: list[str]) -> list[str]:
+    return source + ["tail"]
+strings = [original, "second"]
+snapshot = strings
+assert(append_result(strings) == [original, "second", "tail"])
+strings[0] = "replacement"
+assert(snapshot == [original, "second"])
+cursor = it.map(snapshot, fn(value) => len(value))
+snapshot[0] = "different"
+assert(it.collect(cursor) == [len(original), 6])
+assert(it.collect(it.map([original, "second"], fn(value) => value + "!")) == [original + "!", "second!"])
+assert(it.collect(it.filter([original, "second"], fn(value) => len(value) > 6)) == [original])
+
+binary = "a\0árbol" * 8
+assert(finish_string(binary) == binary + " owned result")
+assert(twice(binary) == binary * 2)
+assert(binary[1:4] == "\0á")
+try:
+    empty: step[str] = finished()
+    step_value(empty)
+    assert(false)
+except err:
+    assert(err.code == "R4024")
+try:
+    value = fresh().items[3]
+    assert(false)
+except err:
+    assert(err.code == "R4006")
+print("ownership and read borrowing passed")

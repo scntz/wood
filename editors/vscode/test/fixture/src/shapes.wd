@@ -1,0 +1,7 @@
+record Box:
+    width: int
+    height: int
+
+# The space a box covers.
+fn area(box: Box) -> int:
+    return box.width * box.height

@@ -1,0 +1,46 @@
+import semantic_queries as queries
+import project as project
+import sources as src
+import std.time as time
+import preparation_wire as preparation
+
+arguments = args()
+if len(arguments) >= 3 and arguments[0] == "--inspect":
+    standards: dict[str,str] = {}
+    bundle = project.object(json_parse(src.read(arguments[1],16777216)))
+    for name in bundle:
+        standards[name] = project.string(bundle[name])
+    status = 0
+    for entry in arguments[2:]:
+        result = preparation.inspect(entry,standards)
+        print(json_dump(result))
+        if result.diagnostic.code != "":
+            status = 1
+    exit(status)
+if len(arguments) != 1 and len(arguments) != 3:
+    print("usage: wood-bootstrap-semantic-queries QUERIES.json [--measure ITERATIONS]")
+    print("       wood-bootstrap-semantic-queries --inspect STDLIB.json ENTRY [ENTRY ...]")
+    exit(2)
+items = json_list(json_parse(src.read(arguments[0],16777216)))
+iterations = 0
+if len(arguments) == 3:
+    if arguments[1] != "--measure":
+        exit(2)
+    iterations = int(arguments[2])
+    if iterations < 1 or iterations > 10000:
+        exit(2)
+for item in items:
+    query = project.object(item)
+    result = queries.inspect(project.string(query["source"]),project.string(query["mode"]))
+    if iterations == 0:
+        print(json_dump(result))
+if iterations > 0:
+    count = 0
+    started = time.perf_counter_ns()
+    for iteration in range(iterations):
+        for item in items:
+            query = project.object(item)
+            result = queries.inspect(project.string(query["source"]),project.string(query["mode"]))
+            count += len(result.events)+len(result.diagnostic.code)+len(result.return_type)
+    elapsed = time.perf_counter_ns()-started
+    print(json_dump({"iterations":iterations,"queries":len(items),"checksum":count,"elapsed_ns":elapsed}))

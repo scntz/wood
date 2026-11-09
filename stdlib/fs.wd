@@ -1,0 +1,45 @@
+# Filesystem traversal policy is native Wood; OS primitives live in the runtime.
+fn kind(path: str) -> str:
+    return fs_kind(path)
+
+fn entries(path: str, limit: int) -> list[str]:
+    return fs_list(path, limit)
+
+fn size(path: str) -> int:
+    return fs_size(path)
+
+fn make_dirs(path: str) -> bool:
+    return fs_mkdirs(path)
+
+fn remove(path: str) -> bool:
+    return fs_remove(path)
+
+fn walk_files(root: str, max_entries: int) -> list[str]:
+    if max_entries < 0:
+        raise "walk entry budget must be nonnegative"
+    if fs_kind(root) != "directory":
+        raise "walk root must be a directory, not a symlink"
+    pending = [root]
+    result: list[str] = []
+    remaining = max_entries
+    while len(pending) > 0:
+        current = pop(pending)
+        current_kind = fs_kind(current)
+        if current_kind == "file":
+            append(result, current)
+        elif current_kind == "directory":
+            names = fs_list(current, remaining)
+            remaining = remaining - len(names)
+            # Stack reversal gives deterministic, lexical depth-first order.
+            for i in range(len(names) - 1, -1, -1):
+                append(pending, path_join(current, names[i]))
+        elif current_kind == "missing":
+            raise "entry disappeared during traversal"
+    return result
+
+fn find_files(root: str, predicate: fn(str) -> bool, max_entries: int) -> list[str]:
+    result: list[str] = []
+    for path in walk_files(root, max_entries):
+        if predicate(path):
+            append(result, path)
+    return result

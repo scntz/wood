@@ -1,0 +1,23 @@
+# Redirect stdout to grid.obj: transformed vertices and indexed triangles.
+record Point:
+    x: int
+    y: int
+    z: int
+    fn transformed(self, scale: int, offset: int):
+        return Point(self.x*scale+offset,self.y*scale,self.z*scale-offset)
+fn index(x: int, y: int, width: int):
+    return y*(width+1)+x+1
+width = 24
+for y in range(width+1):
+    for x in range(width+1):
+        height = (x*x+y*y)%17
+        point = Point(x,height,y).transformed(2,-3)
+        print("v",point.x,point.y,point.z)
+for y in range(width):
+    for x in range(width):
+        a = index(x,y,width)
+        b = index(x+1,y,width)
+        c = index(x+1,y+1,width)
+        d = index(x,y+1,width)
+        print("f",a,b,c)
+        print("f",a,c,d)

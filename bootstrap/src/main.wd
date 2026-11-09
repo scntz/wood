@@ -1,0 +1,45 @@
+# JSON Lines adapter. The reusable lexer itself has no I/O dependencies.
+import lexer as lexer
+import std.io as io
+
+record WireToken:
+    kind: str
+    text_hex: str
+    offset: int
+    line: int
+    column: int
+
+record Reply:
+    format: int
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+    tokens: list[WireToken]
+
+fn hex_text(text: str) -> str:
+    digits = "0123456789abcdef"
+    parts: list[str] = []
+    for c in text:
+        value = byte_value(c)
+        append(parts,digits[value // 16] + digits[value % 16])
+    return join(parts,"")
+
+paths = args()
+if len(paths) == 0:
+    print("usage: wood-bootstrap-lex SOURCE.wd [SOURCE.wd ...]")
+    exit(2)
+status = 0
+for path in paths:
+    source = ""
+    with io.open(path,"r") as input:
+        source = io.read_all(input,16777216)
+    result = lexer.lex(source)
+    tokens: list[WireToken] = []
+    for token in result.tokens:
+        append(tokens,WireToken(token.kind,hex_text(token.text),token.offset,token.line,token.column))
+    print(json_dump(Reply(1,result.code,result.message,result.offset,result.line,result.column,tokens)))
+    if result.code != "":
+        status = 1
+exit(status)

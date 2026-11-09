@@ -1,0 +1,34 @@
+import gui.widgets as gui
+import std.task as task
+import std.time as time
+
+fn loop(token: int) -> int:
+    window = gui.Window(token)
+    write_text(window.context(), str(token))
+    while true:
+        window.wait()
+    return 0
+
+fn worker(payload: json) -> json:
+    gui.run("GUI worker cancellation", 320, 200, json_str(payload), loop)
+    return json_null()
+
+if len(args()) != 1:
+    raise "provide a fresh handshake path"
+file = args()[0]
+with task.spawn(worker, json(file)) as work:
+    for i in range(10000):
+        if path_exists(file):
+            break
+        time.sleep(0.001)
+    assert(path_exists(file))
+    token = int(read_text(file))
+    task.cancel(work)
+    caught = false
+    try:
+        task.wait(work,10000)
+    except err:
+        caught = err.code == "R4022"
+    assert(caught)
+    assert(not gui.post(token, 1, "after cancellation"))
+print("GUI worker cancellation passed")

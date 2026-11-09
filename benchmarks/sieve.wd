@@ -1,0 +1,17 @@
+limit = int(args()[0])
+assert(limit >= 2 and limit <= 10000000)
+composite: list[bool] = []
+for i in range(limit + 1):
+    append(composite, false)
+count = 0
+prime = 2
+while prime <= limit:
+    if not composite[prime]:
+        count = count + 1
+        if prime <= limit // prime:
+            multiple = prime * prime
+            while multiple <= limit:
+                composite[multiple] = true
+                multiple = multiple + prime
+    prime = prime + 1
+print(count)

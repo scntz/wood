@@ -1,0 +1,21 @@
+import std.task as tasks
+import std.time as time
+fn cooperative(message: json) -> json:
+    while not tasks.cancelled():
+        time.sleep(0.001)
+    return message
+fn leave(message: json) -> json:
+    with tasks.spawn(cooperative,json_null()) as child:
+        exit(23)
+mode = args()[0]
+if mode == "worker":
+    with tasks.spawn(leave,json_null()) as job:
+        tasks.wait(job,10000)
+elif mode == "ignore":
+    with tasks.spawn(leave,json_null()) as job:
+        while not tasks.done(job):
+            time.sleep(0.001)
+    print("ignored worker exit passed")
+else:
+    jobs = [tasks.spawn(cooperative,json_null()) for i in range(8)]
+    exit(31)

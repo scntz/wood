@@ -1,0 +1,38 @@
+# Private release builder: normal checked frontend/backend, with canonical
+# diagnostic filenames for the compiler/installer's own source only.
+# Normal user-program compilation and the qualified driver are unchanged.
+import body_semantics as semantic
+import emit_llvm as llvm
+import project as project
+import project_trust as trust
+import sources as src
+import std.path as path
+
+arguments = args()
+if len(arguments) != 6:
+    eprint("usage: release-native STDLIB.json RUNTIME_DIRECTORY TARGET INPUT OUTPUT.ll SOURCE_ROOT")
+    exit(2)
+if arguments[2] not in ["linux-x86_64", "windows-x86_64"] or project.kind(arguments[4]) != "missing":
+    eprint("invalid release target or existing output")
+    exit(2)
+standards: dict[str,str] = {}
+data = project.object(json_parse(src.read(arguments[0], 16777216)))
+for name in data:
+    standards[name] = project.string(data[name])
+program = semantic.analyze(trust.load(arguments[3], standards, false))
+if program.diagnostic.code != "":
+    eprint(json_dump(program.diagnostic))
+    exit(1)
+root = replace(path.resolve(arguments[5]), "\\", "/")
+while ends_with(root, "/"):
+    root = root[:-1]
+for index in range(len(program.signatures.compilation.modules)):
+    file = replace(program.signatures.compilation.modules[index].file, "\\", "/")
+    if starts_with(file, root + "/"):
+        program.signatures.compilation.modules[index].file = file[len(root) + 1:]
+runtime = src.read(arguments[1] + "/" + arguments[2] + ".ll", 16777216) + "\n" + src.read(arguments[1] + "/core.ll", 16777216)
+result = llvm.emit(program, runtime)
+if result.diagnostic.code != "":
+    eprint(json_dump(result.diagnostic))
+    exit(1)
+write_text(arguments[4], result.text)

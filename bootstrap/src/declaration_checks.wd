@@ -1,0 +1,85 @@
+# Validation of the resolved, unspecialized declaration graph. No bodies run here.
+import signatures as sig
+import sources as src
+
+record Frame:
+    declaration: int
+    edge: int
+    height: int
+
+fn check(result: sig.Result) -> src.Diagnostic:
+    if result.diagnostic.code != "":
+        return result.diagnostic
+    externals: dict[str,int] = {}
+    symbols: dict[int,int] = {}
+    records: list[int] = []
+    edges: dict[int,list[int]] = {}
+    for index in range(len(result.declarations)):
+        declaration = result.declarations[index]
+        unit = result.compilation.modules[declaration.module]
+        stmt = unit.tree.statements[declaration.statement]
+        if declaration.symbol > 0:
+            symbols[declaration.symbol] = index
+        if declaration.parent >= 0:
+            continue
+        if stmt.kind == "Record":
+            edges[index] = []
+            if len(stmt.type_parameters) == 0:
+                append(records,index)
+        if not stmt.external:
+            continue
+        if stmt.name in externals:
+            previous = result.declarations[externals[stmt.name]]
+            same = previous.result == declaration.result and len(previous.parameters) == len(declaration.parameters)
+            if same:
+                for position in range(len(previous.parameters)):
+                    if previous.parameters[position].type != declaration.parameters[position].type or previous.parameters[position].mutable_borrow != declaration.parameters[position].mutable_borrow:
+                        same = false
+            if not same:
+                return src.located("E3023","conflicting external declarations for '"+stmt.name+"'",unit.file,declaration.module,stmt.token)
+        else:
+            externals[stmt.name] = index
+    for index in records:
+        declaration = result.declarations[index]
+        for field in declaration.parameters:
+            pending = [field.type]
+            while len(pending) > 0:
+                node = result.pool.types[pop(pending)]
+                if node.kind == "Record":
+                    append(edges[index],symbols[node.declaration])
+                elif node.kind == "Optional":
+                    append(pending,node.element)
+                elif node.kind == "Tuple":
+                    # Preserve the native collector's left-to-right edge order.
+                    for position in range(len(node.parameters)-1,-1,-1):
+                        append(pending,node.parameters[position])
+    state: dict[int,int] = {}
+    heights: dict[int,int] = {}
+    for index in records:
+        if index in state and state[index] == 2:
+            continue
+        stack = [Frame(index,0,0)]
+        state[index] = 1
+        while len(stack) > 0:
+            frame = stack[len(stack)-1]
+            if frame.edge == len(edges[frame.declaration]):
+                heights[frame.declaration] = frame.height
+                state[frame.declaration] = 2
+                pop(stack)
+                continue
+            child = edges[frame.declaration][frame.edge]
+            unit = result.compilation.modules[result.declarations[frame.declaration].module]
+            stmt = unit.tree.statements[result.declarations[frame.declaration].statement]
+            if child in state and state[child] == 1:
+                return src.located("E3021","recursive record requires a list or dictionary indirection",unit.file,result.declarations[frame.declaration].module,stmt.token)
+            if child not in state or state[child] != 2:
+                state[child] = 1
+                append(stack,Frame(child,0,0))
+                continue
+            height = heights[child]+1
+            if height > frame.height:
+                stack[len(stack)-1].height = height
+            if height > 256:
+                return src.located("E2002","record containment exceeds 256 levels",unit.file,result.declarations[frame.declaration].module,stmt.token)
+            stack[len(stack)-1].edge += 1
+    return src.success()

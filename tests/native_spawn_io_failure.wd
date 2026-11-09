@@ -1,0 +1,27 @@
+import std.task as tasks
+import std.net as net
+import std.io as io
+extern fn wood_thread_limit(enable: int) -> int
+fn echo(peer: stream, message: json) -> json:
+    io.write(peer, "recovered")
+    return message
+with net.listen("127.0.0.1", 0, 30000) as listener:
+    with net.connect("127.0.0.1", net.port(listener), 30000) as client:
+        with net.accept(listener) as peer:
+            alias = peer
+            assert(wood_thread_limit(1) == 0)
+            rejected = false
+            try:
+                task_spawn_io(echo, peer, json(42))
+            except err:
+                rejected = err.code == "R4022" and err.message == "cannot start native task"
+            restored = wood_thread_limit(0)
+            assert(restored == 0 and rejected)
+            assert(not io.closed(peer) and not io.closed(alias))
+            io.write(client, "sender alive")
+            assert(io.read_exact(peer, 12) == "sender alive")
+            with tasks.spawn_io(echo, peer, json(42)) as job:
+                assert(io.closed(alias))
+                assert(io.read_all(client, 20) == "recovered")
+                assert(tasks.wait(job, 30000) == json(42))
+print("native spawn_io startup failure recovery passed")

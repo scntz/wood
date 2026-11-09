@@ -1,0 +1,6 @@
+#pragma once
+#include <string_view>
+namespace wood {
+inline constexpr char driver_standard_bundle_data[] = @WOOD_STDLIB_LITERAL@;
+inline constexpr std::string_view driver_standard_bundle{driver_standard_bundle_data, sizeof(driver_standard_bundle_data)-1};
+}

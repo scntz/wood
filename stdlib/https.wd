@@ -1,0 +1,11 @@
+# The same bounded HTTP profile and types over verified native TLS.
+import std.http as http
+import std.tls as tls
+
+fn request(host: str, port: int, message: http.Request, limits: http.Limits, ca_file: str) -> http.Response:
+    http.request_head(host, port, message, limits)
+    with tls.connect(host, port, ca_file, limits.timeout_ms) as connection:
+        return http.send_request(connection, host, port, message, limits)
+
+fn get(host: str, port: int, target: str, limits: http.Limits, ca_file: str) -> http.Response:
+    return request(host, port, http.Request("GET", target, [], ""), limits, ca_file)

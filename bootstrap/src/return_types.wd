@@ -1,0 +1,53 @@
+# Join already-typed return sites. Dependency scheduling and typing each body
+# are intentionally the responsibility of the future body analyzer.
+import type_system as ts
+import lexer as lx
+import sources as src
+
+record Site:
+    type: int
+    token: lx.Token
+
+record Result:
+    pool: ts.Pool
+    type: int
+    diagnostic: src.Diagnostic
+
+fn infer(pool: ts.Pool, sites: list[Site], token: lx.Token, file: str = "", source: int = 0) -> Result:
+    result = 0
+    optional = false
+    for site in sites:
+        if pool.types[site.type].kind == "Unknown" or pool.abstract(site.type):
+            return Result(pool,0,src.located("B3303","return site requires a resolved expression type",file,source,site.token))
+        value = site.type
+        node = pool.types[value]
+        if node.kind == "None":
+            optional = true
+            continue
+        if node.kind == "Optional":
+            optional = true
+            value = node.element
+        if result == 0:
+            result = value
+        elif pool.types[result].kind in ["Int","Float"] and pool.types[value].kind in ["Int","Float"]:
+            if pool.types[result].kind == "Float" or pool.types[value].kind == "Float":
+                result = pool.intern("Float")
+        elif result != value:
+            message = "incompatible inferred returns "+pool.display(result)+" and "+pool.display(value)+"; add an explicit return annotation"
+            return Result(pool,0,src.located("E3030",message,file,source,site.token))
+    if result == 0:
+        kind = "Void"
+        if optional:
+            kind = "None"
+        result = pool.intern(kind)
+    elif optional:
+        if pool.types[result].kind == "Void":
+            return Result(pool,0,src.located("E3030","cannot mix bare and value returns",file,source,token))
+        result = pool.intern("Optional",element=result)
+    for site in sites:
+        if not pool.assignable(result,site.type):
+            message = "return "+pool.display(site.type)+" cannot be inferred as "+pool.display(result)+"; add an explicit return annotation"
+            return Result(pool,0,src.located("E3030",message,file,source,site.token))
+    if not pool.depth_valid(result):
+        return Result(pool,0,src.located("E2002","type nesting exceeds 64 levels",file,source,token))
+    return Result(pool,result,src.success())

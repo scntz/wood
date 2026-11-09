@@ -1,0 +1,130 @@
+{
+  "name": "wood",
+  "displayName": "wood",
+  "description": "Language support for wood: diagnostics, IntelliSense, navigation, rename, and run and build tasks.",
+  "version": "1.1.0",
+  "preview": true,
+  "publisher": "scntz",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": { "type": "git", "url": "https://github.com/scntz/wood.git", "directory": "editors/vscode" },
+  "icon": "icon.png",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Programming Languages", "Linters", "Snippets"],
+  "keywords": ["wood", "language server", "lsp"],
+  "main": "./extension.js",
+  "activationEvents": ["workspaceContains:**/wood.json"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The language server analyzes the project, and tasks run the wood compiler on it."
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "wood",
+        "aliases": ["wood", "Wood"],
+        "extensions": [".wd"],
+        "configuration": "./language-configuration.json",
+        "icon": { "light": "./icons/wood-light.svg", "dark": "./icons/wood-dark.svg" }
+      }
+    ],
+    "grammars": [
+      { "language": "wood", "scopeName": "source.wood", "path": "./syntaxes/wood.tmLanguage.json" }
+    ],
+    "snippets": [
+      { "language": "wood", "path": "./snippets/wood.json" }
+    ],
+    "jsonValidation": [
+      { "fileMatch": "wood.json", "url": "./schemas/wood.schema.json" }
+    ],
+    "commands": [
+      { "command": "wood.run", "title": "Run", "category": "wood" },
+      { "command": "wood.build", "title": "Build", "category": "wood" },
+      { "command": "wood.check", "title": "Check", "category": "wood" },
+      { "command": "wood.test", "title": "Test", "category": "wood" },
+      { "command": "wood.restartServer", "title": "Restart Language Server", "category": "wood" },
+      { "command": "wood.showOutput", "title": "Show Language Server Output", "category": "wood" }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "wood.run", "when": "editorLangId == wood || workspaceContains:wood.json" },
+        { "command": "wood.build", "when": "editorLangId == wood || workspaceContains:wood.json" },
+        { "command": "wood.check", "when": "editorLangId == wood || workspaceContains:wood.json" },
+        { "command": "wood.test", "when": "editorLangId == wood || workspaceContains:wood.json" }
+      ]
+    },
+    "configuration": {
+      "title": "wood",
+      "properties": {
+        "wood.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "The `wood` executable. Leave empty to find it on `PATH` and in the default install locations. This can only be set in user settings, because a project must not be able to choose a program for you to run."
+        },
+        "wood.languageServer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the wood language server. Syntax highlighting and tasks work without it."
+        },
+        "wood.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Log messages between VS Code and the language server to the output panel."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "wood",
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": ["run", "build", "check", "test"],
+            "description": "The wood command to run."
+          },
+          "file": {
+            "type": "string",
+            "description": "A script to use, instead of the project in the workspace folder."
+          },
+          "args": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra command line options."
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "wood",
+        "label": "wood diagnostics",
+        "owner": "wood",
+        "source": "wood",
+        "fileLocation": "autoDetect",
+        "pattern": {
+          "regexp": "^(.+?):(\\d+):(\\d+): (?:runtime )?(error|warning)\\[([A-Z]\\d+)\\]: (.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node test/run.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "overrides": {
+    "minimatch": "11.0.4"
+  }
+}

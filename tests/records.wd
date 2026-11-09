@@ -1,0 +1,65 @@
+record Point:
+    x: float
+    y: float
+
+record Scene:
+    points: list[Point]
+    labels: dict[str, Point]
+
+record Tree:
+    value: int
+    children: list[Tree]
+
+record Empty:
+    pass
+
+fn translated(point: Point, dx: float) -> Point:
+    point.x = point.x + dx
+    return point
+
+p = Point(1, 2)
+assert(p.x == 1.0 and p.y == 2.0)
+copy = p
+copy.x = 3
+assert(p == Point(1.0, 2.0))
+assert(copy == translated(p, 2.0))
+assert(str(p) == "Point(x=1.0, y=2.0)")
+assert(Empty() == Empty())
+scene = Scene([p], {"origin": p})
+other = scene
+other.points[0].x = 9
+other.labels["origin"].y = 8
+other.labels["new"] = Point(4, 5)
+assert(scene.points[0] == p)
+assert(scene.labels["origin"] == p)
+assert("new" not in scene.labels)
+assert(other.points[0].x == 9.0 and other.labels["origin"].y == 8.0)
+root = Tree(1, [Tree(2, []), Tree(3, [])])
+snapshot = root
+root.children[0].value = 7
+append(root.children[1].children, Tree(4, []))
+assert(snapshot.children[0].value == 2)
+assert(len(snapshot.children[1].children) == 0)
+assert(root != snapshot)
+assert(root.children[1].children[0].value == 4)
+assert(Point(1, 2) in [p])
+print("records ok")
+
+record Strings:
+    text: str
+    cells: list[str]
+owned = Strings("retained", ["gone"])
+assert(slice(owned.text, len(pop(owned.cells)), 99) == "ined")
+strings = ["first", "second"]
+assert(find(strings[0], pop(strings)) == -1)
+assert(strings == ["first"])
+
+record Group:
+    members: dict[str, Person]
+record Person:
+    group: Group
+
+group = Group({})
+group.members["first"] = Person(group)
+assert(len(group.members["first"].group.members) == 0)
+assert(json_kind(json(group)) == "dict")

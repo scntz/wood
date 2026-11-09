@@ -1,0 +1,68 @@
+# Native numeric values. Shapes may be an int, an integer tuple, or list[int].
+fn full[S,T](dimensions: S, value: T) -> array[T]:
+    return array_full(dimensions, value)
+fn zeros[S](dimensions: S) -> array[float]:
+    return array_full(dimensions, 0.0)
+fn ones[S](dimensions: S) -> array[float]:
+    return array_full(dimensions, 1.0)
+fn ints[S](dimensions: S, value: int = 0) -> array[int]:
+    return array_full(dimensions, value)
+fn from_list[T](values: list[T]) -> array[T]:
+    return array_from_list(values)
+fn floats[T](values: array[T]) -> array[float]:
+    return array_floats(values)
+fn integers[T](values: array[T]) -> array[int]:
+    return array_integers(values)
+fn to_list[T](values: array[T]) -> list[T]:
+    return array_to_list(values)
+fn shape[T](values: array[T]) -> list[int]:
+    return array_shape(values)
+fn rank[T](values: array[T]) -> int:
+    return array_rank(values)
+fn contiguous[T](values: array[T]) -> bool:
+    return array_contiguous(values)
+fn copy[T](values: array[T]) -> array[T]:
+    return array_copy(values)
+fn reshape[T,S](values: array[T], dimensions: S) -> array[T]:
+    return array_reshape(values, dimensions)
+fn flatten[T](values: array[T]) -> array[T]:
+    return array_reshape(values, len(values))
+fn transpose[T](values: array[T], axes: list[int] = []) -> array[T]:
+    return array_transpose(values, axes)
+fn slice[T](values: array[T], axis: int, start: int, stop: int, step: int = 1) -> array[T]:
+    return array_slice(values, axis, start, stop, step)
+fn sum[T](values: array[T]) -> T:
+    return array_sum(values)
+fn dot[T](left: array[T], right: array[T]) -> T:
+    return array_dot(left, right)
+fn matmul(left: array[float], right: array[float]) -> array[float]:
+    return array_matmul(left, right)
+fn sqrt(value: float) -> float:
+    return math_sqrt(value)
+fn sin(value: float) -> float:
+    return math_sin(value)
+fn cos(value: float) -> float:
+    return math_cos(value)
+fn finite(value: float) -> bool:
+    return math_finite(value)
+fn abs(value: float) -> float:
+    if value < 0.0:
+        return -value
+    return value
+fn close(left: float, right: float, relative: float = 0.000000001, absolute: float = 0.000000000001) -> bool:
+    if relative < 0.0 or absolute < 0.0 or not finite(relative) or not finite(absolute):
+        raise "comparison tolerances must be finite and nonnegative"
+    if left == right:
+        return true
+    if not finite(left) or not finite(right):
+        return false
+    scale = abs(left)
+    if abs(right) > scale:
+        scale = abs(right)
+    distance = abs(left - right)
+    bound = absolute + relative * scale
+    if finite(distance) or finite(bound):
+        return distance <= bound
+    # Only opposite-sign large finite inputs can overflow their distance. When
+    # the bound also overflows, infinity <= infinity would be a false positive.
+    return abs(left / scale - right / scale) <= absolute / scale + relative

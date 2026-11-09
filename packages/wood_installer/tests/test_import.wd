@@ -1,0 +1,3 @@
+import manifest as schema
+schema.relative("bin/program")
+assert(schema.lower("ABC") == "abc")

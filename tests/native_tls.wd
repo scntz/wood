@@ -1,0 +1,241 @@
+# Shared reference/native TLS corpus. All peers are local; explicit offline trust.
+import std.tls as tls
+import std.io as io
+import std.net as net
+import std.task as tasks
+import std.path as path
+import std.time as time
+
+fn cold(message: json) -> json:
+    assert(starts_with(tls.version(), "OpenSSL 3."))
+    return message
+
+fn client(message: json) -> json:
+    config = json_dict(message)
+    try:
+        with tls.connect(json_str(config["host"]), json_int(config["port"]), json_str(config["ca"]), 30000) as connection:
+            io.write(connection, "prefix\na\0b" + "x" * 262144)
+            assert(io.read_all(connection, 262147) == "a\0b" + "x" * 262144)
+        return json("ok")
+    except err:
+        return json(err.code)
+
+fn cancelling_client(message: json) -> json:
+    config = json_dict(message)
+    try:
+        with tls.connect("localhost", json_int(config["port"]), json_str(config["ca"]), 120000) as connection:
+            io.write(connection, "ready")
+            io.read(connection, 1)
+        return json("unexpected success")
+    except err:
+        return json(err.code)
+
+fn pressure_client(message: json) -> json:
+    config = json_dict(message)
+    try:
+        with tls.connect("localhost", json_int(config["port"]), json_str(config["ca"]), 30000) as connection:
+            io.write(connection, "ready")
+            net.set_timeout(connection, 10)
+            body = "x" * 1048576
+            for index in range(64):
+                io.write(connection, body)
+        return json("unexpected success")
+    except err:
+        return json(err.code)
+
+fn stalled_client(message: json) -> json:
+    config = json_dict(message)
+    try:
+        with tls.connect("localhost", json_int(config["port"]), json_str(config["ca"]), 30000) as connection:
+            io.write(connection, "ready")
+            while not tasks.cancelled():
+                time.sleep(0.002)
+            raise "cancelled stalled peer"
+    except err:
+        return json(err.code)
+
+fn pair(root: str, host: str, ca: str, certificate: str, key: str, success: bool):
+    with tls.server(path.combine(root, certificate), path.combine(root, key)) as context:
+        with net.listen("127.0.0.1", 0, 30000) as listener:
+            with tasks.spawn(client, json({"host": json(host), "port": json(net.port(listener)), "ca": json(path.combine(root, ca) if ca != "" else "")})) as work:
+                with net.accept(listener) as raw:
+                    alias = raw
+                    try:
+                        with tls.accept(raw, context) as secure:
+                            assert(success)
+                            assert(io.closed(alias))
+                            # SSL owns its context reference; explicit alias close
+                            # must not invalidate an established connection.
+                            tls.close(context)
+                            assert(str(context) == "<tls_context:closed>")
+                            assert(io.line(secure, 7) == "prefix\n")
+                            body = io.read_exact(secure, 262147)
+                            io.write(secure, body)
+                            net.shutdown_write(secure)
+                            net.shutdown_write(secure)
+                    except err:
+                        assert(not success and err.code == "R4021")
+                    assert(io.closed(alias))
+                assert(json_str(tasks.wait(work, 120000)) == ("ok" if success else "R4021"))
+
+fn scoped_context(root: str) -> tls_context:
+    with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as context:
+        return context
+
+record ContextBox:
+    value: tls_context
+
+arguments = args()
+assert(len(arguments) == 1)
+root = arguments[0]
+ca = path.combine(root, "ca.pem")
+jobs = [tasks.spawn(cold, json(index)) for index in range(8)]
+for index in range(8):
+    assert(json_int(tasks.wait(jobs[index], 120000)) == index)
+    tasks.close(jobs[index])
+
+pair(root, "localhost", "ca.pem", "server-chain.pem", "server-key.pem", true)
+pair(root, "localhost", "", "server.pem", "server-key.pem", true)
+pair(root, "127.0.0.1", "ip.pem", "ip.pem", "server-key.pem", true)
+pair(root, "localhost", "cn-only.pem", "cn-only.pem", "server-key.pem", false)
+pair(root, "localhost", "wrong-ca.pem", "server.pem", "server-key.pem", false)
+pair(root, "127.0.0.1", "ca.pem", "server.pem", "server-key.pem", false)
+pair(root, "localhost", "ca.pem", "expired.pem", "expired-key.pem", false)
+
+saved = scoped_context(root)
+assert(str(saved) == "<tls_context:closed>")
+tls.close(saved)
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as original:
+    box = ContextBox(original)
+    snapshot = [box]
+    optional: tls_context | None = box.value
+    assert(unwrap(optional) == original)
+    assert(original == box.value)
+    assert(str(box) == "ContextBox(value=<tls_context:open>)")
+    assert(str(snapshot) == "[ContextBox(value=<tls_context:open>)]")
+    tls.close(box.value)
+    assert(str(original) == "<tls_context:closed>")
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as replacement:
+    original = tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem"))
+    with original as entered:
+        entered = replacement
+    assert(str(original) == "<tls_context:closed>")
+    assert(str(replacement) == "<tls_context:open>")
+try:
+    with saved as closed:
+        assert(false)
+except err:
+    assert(err.code == "R4021" and err.message == "TLS context is closed")
+
+for names in [("malformed.pem", "server-key.pem"), ("server.pem", "wrong-key.pem"), ("absent.pem", "server-key.pem"), ("server.pem", "encrypted-key.pem")]:
+    try:
+        tls.server(path.combine(root, names[0]), path.combine(root, names[1]))
+        assert(false)
+    except err:
+        assert(err.code == "R4021")
+encrypted_certificate = replace(read_text(ca), "-----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0102030405060708090A0B0C0D0E0F10\n")
+for body in ["", " " * 1048577, read_text(ca) + "garbage", encrypted_certificate]:
+    write_text("bounded.pem", body)
+    try:
+        tls.server("bounded.pem", path.combine(root, "server-key.pem"))
+        assert(false)
+    except err:
+        assert(err.code == "R4021")
+for host in ["", "bad host", "a\0b", "á", "x" * 254]:
+    try:
+        tls.connect(host, 443, ca, 1000)
+        assert(false)
+    except err:
+        assert(err.code == "R4021")
+
+# A plain TCP peer never speaks TLS: handshake timeout closes the client's fd.
+with net.listen("127.0.0.1", 0, 10000) as listener:
+    try:
+        tls.connect("127.0.0.1", net.port(listener), ca, 10)
+        assert(false)
+    except err:
+        assert(err.code == "R4018")
+    with net.accept(listener) as raw:
+        io.read_all(raw, 65536)
+
+# Abrupt handshake EOF consumes the old identity and must never become TLS EOF.
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as context:
+    with net.listen("127.0.0.1", 0, 10000) as listener:
+        connection = net.connect("127.0.0.1", net.port(listener), 10000)
+        with net.accept(listener) as raw:
+            io.close(connection)
+            try:
+                tls.accept(raw, context)
+                assert(false)
+            except err:
+                assert(err.code == "R4021")
+            assert(io.closed(raw))
+
+# Cancel an in-flight client handshake after observing actual ClientHello bytes.
+with net.listen("127.0.0.1", 0, 10000) as listener:
+    with tasks.spawn(cancelling_client, json({"port": json(net.port(listener)), "ca": json(ca)})) as work:
+        with net.accept(listener) as raw:
+            assert(len(io.read(raw, 1)) == 1)
+            tasks.cancel(work)
+            assert(json_str(tasks.wait(work, 30000)) == "R4022")
+            assert(json_str(tasks.wait(work, 30000)) == "R4022")
+            io.read_all(raw, 65536)
+
+# Cancel authenticated I/O; aborting the worker must produce unclean TLS EOF.
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as context:
+    with net.listen("127.0.0.1", 0, 30000) as listener:
+        with tasks.spawn(cancelling_client, json({"port": json(net.port(listener)), "ca": json(ca)})) as work:
+            with net.accept(listener) as raw:
+                with tls.accept(raw, context) as secure:
+                    assert(io.read_exact(secure, 5) == "ready")
+                    tasks.cancel(work)
+                    assert(json_str(tasks.wait(work, 30000)) == "R4022")
+                    for attempt in range(2):
+                        try:
+                            io.read(secure, 1)
+                            assert(false)
+                        except err:
+                            assert(err.code == "R4021")
+                    io.close(secure)
+                    assert(io.closed(secure))
+
+# Logical read/line/close deadlines against an authenticated non-reading peer.
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as context:
+    with net.listen("127.0.0.1", 0, 30000) as listener:
+        with tasks.spawn(stalled_client, json({"port": json(net.port(listener)), "ca": json(ca)})) as work:
+            with net.accept(listener) as raw:
+                secure = tls.accept(raw, context)
+                assert(io.read_exact(secure, 5) == "ready")
+                net.set_timeout(secure, 10)
+                for action in range(3):
+                    try:
+                        if action == 0:
+                            io.read(secure, 1)
+                        elif action == 1:
+                            io.line(secure, 32)
+                        else:
+                            io.close(secure)
+                        assert(false)
+                    except err:
+                        assert(err.code == "R4018")
+                assert(io.closed(secure))
+                tasks.cancel(work)
+                assert(json_str(tasks.wait(work, 30000)) == "R4010")
+
+# At most 64 MiB is attempted, keeping just one 1 MiB value. The authenticated
+# receiver consumes only the ready marker, so TLS writes must reach a deadline.
+with tls.server(path.combine(root, "server.pem"), path.combine(root, "server-key.pem")) as context:
+    with net.listen("127.0.0.1", 0, 30000) as listener:
+        with tasks.spawn(pressure_client, json({"port": json(net.port(listener)), "ca": json(ca)})) as work:
+            with net.accept(listener) as raw:
+                secure = tls.accept(raw, context)
+                assert(io.read_exact(secure, 5) == "ready")
+                assert(json_str(tasks.wait(work, 30000)) == "R4018")
+                net.set_timeout(secure, 100)
+                try:
+                    io.close(secure)
+                except err:
+                    assert(err.code in ["R4021", "R4017", "R4018"])
+                assert(io.closed(secure))
+
+print("native TLS lifecycle passed")

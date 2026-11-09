@@ -1,0 +1,281 @@
+# Native setup/uninstall frontend. Deployment stays in the verified engine.
+import gui.widgets as gui
+import installer.bundle as bundle
+import installer.engine as engine
+import installer.manifest as schema
+import installer._native as native
+import windows_services as services
+import windows_ui as ui
+import std.fs as fs
+import std.path as path
+import std.io as io
+
+fn absolute(value: str) -> str:
+    result = path.absolute(value)
+    while len(result) > 3 and result[-1] in "/\\":
+        result = result[:-1]
+    # Bound the registered argv and fixed UTF-16/base64 cleanup handoff as well
+    # as filesystem access. The portable engine's separate limits are unchanged.
+    if len(result) > 1024:
+        raise "setup: Windows installation root exceeds 1024 UTF-8 bytes; choose a shorter location"
+    return result
+
+fn lines(value: str) -> str:
+    return replace(replace(value, "\r\n", "\n"), "\n", "\r\n")
+
+fn license_text(payload: bundle.Bundle) -> str:
+    if payload.app.id != "wood":
+        return payload.app.license
+    pieces: list[str] = []
+    for name in ["share/wood/LICENSE-MIT", "share/wood/LICENSE-APACHE"]:
+        found = false
+        for entry in payload.app.files:
+            if entry.name == name:
+                if entry.size > 131072 or native.digest(payload.file, entry.offset, entry.size) != entry.digest:
+                    raise "setup: license integrity/size verification failed"
+                with io.open(payload.file, "r") as source:
+                    io.seek(source, entry.offset)
+                    append(pieces, io.read_exact(source, entry.size))
+                found = true
+        if not found:
+            raise "setup: Wood payload is missing its actual project license"
+    return "wood is available under MIT OR Apache-2.0. Choose either license.\n\n" + join(pieces, "\n\n")
+
+fn _page(window: gui.Window, page: int, name: str, version: str, successful: bool):
+    empty: list[int] = []
+    pages = {0: empty, 1: [10, 11], 2: [20, 21, 22, 23], 3: [25, 26], 4: [28], 5: [30, 31], 6: [40]}
+    for control in [10, 11, 20, 21, 22, 23, 25, 26, 28, 30, 31, 40]:
+        ui.state(window, control, 0, 1 if control in pages[page] else 0)
+    titles = ["Welcome to " + name + " Setup", "License Agreement", "Choose Installation Location", "Additional Tasks", "Ready to Install", "Installing " + name, "Completing " + name + " Setup"]
+    subtitles = ["Version " + version + " — native, per-user installation", "Read the actual license terms before continuing.", "Choose an empty folder or an existing managed installation.", "Choose how this command-line tool is made available.", "Review these settings, then choose Install.", "Please wait. Cancellation rolls back uncommitted changes.", "Installation successful." if successful else "Setup did not complete. Your files have been preserved."]
+    window.set_text(1, titles[page])
+    window.set_text(2, subtitles[page])
+    window.set_text(100, "Install" if page == 4 else ("Finish" if page == 6 else "Next >"))
+    ui.state(window, 100, 1, 0 if page == 5 or (page == 1 and ui.state(window, 11, 2) == 0) else 1)
+    ui.state(window, 101, 0, 1 if page > 0 and page < 5 else 0)
+    ui.state(window, 101, 1, 1)
+    ui.state(window, 102, 0, 1 if page < 6 else 0)
+    ui.state(window, 102, 1, 1)
+
+fn _install(window: gui.Window, payload: bundle.Bundle, destination: str, add_path: bool, space: str) -> str:
+    fn hook(phase: str, root: str, value: json) -> json:
+        if phase == "prepare":
+            return services.prepare(payload.app, root, value, add_path, space)
+        if phase in ["apply", "rollback"]:
+            if phase == "apply" and not ui.progress(1, 1, "Registering installation"):
+                raise "setup: cancelled"
+            ui.state(window, 102, 1, 0)
+            ui.state(window, 0, 6, 0)
+            services.apply(value, root, space, payload.app.id, phase == "rollback")
+            return json(false)
+        raise "setup: unknown installation integration phase"
+    native.check(services.wood_setup_settings_lock(1), "lock current-user installation settings")
+    installed = ""
+    try:
+        ui.state(window, 0, 6, 1)
+        # The default's standard Programs parent may not exist on a fresh user.
+        # Verify first, then create only that specific standard directory.
+        programs = path.combine(services.known(0), "Programs")
+        if path.parent(destination) == programs and fs.kind(programs) == "missing":
+            bundle.verify(payload, ui.progress)
+            fs.make_dirs(programs)
+        installed = engine.install(payload, destination, ui.progress, [hook])
+    except err:
+        ui.state(window, 0, 6, 0)
+        services.wood_setup_settings_lock(0)
+        raise err
+    ui.state(window, 0, 6, 0)
+    services.wood_setup_settings_lock(0)
+    return installed
+
+fn setup_body(token: int) -> int:
+    window = gui.Window(token)
+    context = schema.object(json_parse(window.context()))
+    space = schema.text(context, "namespace")
+    payload = bundle.load(schema.text(context, "source"))
+    license = license_text(payload)
+    native.check(services.wood_setup_registry_scope(space, payload.app.id), "configure current-user installer scope")
+    window.label(1, "", 28, 22, 584, 40)
+    window.label(2, "", 28, 72, 584, 34)
+    window.label(4, "ISOLATED VALIDATION: " + space if space != "" else "wood — Built for humans, designed for AI.", 28, 434, 270, 30)
+    window.textarea(10, lines(license), 28, 112, 584, 250, true)
+    ui.checkbox(window, 11, "I accept the license terms", 28, 378, 584)
+    window.label(20, "Installation &folder:", 28, 136, 584, 30)
+    window.entry(21, path.combine(services.known(0), "Programs/wood"), 28, 178, 464, 32)
+    window.button(22, "Browse...", 504, 178, 108, 32)
+    window.label(23, "Per-user installation requires no administrator privileges.\nExisting files are never blindly overwritten.\nFor a custom folder, its parent must already exist.", 28, 240, 584, 110)
+    ui.checkbox(window, 25, "Add wood to my PATH (recommended)", 28, 150, 584)
+    ui.state(window, 25, 3, 1 if payload.app.path_default else 0)
+    window.label(26, "Open a new terminal after setup to use wood.\nNo desktop shortcut will be created.\nA working uninstaller will appear in Windows Installed Apps.", 52, 194, 550, 120)
+    window.textarea(28, "", 28, 112, 584, 270, true)
+    window.label(30, "", 28, 150, 584, 120)
+    ui.bar(window, 31, 28, 294, 584)
+    window.label(40, "", 28, 130, 584, 240)
+    window.button(101, "< Back", 310, 430, 94, 32)
+    window.button(100, "Next >", 416, 430, 94, 32)
+    window.button(102, "Cancel", 520, 430, 94, 32)
+    ui.state(window, 0, 5)
+    page = 0
+    successful = false
+    _page(window, page, payload.app.name, payload.app.version, successful)
+    window.show()
+    while true:
+        event = window.wait()
+        if event.kind == "close" or (event.kind == "click" and event.control == 102):
+            return 0 if successful else 1
+        if event.kind != "click":
+            continue
+        if event.control == 11 and page == 1:
+            ui.state(window, 100, 1, ui.state(window, 11, 2))
+        elif event.control == 22 and page == 2:
+            status = ui.wood_setup_browse(token, 21)
+            if status < 0:
+                window.set_text(23, "Browse failed (native status " + str(status) + "). You can enter a path directly.")
+        elif event.control == 101 and page > 0 and page < 5:
+            page -= 1
+            _page(window, page, payload.app.name, payload.app.version, successful)
+        elif event.control == 100:
+            if page == 6:
+                return 0 if successful else 1
+            if page == 1 and ui.state(window, 11, 2) == 0:
+                continue
+            if page == 2:
+                try:
+                    candidate = absolute(window.text(21))
+                    if fs.kind(path.parent(candidate)) != "directory" and path.parent(candidate) != path.combine(services.known(0), "Programs"):
+                        window.set_text(23, "The parent folder does not exist. Choose an existing parent with Browse, then enter a final folder name.")
+                        continue
+                    window.set_text(21, candidate)
+                except err:
+                    window.set_text(23, err.message)
+                    continue
+            if page == 3:
+                window.set_text(28, lines(payload.app.name + " " + payload.app.version + "\n\nLocation: " + window.text(21) + "\n\nAdd to PATH: " + ("Yes" if ui.state(window, 25, 2) == 1 else "No") + "\n\nPer-user installation. No desktop shortcut.\n\nUse Windows Installed Apps to uninstall.\n\nChoose Install to verify and deploy the payload."))
+            page += 1
+            _page(window, page, payload.app.name, payload.app.version, successful)
+            if page == 5:
+                try:
+                    installed = _install(window, payload, window.text(21), ui.state(window, 25, 2) == 1, space)
+                    successful = true
+                    window.set_text(40, "wood is installed.\n\nOpen a NEW terminal and run:\n\nwood --version\n\n" + ("PATH was configured for this user." if ui.state(window, 25, 2) == 1 else "PATH was not changed; use the installed bin directory.") + "\n\nInstalled files: " + installed)
+                    ui.state(window, 31, 4, 1000)
+                except err:
+                    window.set_text(40, "Setup stopped.\n\n" + err.code + ": " + err.message + "\n\nUncommitted changes were rolled back where safe.\nIf recovery needs attention, retain the installation folder and journal, then rerun setup.")
+                page = 6
+                _page(window, page, payload.app.name, payload.app.version, successful)
+    return 1
+
+fn uninstall_body(token: int) -> int:
+    window = gui.Window(token)
+    data = schema.object(json_parse(window.context()))
+    root = schema.text(data, "root")
+    space = schema.text(data, "namespace")
+    id = schema.text(data, "id")
+    window.label(1, "Removing wood", 28, 22, 584, 40)
+    window.label(30, "Removing unchanged installer-owned files...", 28, 130, 584, 180)
+    ui.bar(window, 31, 28, 330, 584)
+    window.button(100, "Close", 520, 430, 94, 32)
+    ui.state(window, 100, 1, 0)
+    ui.state(window, 0, 5)
+    window.show()
+    fn hook(phase: str, base: str, value: json) -> json:
+        if phase == "uninstall_prepare":
+            return services.uninstall_plan(value, base, space, id)
+        if phase in ["apply", "rollback"]:
+            services.apply(value, base, space, id, phase == "rollback")
+            return json(false)
+        if phase == "uninstall_progress":
+            ui.progress(0, 1, "Remove " + json_str(value))
+            return json(false)
+        raise "setup: unknown uninstallation integration phase"
+    status = 1
+    native.check(services.wood_setup_settings_lock(1), "lock uninstall settings")
+    try:
+        executable = native.executable()
+        deferred: list[str] = []
+        if path.within(executable, root):
+            append(deferred, replace(executable[len(path.absolute(root)) + 1:], "\\", "/"))
+        engine.uninstall(root, id, [hook], deferred)
+        status = 0
+        window.set_text(1, "wood has been uninstalled")
+        window.set_text(30, "Owned PATH and Installed Apps entries were removed.\n\nUser additions and modified files were preserved.\nThe uninstaller image will be removed after you close this window.")
+        ui.state(window, 31, 4, 1000)
+    except err:
+        window.set_text(1, "Uninstall needs attention")
+        window.set_text(30, err.code + ": " + err.message + "\n\nUser modifications were preserved. Rerun the installer to recover or repair.")
+    services.wood_setup_settings_lock(0)
+    ui.state(window, 100, 1, 1)
+    while true:
+        event = window.wait()
+        if event.kind == "close" or (event.kind == "click" and event.control == 100):
+            return status
+    return status
+
+fn main(arguments: list[str]) -> int:
+    root = ""
+    mode = ""
+    space = ""
+    i = 0
+    while i < len(arguments):
+        option = arguments[i]
+        i += 1
+        if option not in ["--sandbox", "--uninstall", "--uninstall-worker"] or i >= len(arguments):
+            raise "setup: unknown or incomplete command-line option"
+        value = arguments[i]
+        i += 1
+        if option == "--sandbox":
+            if space != "" or len(value) != 32:
+                raise "setup: invalid isolated-test namespace"
+            space = value
+        else:
+            if mode != "":
+                raise "setup: duplicate uninstall mode"
+            mode = option
+            root = absolute(value)
+    executable = native.executable()
+    if mode == "" and schema.lower(path.name(executable)) == "wood-uninstall.exe":
+        mode = "--uninstall"
+        root = path.parent(path.parent(path.parent(path.parent(executable))))
+        if fs.kind(path.combine(root, "receipt.json")) == "file":
+            prior = schema.object(json_parse(read_text(path.combine(root, "receipt.json"))))
+            space = schema.text(schema.object(prior["integration"]), "namespace")
+    if mode != "":
+        receipt = schema.object(json_parse(read_text(path.combine(root, "receipt.json"))))
+        id = schema.text(receipt, "id")
+        receipt = schema.object(engine.installed_receipt(root, id))
+        plan = schema.object(receipt["integration"])
+        if schema.text(plan, "namespace") != space or schema.text(plan, "root") != path.identity(root):
+            raise "setup: uninstaller namespace/location mismatch"
+        native.check(services.wood_setup_registry_scope(space, id), "configure uninstall scope")
+        if mode == "--uninstall":
+            if ui.message("Uninstall wood?\n\nOnly unchanged installer-owned files and settings will be removed. User additions and edits are preserved.", true):
+                owner = schema.object(services.read_setting(1, "WoodInstallerOwner"))
+                if schema.text(owner, "text") != "wood-installer-v1:" + path.identity(root):
+                    raise "setup: registration is missing or changed; rerun setup to recover or repair"
+                if not path.within(executable, root):
+                    return ui.run("wood Uninstall" + (" — isolated validation" if space != "" else ""), json_dump({"root": json(root), "namespace": json(space), "id": json(id)}), uninstall_body)
+                relative = schema.text(plan, "uninstaller")
+                expected = ""
+                for item in json_list(receipt["history"]):
+                    generation = schema.object(item)
+                    app = schema.decode(generation["metadata"])
+                    for entry in app.files:
+                        if "versions/" + schema.text(generation, "digest") + "/" + entry.name == relative:
+                            expected = entry.digest
+                if expected == "":
+                    raise "setup: registered uninstaller is not an owned payload file"
+                target = path.combine(root, relative)
+                if native.digest(target) != expected:
+                    raise "setup: registered uninstaller was modified; use a trusted downloaded setup to uninstall safely"
+                services.handoff(root, space, target, expected)
+                return 0
+            return 1
+        return ui.run("wood Uninstall" + (" — isolated validation" if space != "" else ""), json_dump({"root": json(root), "namespace": json(space), "id": json(id)}), uninstall_body)
+    return ui.run("wood Setup" + (" — isolated validation" if space != "" else ""), json_dump({"source": json(executable), "namespace": json(space)}), setup_body)
+
+status = 1
+try:
+    status = main(args())
+except err:
+    ui.message(err.code + ": " + err.message)
+exit(status)

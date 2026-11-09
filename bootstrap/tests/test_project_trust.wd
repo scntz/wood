@@ -1,0 +1,82 @@
+import sha256 as sha
+import project as project
+import project_trust as trust
+import frontend as frontend
+import sources as src
+import std.path as path
+import std.fs as fs
+
+fn repeated(n: int) -> str:
+    return join(["a" for i in range(n)],"")
+
+assert(sha.digest("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+assert(sha.digest("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+sizes = [55,56,63,64,65]
+hashes = ["9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318","b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a","7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34","ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb","635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"]
+for i in range(len(sizes)):
+    assert(sha.digest(repeated(sizes[i])) == hashes[i])
+assert(sha.digest("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+assert(sha.digest("á 🌳\0") == "82d9fe675b79532baadc04a110af15314263754d06e8665de412dca817ab7ff5")
+binary = join([byte_string(i) for i in range(256)],"")
+assert(sha.digest(binary) == "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880")
+
+arguments = args()
+assert(len(arguments) == 1)
+directory = arguments[0]
+fs.make_dirs(path.combine(directory,"app/src"))
+fs.make_dirs(path.combine(directory,"dep/src"))
+app_manifest = "{\"format\":1,\"name\":\"app\",\"version\":\"1.0.0\",\"source\":\"src\",\"entry\":\"main.wd\",\"dependencies\":{\"dep\":{\"path\":\"../dep\",\"version\":\"1.0.0\"}}}"
+dep_manifest = "{\"format\":1,\"name\":\"dep\",\"version\":\"1.0.0\",\"source\":\"src\"}"
+app = path.combine(directory,"app")
+dependency = path.combine(directory,"dep/src/value.wd")
+write_text(path.combine(app,"wood.json"),app_manifest)
+write_text(path.combine(directory,"dep/wood.json"),dep_manifest)
+write_text(path.combine(app,"src/main.wd"),"import dep.value as value\nprint(value.answer())\n")
+text = "fn answer() -> int:\n    return 42\n"
+write_text(dependency,text)
+snapshot = project.snapshot(app)
+assert(snapshot.configured.diagnostic.code == "")
+root = snapshot.configured.packages[0].root
+dep = snapshot.configured.packages[1]
+assert(trust.relative(root,root) == ".")
+assert(trust.relative(dep.root,root) == "../dep")
+assert(trust.relative(path.resolve(dependency),dep.root) == "src/value.wd")
+assert(len(trust.source_files(dep.source_root,1,1)) == 1)
+for limits in [(0,1),(1,0)]:
+    rejected = false
+    try:
+        trust.source_files(dep.source_root,limits[0],limits[1])
+    except err:
+        rejected = true
+    assert(rejected)
+write_text(path.combine(app,"wood.lock"),json_dump(trust.inventory(snapshot,{})))
+verified = trust.prepare(snapshot,{},true)
+loaded = frontend.load_configured(snapshot.configured,{})
+assert(loaded.diagnostic.code == "")
+trust.verify_loaded(verified,loaded.compilation)
+# Resolution hashes the captured manifest, not a later read of wood.json.
+write_text(path.combine(app,"wood.json"),app_manifest+"\n")
+trust.prepare(snapshot,{},true)
+assert(trust.load(app,{},true).diagnostic.code == "D5001")
+write_text(path.combine(app,"wood.json"),app_manifest)
+# Verify actual compiled bytes: changing disk cannot invalidate a captured graph,
+# and restoring disk cannot make a modified captured graph pass verification.
+write_text(dependency,"fn answer() -> int:\n    return 99\n")
+trust.verify_loaded(verified,loaded.compilation)
+changed = frontend.load_configured(snapshot.configured,{})
+write_text(dependency,text)
+rejected = false
+try:
+    trust.verify_loaded(verified,changed.compilation)
+except err:
+    rejected = starts_with(err.message,"dependency changed after lock verification:")
+assert(rejected)
+# Root source edits are deliberately outside the production dependency pin.
+write_text(path.combine(app,"src/main.wd"),"import dep.value as value\nassert(value.answer() == 42)\n")
+assert(trust.load(app,{},true).diagnostic.code == "")
+# Dependency libraries need no entry for inventory, but compilation still does.
+library = project.snapshot(dep.root,false)
+assert(library.configured.diagnostic.code == "" and library.configured.entry == "")
+assert(project.resolve(dep.root).diagnostic.code == "D5001")
+assert(json_kind(trust.inventory(library,{})) == "dict")
+print("project trust unit checks passed")

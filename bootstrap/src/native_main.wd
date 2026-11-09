@@ -1,0 +1,38 @@
+# Separate checked native entry. The qualified normal driver remains unchanged.
+import body_semantics as semantic
+import emit_llvm as llvm
+import project as project
+import project_trust as trust
+import sources as src
+
+arguments = args()
+if len(arguments) != 5 and len(arguments) != 6:
+    eprint("usage: wood-native STDLIB.json RUNTIME_DIRECTORY TARGET INPUT OUTPUT.ll [--locked]")
+    exit(2)
+if arguments[2] not in ["linux-x86_64","windows-x86_64"]:
+    eprint("unsupported native target: "+arguments[2])
+    exit(2)
+required = len(arguments) == 6
+if required and arguments[5] != "--locked":
+    eprint("unknown option: "+arguments[5])
+    exit(2)
+if project.kind(arguments[4]) != "missing":
+    eprint("output already exists: "+arguments[4])
+    exit(2)
+standards: dict[str,str] = {}
+bundle = project.object(json_parse(src.read(arguments[0],16777216)))
+for name in bundle:
+    standards[name] = project.string(bundle[name])
+program = semantic.analyze(trust.load(arguments[3],standards,required))
+if program.diagnostic.code != "":
+    eprint(json_dump(program.diagnostic))
+    exit(2 if program.diagnostic.code == "D5001" else 1)
+# Target/module directives must precede definitions in LLVM assembly.
+runtime = src.read(arguments[1]+"/"+arguments[2]+".ll",16777216)+"\n"+src.read(arguments[1]+"/core.ll",16777216)
+# This is the low-level tool, for scripts, so its programs report runtime errors as JSON.
+runtime = replace(runtime,"@wd.json_errors = private constant i1 false","@wd.json_errors = private constant i1 true")
+result = llvm.emit(program,runtime)
+if result.diagnostic.code != "":
+    eprint(json_dump(result.diagnostic))
+    exit(1)
+write_text(arguments[4],result.text)

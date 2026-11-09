@@ -1,0 +1,719 @@
+# Editor view of one file: the compiler's real analysis plus a map from tokens to what they
+# mean. It adds no parser and no type rules of its own. Where the compiler's facts do not
+# determine an answer, the answer is None rather than a guess.
+import project as project
+import modules as mod
+import bindings as bind
+import body_semantics as semantic
+import frontend as frontend
+import checked_program as ir
+import signatures as sig
+import native_calls as native
+import type_system as ts
+import sources as src
+import lexer as lx
+import syntax as ast
+import parser_recovery as recovery
+import std.path as path
+
+record Local:
+    name: str
+    type: int
+    text: str
+    kind: str
+    line: int
+    column: int
+    start: int
+    stop: int
+
+record Target:
+    kind: str
+    name: str
+    file: str
+    line: int
+    column: int
+    type: int
+    detail: str
+    declaration: int
+
+record Analysis:
+    file: str
+    source: str
+    lines: list[str]
+    tokens: list[lx.Token]
+    by_line: dict[int,list[int]]
+    semantic: bool
+    compilation: mod.Compilation
+    bindings: bind.Result
+    pool: ts.Pool
+    declarations: list[sig.Declaration]
+    facts: list[ir.Facts]
+    methods: dict[str,int]
+    record_parameters: dict[int,list[str]]
+    record_types: dict[int,int]
+    locals: list[Local]
+    declared_at: dict[str,Target]
+    indices: dict[str,int]
+    diagnostics: list[src.Diagnostic]
+    known: dict[str,bool]
+    depth: int
+    locals_by_name: dict[str,list[int]]
+    targets: dict[int,Target]
+    module_lines: dict[int,list[str]]
+
+    fn tokens_on(self, line: int) -> list[int]:
+        return self.by_line[line] if line in self.by_line else []
+
+    fn token_at(self, line: int, column: int) -> int:
+        # The identifier under or immediately before the cursor.
+        for index in self.tokens_on(line):
+            token = self.tokens[index]
+            if token.kind == "Identifier" and column >= token.column and column <= token.column+len(token.text):
+                return index
+        return -1
+
+    fn line_text(self, line: int) -> str:
+        return self.lines[line-1] if line >= 1 and line <= len(self.lines) else ""
+
+    fn display(self, value: int) -> str:
+        return self.pool.display(value) if value > 0 and value < len(self.pool.types) else ""
+
+    fn find_local(self, name: str, line: int, column: int) -> Local | None:
+        # The innermost declaration in scope, which is the one that starts last.
+        best: Local | None = None
+        if name not in self.locals_by_name:
+            return best
+        for position in self.locals_by_name[name]:
+            item = self.locals[position]
+            if line < item.start or line > item.stop:
+                continue
+            if line == item.line and column < item.column and item.kind != "parameter":
+                continue
+            if line < item.line:
+                continue
+            if best is None or item.start > unwrap(best).start or (item.start == unwrap(best).start and item.line >= unwrap(best).line):
+                best = item
+        return best
+
+    fn module_of(self, file: str) -> int:
+        for index in range(len(self.compilation.modules)):
+            if self.compilation.modules[index].file == file:
+                return index
+        return -1
+
+    fn parameters_text(self, declaration: sig.Declaration, stmt: ast.Stmt, skip_self: bool) -> list[str]:
+        parts: list[str] = []
+        for position in range(len(declaration.parameters)):
+            parameter = declaration.parameters[position]
+            if skip_self and position == 0 and stmt.method:
+                continue
+            text = parameter.name
+            shown = self.display(parameter.type)
+            if shown != "":
+                text += ": "+shown
+            if parameter.default_value >= 0:
+                text += " = ..."
+            append(parts,text)
+        return parts
+
+    fn signature(self, index: int) -> str:
+        declaration = self.declarations[index]
+        stmt = self.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if stmt.kind == "Record":
+            fields: list[str] = []
+            for parameter in declaration.parameters:
+                append(fields,parameter.name+": "+self.display(parameter.type))
+            return "record "+stmt.name+"("+join(fields,", ")+")"
+        text = "fn "+stmt.name+"("+join(self.parameters_text(declaration,stmt,stmt.method),", ")+")"
+        result = self.display(declaration.result)
+        if result != "":
+            text += " -> "+result
+        return text
+
+    fn declaration_target(mut self, index: int) -> Target:
+        if index in self.targets:
+            return self.targets[index]
+        declaration = self.declarations[index]
+        unit = self.compilation.modules[declaration.module]
+        stmt = unit.tree.statements[declaration.statement]
+        if declaration.module not in self.module_lines:
+            self.module_lines[declaration.module] = split(unit.source,"\n")
+        column = name_column(self.module_lines[declaration.module],stmt.token.line,stmt.token.column+len(stmt.token.text),stmt.name)
+        kind = "record" if stmt.kind == "Record" else ("method" if declaration.parent >= 0 else "function")
+        result = declaration.result
+        if stmt.kind == "Record" and declaration.symbol in self.record_types:
+            result = self.record_types[declaration.symbol]
+        target = Target(kind,stmt.name,unit.file,stmt.token.line,column,result,self.signature(index),index)
+        self.targets[index] = target
+        return target
+
+    fn module_target(self, file: str, name: str) -> Target:
+        return Target("module",name,file,1,1,0,"module "+name,-1)
+
+    fn imported_module(self, line: int) -> Target | None:
+        unit = self.compilation.modules[self.compilation.entry]
+        for edge in unit.imports:
+            stmt = unit.tree.statements[edge.statement]
+            if stmt.token.line == line:
+                target = self.compilation.modules[edge.target]
+                return self.module_target(target.file,stmt.module)
+        return None
+
+    fn namespace_target(self, name: str) -> Target | None:
+        unit = self.compilation.modules[self.compilation.entry]
+        for edge in unit.imports:
+            stmt = unit.tree.statements[edge.statement]
+            if len(stmt.imports) == 0 and (stmt.name == name or split(stmt.name,".")[0] == name):
+                target = self.compilation.modules[edge.target]
+                if stmt.name == name:
+                    return self.module_target(target.file,stmt.module)
+        env = self.bindings.environments[self.compilation.entry]
+        return Target("module",name,"",0,0,0,"module "+name,-1) if name in env.namespaces else None
+
+    fn call_opening(self, index: int) -> int:
+        # The parenthesis of the call that encloses a token, on this statement.
+        depth = 0
+        position = index-1
+        floor = index-4096
+        while position >= 0 and position > floor:
+            kind = self.tokens[position].kind
+            if kind in ["RParen","RBracket","RBrace"]:
+                depth += 1
+            elif kind in ["LBracket","LBrace"]:
+                if depth == 0:
+                    return -1
+                depth -= 1
+            elif kind == "LParen":
+                if depth == 0:
+                    return position
+                depth -= 1
+            elif kind in ["Newline","Indent","Dedent"] and depth == 0:
+                return -1
+            position -= 1
+        return -1
+
+    fn keyword_target(mut self, index: int) -> Target | None:
+        # The name in f(name=value) is the parameter, not a variable.
+        if index+1 >= len(self.tokens) or self.tokens[index+1].kind != "Equal":
+            return None
+        opening = self.call_opening(index)
+        if opening <= 0 or self.tokens[opening-1].kind != "Identifier":
+            return None
+        callee = self.resolve(opening-1)
+        if callee is None or unwrap(callee).declaration < 0:
+            return None
+        declaration = self.declarations[unwrap(callee).declaration]
+        unit = self.compilation.modules[declaration.module]
+        stmt = unit.tree.statements[declaration.statement]
+        name = self.tokens[index].text
+        for position in range(len(stmt.parameters)):
+            if stmt.parameters[position].name == name:
+                token = stmt.parameters[position].token
+                kind = "field" if stmt.kind == "Record" else "parameter"
+                type_id = declaration.parameters[position].type if position < len(declaration.parameters) else 0
+                return Target(kind,name,unit.file,token.line,token.column,type_id,name+": "+self.display(type_id),-1)
+        return None
+
+    fn dotted_prefix(self, index: int) -> str:
+        # "a.b.c" when the token ends a plain dotted path, otherwise "".
+        pieces = [self.tokens[index].text]
+        position = index
+        while position >= 2 and self.tokens[position-1].kind == "Dot":
+            if self.tokens[position-2].kind != "Identifier":
+                return ""
+            pieces = [self.tokens[position-2].text]+pieces
+            position -= 2
+        return join(pieces,".")
+
+    fn member_target(mut self, value: int, name: str) -> Target | None:
+        if value <= 0 or value >= len(self.pool.types):
+            return None
+        node = self.pool.types[value]
+        if node.kind == "Optional":
+            return self.member_target(node.element,name)
+        if node.kind == "Error" and name in ["code","message","file","line","column"]:
+            type_id = self.pool.intern("Int") if name in ["line","column"] else self.pool.intern("Str")
+            return Target("field",name,"",0,0,type_id,name+": "+self.display(type_id),-1)
+        if node.kind != "Record":
+            return None
+        key = str(node.declaration)+"."+name
+        if key in self.methods:
+            return self.declaration_target(self.methods[key])
+        for index in range(len(self.declarations)):
+            declaration = self.declarations[index]
+            if declaration.symbol != node.declaration:
+                continue
+            unit = self.compilation.modules[declaration.module]
+            stmt = unit.tree.statements[declaration.statement]
+            for position in range(len(declaration.parameters)):
+                parameter = declaration.parameters[position]
+                if parameter.name == name:
+                    token = stmt.parameters[position].token
+                    type_id = self.field_type(node,parameter.type)
+                    return Target("field",name,unit.file,token.line,token.column,type_id,name+": "+self.display(type_id),-1)
+        return None
+
+    fn field_type(mut self, node: ts.Type, field: int) -> int:
+        if len(node.parameters) == 0 or node.declaration not in self.record_parameters:
+            return field
+        arguments: dict[str,int] = {}
+        names = self.record_parameters[node.declaration]
+        for index in range(len(names)):
+            if index < len(node.parameters):
+                arguments[names[index]] = node.parameters[index]
+        return self.pool.substitute(field,arguments)
+
+    fn resolve(mut self, index: int) -> Target | None:
+        if not self.semantic or index < 0 or index >= len(self.tokens) or self.depth > 32:
+            return None
+        self.depth += 1
+        try:
+            found = self.resolve_inner(index)
+            self.depth -= 1
+            return found
+        except err:
+            self.depth -= 1
+            return None
+
+    fn resolve_inner(mut self, index: int) -> Target | None:
+        token = self.tokens[index]
+        if token.kind != "Identifier":
+            return None
+        key = str(token.line)+":"+str(token.column)
+        if key in self.declared_at:
+            return self.declared_at[key]
+        first = self.tokens_on(token.line)
+        if len(first) > 0 and self.tokens[first[0]].kind in ["Import","From"]:
+            return self.import_token(index)
+        env = self.bindings.environments[self.compilation.entry]
+        if index > 0 and self.tokens[index-1].kind == "Dot":
+            dotted = self.dotted_prefix(index)
+            root = split(dotted,".")[0]
+            if dotted != "" and self.find_local(root,token.line,token.column) is None:
+                if dotted in env.names:
+                    return self.declaration_target(env.names[dotted]-1)
+                module = self.namespace_target(dotted)
+                if module is not None:
+                    return module
+            base = self.type_of(index-2)
+            return self.member_target(base,token.text)
+        keyword = self.keyword_target(index)
+        if keyword is not None:
+            return keyword
+        local = self.find_local(token.text,token.line,token.column)
+        if local is not None:
+            item = unwrap(local)
+            shown = item.text if item.text != "" else self.display(item.type)
+            return Target(item.kind,item.name,self.file,item.line,item.column,item.type,item.name+(": "+shown if shown != "" else ""),-1)
+        if token.text in env.names:
+            return self.declaration_target(env.names[token.text]-1)
+        module = self.namespace_target(token.text)
+        if module is not None:
+            return module
+        if token.text in self.known:
+            return Target("builtin",token.text,"",0,0,0,builtin_signature(token.text),-1)
+        if token.text in ["int","float","str","bool","list","dict","array","json","void","error"]:
+            return Target("builtin-type",token.text,"",0,0,0,token.text,-1)
+        return None
+
+    fn import_token(mut self, index: int) -> Target | None:
+        token = self.tokens[index]
+        env = self.bindings.environments[self.compilation.entry]
+        name = token.text
+        following = self.tokens[index+1] if index+1 < len(self.tokens) else token
+        previous = self.tokens[index-1] if index > 0 else token
+        if previous.kind == "As" and name in env.names:
+            return self.declaration_target(env.names[name]-1)
+        if previous.kind != "As" and following.kind == "As" and following.line == token.line and name in env.names:
+            return self.declaration_target(env.names[name]-1)
+        if name in env.names:
+            return self.declaration_target(env.names[name]-1)
+        return self.imported_module(token.line)
+
+    fn matching_open(self, index: int) -> int:
+        closes = {"RParen":"LParen","RBracket":"LBracket","RBrace":"LBrace"}
+        wanted = closes[self.tokens[index].kind]
+        same = self.tokens[index].kind
+        depth = 0
+        position = index-1
+        while position >= 0 and position > index-4096:
+            kind = self.tokens[position].kind
+            if kind == same:
+                depth += 1
+            elif kind == wanted:
+                if depth == 0:
+                    return position
+                depth -= 1
+            position -= 1
+        return -1
+
+    fn type_of(mut self, index: int) -> int:
+        # The type of the expression that ends at a token. 0 means not known.
+        if index < 0 or index >= len(self.tokens) or self.depth > 32:
+            return 0
+        token = self.tokens[index]
+        if token.kind == "Identifier":
+            found = self.resolve(index)
+            if found is None:
+                return 0
+            target = unwrap(found)
+            return target.type if target.kind in ["local","parameter","loop","field"] else 0
+        if token.kind == "String":
+            return self.pool.intern("Str")
+        if token.kind == "Integer":
+            return self.pool.intern("Int")
+        if token.kind == "Float":
+            return self.pool.intern("Float")
+        if token.kind == "RParen":
+            opening = self.matching_open(index)
+            if opening <= 0 or self.tokens[opening-1].kind != "Identifier":
+                return 0
+            found = self.resolve(opening-1)
+            if found is None:
+                return 0
+            target = unwrap(found)
+            if target.kind in ["function","method","record"]:
+                return target.type
+            if target.kind == "builtin":
+                return self.builtin_result(target.name)
+            return 0
+        if token.kind == "RBracket":
+            opening = self.matching_open(index)
+            if opening <= 0:
+                return 0
+            base = self.type_of(opening-1)
+            if base <= 0:
+                return 0
+            node = self.pool.types[base]
+            if node.kind in ["List","Array","Dict"]:
+                return node.element
+            return base if node.kind == "Str" else 0
+        return 0
+
+    fn builtin_result(mut self, name: str) -> int:
+        fixed = native.fixed()
+        if name in fixed and fixed[name].result in ["Int","Float","Bool","Str","Stream","Database"]:
+            return self.pool.intern(fixed[name].result)
+        if name in ["str","read_text","read_line","join","replace","strip"]:
+            return self.pool.intern("Str")
+        if name in ["len","int","find"]:
+            return self.pool.intern("Int")
+        return 0
+
+    fn record_members(self, value: int) -> list[Target]:
+        # Fields and methods for member completion.
+        result: list[Target] = []
+        if value <= 0 or value >= len(self.pool.types):
+            return result
+        node = self.pool.types[value]
+        if node.kind == "Optional":
+            return self.record_members(node.element)
+        if node.kind == "Error":
+            for name in ["code","message","file","line","column"]:
+                append(result,Target("field",name,"",0,0,0,"error."+name,-1))
+            return result
+        if node.kind != "Record":
+            return result
+        for index in range(len(self.declarations)):
+            declaration = self.declarations[index]
+            if declaration.symbol == node.declaration:
+                for parameter in declaration.parameters:
+                    append(result,Target("field",parameter.name,"",0,0,parameter.type,parameter.name+": "+self.display(parameter.type),-1))
+            if declaration.parent >= 0 and self.declarations[declaration.parent].symbol == node.declaration:
+                stmt = self.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                if not starts_with(stmt.name,"_"):
+                    append(result,Target("method",stmt.name,"",0,0,0,self.signature(index),index))
+        return result
+
+fn name_column(lines: list[str], line: int, start: int, name: str) -> int:
+    # Declaration tokens are the keyword. The name is the next whole word on the line.
+    if line < 1 or line > len(lines):
+        return start
+    text = lines[line-1]
+    position = start-1
+    while position >= 0 and position < len(text):
+        rest = text[position:]
+        offset = find(rest,name)
+        if offset < 0:
+            return start
+        at = position+offset
+        before = at == 0 or not word_byte(text[at-1])
+        after = at+len(name) >= len(text) or not word_byte(text[at+len(name)])
+        if before and after:
+            return at+1
+        position = at+1
+    return start
+
+fn word_byte(byte: str) -> bool:
+    code = byte_value(byte)
+    return (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95 or code >= 128
+
+fn indent_of(line: str) -> int:
+    return recovery.indent_of(line)
+
+fn scope_end(lines: list[str], first: int) -> int:
+    # Last line of the indented block whose first statement is on line "first".
+    if first < 1 or first > len(lines):
+        return first
+    indent = indent_of(lines[first-1])
+    last = first
+    position = first+1
+    while position <= len(lines):
+        text = lines[position-1]
+        if not recovery.blank(text):
+            if indent_of(text) < indent:
+                return last
+            last = position
+        position += 1
+    return len(lines)
+
+record ScopeBuilder:
+    tree: ast.Tree
+    facts: ir.Facts
+    lines: list[str]
+    module: int
+    declarations: list[sig.Declaration]
+    locals: list[Local]
+    declared_at: dict[str,Target]
+    file: str
+
+    fn add(mut self, name: str, type_id: int, text: str, kind: str, line: int, column: int, start: int, stop: int):
+        append(self.locals,Local(name,type_id,text,kind,line,column,start,stop))
+
+    fn type_text(self, value: int) -> str:
+        if value <= 1 or value >= len(self.tree.types):
+            return ""
+        node = self.tree.types[value]
+        if node.kind == "Named" or node.name != "":
+            return node.name
+        return lower_kind(node.kind)
+
+    fn expressions(mut self, values: list[int], stop: int):
+        pending = values
+        while len(pending) > 0:
+            value = pop(pending)
+            if value < 0 or value >= len(self.tree.expressions):
+                continue
+            node = self.tree.expressions[value]
+            for clause in node.clauses:
+                if clause.name != "":
+                    self.add(clause.name,0,"","local",clause.token.line,clause.token.column,clause.token.line,stop)
+            if node.function >= 0 and node.function < len(self.tree.statements):
+                self.closure(node.function,stop)
+            pending = pending+node.children
+
+    fn closure(mut self, statement: int, stop: int):
+        stmt = self.tree.statements[statement]
+        for parameter in stmt.parameters:
+            self.add(parameter.name,0,self.type_text(parameter.type),"parameter",parameter.token.line,parameter.token.column,parameter.token.line,stop)
+        self.statements(stmt.body,stop)
+
+    fn statements(mut self, values: list[int], stop: int):
+        for value in values:
+            self.statement(value,stop)
+
+    fn nested(mut self, values: list[int]):
+        if len(values) > 0:
+            first = self.tree.statements[values[0]].token.line
+            self.statements(values,scope_end(self.lines,first))
+
+    fn statement(mut self, value: int, stop: int):
+        stmt = self.tree.statements[value]
+        if stmt.kind in ["Function","Record","Import"]:
+            return
+        self.expressions(stmt.expressions,stop)
+        token = stmt.token
+        # relative > 0 marks the hidden variable of an unpacking, which editors should not offer.
+        if stmt.kind == "Assign":
+            if stmt.relative == 0 and (self.facts.declares[value] or self.facts.annotations[value] == 0):
+                self.add(stmt.name,self.facts.annotations[value],"","local",token.line,token.column,token.line,stop)
+        elif stmt.kind == "For":
+            first = self.tree.statements[stmt.body[0]].token.line if len(stmt.body) > 0 else token.line
+            if stmt.relative == 0:
+                column = name_column(self.lines,token.line,token.column+len(token.text),stmt.name)
+                self.add(stmt.name,self.facts.annotations[value],"","loop",token.line,column,token.line,scope_end(self.lines,first))
+        elif stmt.kind == "With":
+            first = self.tree.statements[stmt.body[0]].token.line if len(stmt.body) > 0 else token.line
+            resource = self.facts.types[stmt.expressions[0]] if len(stmt.expressions) > 0 else 0
+            column = name_column(self.lines,token.line,token.column+len(token.text),stmt.name)
+            self.add(stmt.name,resource,"","local",token.line,column,token.line,scope_end(self.lines,first))
+        elif stmt.kind == "Try" and len(stmt.otherwise) > 0:
+            first = self.tree.statements[stmt.otherwise[0]].token.line
+            self.add(stmt.name,0,"error","local",first-1,1,first-1,scope_end(self.lines,first))
+        self.nested(stmt.body)
+        self.nested(stmt.otherwise)
+
+fn lower_kind(kind: str) -> str:
+    names = {"Int":"int","Float":"float","Str":"str","Bool":"bool","Json":"json","List":"list","Dict":"dict","Array":"array","Tuple":"tuple"}
+    return names[kind] if kind in names else ""
+
+fn builtin_signature(name: str) -> str:
+    table = builtin_table()
+    if name in table:
+        return "fn "+table[name]
+    fixed = native.fixed()
+    if name in fixed:
+        return "fn "+name+"("+join(fixed[name].parameters,", ")+") -> "+fixed[name].result
+    return "fn "+name+"(...)"
+
+fn builtin_table() -> dict[str,str]:
+    # Polymorphic builtins have rules rather than one signature. These are as documented.
+    return {
+        "print":"print(value)","eprint":"eprint(value)","exit":"exit(code: int)","len":"len(value) -> int",
+        "str":"str(value) -> str","int":"int(value) -> int","float":"float(value) -> float","assert":"assert(condition: bool)",
+        "append":"append(items: list[T], item: T)","pop":"pop(items: list[T]) -> T","range":"range(stop: int) or range(start: int, stop: int)",
+        "split":"split(text: str, separator: str) -> list[str]","join":"join(items: list[str], separator: str) -> str",
+        "strip":"strip(text: str) -> str","find":"find(text: str, needle: str) -> int",
+        "replace":"replace(text: str, old: str, replacement: str) -> str","starts_with":"starts_with(text: str, prefix: str) -> bool",
+        "ends_with":"ends_with(text: str, suffix: str) -> bool","read_text":"read_text(path: str) -> str",
+        "write_text":"write_text(path: str, text: str)","path_exists":"path_exists(path: str) -> bool","args":"args() -> list[str]",
+        "read_line":"read_line() -> str","eof":"eof() -> bool","keys":"keys(items: dict[K, V]) -> list[K]",
+        "values":"values(items: dict[K, V]) -> list[V]","remove":"remove(items: dict[K, V], key: K)",
+        "unwrap":"unwrap(value: T | None) -> T","error":"error(code: str, message: str) -> error","char_count":"char_count(text: str) -> int","chars":"chars(text: str) -> list[str]","char_slice":"char_slice(text: str, start: int, stop: int) -> str","json":"json(value) -> json","json_parse":"json_parse(text: str) -> json",
+        "json_dump":"json_dump(value) -> str","byte_value":"byte_value(text: str) -> int","byte_string":"byte_string(value: int) -> str"
+    }
+
+fn known_builtins() -> dict[str,bool]:
+    result: dict[str,bool] = {}
+    for name in native.known():
+        result[name] = true
+    for name in builtin_table():
+        result[name] = true
+    return result
+
+fn token_index(tokens: list[lx.Token]) -> dict[int,list[int]]:
+    result: dict[int,list[int]] = {}
+    for index in range(len(tokens)):
+        kind = tokens[index].kind
+        if kind in ["Newline","Indent","Dedent"]:
+            continue
+        line = tokens[index].line
+        if line not in result:
+            result[line] = []
+        append(result[line],index)
+    return result
+
+fn declared_targets(input: Analysis) -> dict[str,Target]:
+    result: dict[str,Target] = {}
+    analysis = input
+    module = analysis.compilation.entry
+    unit = analysis.compilation.modules[module]
+    for index in range(len(analysis.declarations)):
+        declaration = analysis.declarations[index]
+        if declaration.module != module:
+            continue
+        stmt = unit.tree.statements[declaration.statement]
+        target = analysis.declaration_target(index)
+        result[str(target.line)+":"+str(target.column)] = target
+        if stmt.kind == "Record":
+            for position in range(len(stmt.parameters)):
+                if position < len(declaration.parameters):
+                    token = stmt.parameters[position].token
+                    type_id = declaration.parameters[position].type
+                    result[str(token.line)+":"+str(token.column)] = Target("field",stmt.parameters[position].name,unit.file,token.line,token.column,type_id,stmt.parameters[position].name+": "+analysis.display(type_id),-1)
+    return result
+
+fn build_scopes(analysis: Analysis) -> list[Local]:
+    module = analysis.compilation.entry
+    unit = analysis.compilation.modules[module]
+    builder = ScopeBuilder(unit.tree,analysis.facts[module],analysis.lines,module,analysis.declarations,[],{},analysis.file)
+    builder.statements(unit.tree.roots,len(analysis.lines))
+    for index in range(len(analysis.declarations)):
+        declaration = analysis.declarations[index]
+        if declaration.module != module:
+            continue
+        stmt = unit.tree.statements[declaration.statement]
+        if stmt.kind != "Function" or stmt.external:
+            continue
+        stop = scope_end(analysis.lines,unit.tree.statements[stmt.body[0]].token.line) if len(stmt.body) > 0 else stmt.token.line
+        for position in range(len(stmt.parameters)):
+            parameter = stmt.parameters[position]
+            type_id = declaration.parameters[position].type if position < len(declaration.parameters) else 0
+            builder.add(parameter.name,type_id,"","parameter",parameter.token.line,parameter.token.column,stmt.token.line,stop)
+        builder.statements(stmt.body,stop)
+    return builder.locals
+
+fn empty_analysis(file: str, text: str) -> Analysis:
+    return Analysis(file,text,split(text,"\n"),[],{},false,mod.Compilation([],0),bind.Result([],[],1,src.success()),ts_pool(),[],[],{},{},{},[],{},{},[],{},0,{},{},{})
+
+fn ts_pool() -> ts.Pool:
+    return ts.Pool([ts.Type("Unknown","",-1,-1,[],0)],{},1)
+
+fn standalone(file: str) -> project.Result:
+    # The file may exist only in the editor, so it cannot be required to resolve on disk.
+    root = path.parent(file)
+    return project.Result([project.Package(root,root,file,"","","",{})],file,src.success())
+
+record Engine:
+    standards: dict[str,str]
+    cache: dict[str,mod.Parsed]
+    overlays: dict[str,str]
+
+    fn load_project(mut self, file: str) -> project.Result:
+        # A file outside the project's declared roots is still worth analyzing by itself.
+        try:
+            configured = project.resolve(file)
+            if configured.diagnostic.code != "":
+                return standalone(file)
+            package = configured.packages[0]
+            if not path.within(file,package.source_root) and (package.test_root == "" or not path.within(file,package.test_root)):
+                return standalone(file)
+            return configured
+        except err:
+            return standalone(file)
+
+    fn analyze(mut self, file: str, text: str) -> Analysis:
+        self.overlays[file] = text
+        result = empty_analysis(file,text)
+        configured = self.load_project(file)
+        editor = mod.Editor(self.overlays,self.cache,[],[])
+        loaded = mod.load_for_editor(file,configured.packages,self.standards,editor)
+        editor = loaded[1]
+        self.cache = editor.cache
+        collected = editor.diagnostics
+        if loaded[0].diagnostic.code != "":
+            append(collected,loaded[0].diagnostic)
+            result.diagnostics = collected
+            return result
+        compilation = loaded[0].compilation
+        result.compilation = compilation
+        result.source = compilation.modules[compilation.entry].source
+        result.lines = split(result.source,"\n")
+        lexical = lx.lex(result.source)
+        if lexical.code == "":
+            result.tokens = lexical.tokens
+            result.by_line = token_index(result.tokens)
+        bound = bind.bind(compilation)
+        if bound.diagnostic.code != "":
+            append(collected,bound.diagnostic)
+            result.diagnostics = collected
+            return result
+        analysis = semantic.analyze_module(frontend.Result(configured.packages,compilation,bound,src.success()),compilation.entry,editor.poisoned)
+        collected = collected+analysis.diagnostics
+        if analysis.result.diagnostic.code != "":
+            append(collected,analysis.result.diagnostic)
+            result.diagnostics = collected
+            return result
+        result.diagnostics = collected
+        result.semantic = true
+        result.compilation = analysis.result.signatures.compilation
+        result.bindings = bound
+        result.pool = analysis.result.signatures.pool
+        result.declarations = analysis.result.signatures.declarations
+        result.facts = analysis.result.facts
+        result.methods = analysis.methods
+        result.record_parameters = analysis.record_parameters
+        result.record_types = analysis.result.record_types
+        result.known = known_builtins()
+        result.locals = build_scopes(result)
+        for position in range(len(result.locals)):
+            name = result.locals[position].name
+            if name not in result.locals_by_name:
+                result.locals_by_name[name] = []
+            append(result.locals_by_name[name],position)
+        result.declared_at = declared_targets(result)
+        return result
+
+    fn release(mut self, file: str):
+        if file in self.overlays:
+            remove(self.overlays,file)

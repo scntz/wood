@@ -1,0 +1,7 @@
+from validation.numbers import measurements
+from std.collections import sorted_int
+from std.stats import sum_int
+
+fn summarize(text: str) -> str:
+    values = measurements(text)
+    return "count: " + str(len(values)) + "\nsum: " + str(sum_int(values)) + "\nsorted: " + str(sorted_int(values)) + "\n"

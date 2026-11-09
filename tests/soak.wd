@@ -1,0 +1,114 @@
+# Runs the runtime's allocating paths in a loop and checks each result, so that a slow leak, a
+# corrupted value or a stuck task shows up. On Linux it also fails if memory grows after warm-up.
+# usage: wood run tests/soak.wd -- SECONDS DIRECTORY
+import std.fs as fs
+import std.http as http
+import std.io as io
+import std.net as net
+import std.path as path
+import std.task as tasks
+import std.time as time
+
+record Item:
+    name: str
+    values: list[int]
+
+fn square(value: json) -> json:
+    number = json_int(value)
+    return json(number * number)
+
+fn containers(round: int):
+    items: list[Item] = []
+    table: dict[str,int] = {}
+    for i in range(200):
+        name = "item" + str(i + round % 7)
+        append(items, Item(name, [i, i + 1, i + 2]))
+        table[name] = i
+    total = 0
+    for item in items:
+        total = total + item.values[1]
+    assert(total == 20100)
+    assert(len(table) == 200)
+    text = join([item.name for item in items], ",")
+    assert(len(split(text, ",")) == 200)
+    assert(replace(text, "item", "") != text)
+
+fn documents(round: int):
+    data: dict[str,json] = {"round":json(round),"list":json([1, 2, 3]),"text":json("é" + str(round))}
+    again = json_parse(json_dump(json(data)))
+    assert(json_dump(again) == json_dump(json_parse(json_dump(again))))
+    assert(json_int(json_dict(again)["round"]) == round)
+
+fn failures():
+    items = [1]
+    try:
+        print(items[5])
+        assert(false)
+    except err:
+        assert(err.code == "R4006")
+
+fn files(directory: str, round: int):
+    file = path.combine(directory, "soak-" + str(round % 5) + ".txt")
+    write_text(file, "line " + str(round) + "\n")
+    with io.open(file, "r") as source:
+        assert(io.read_all(source, 1024) == "line " + str(round) + "\n")
+    assert(fs.remove(file))
+
+fn workers(round: int):
+    started = [tasks.spawn(square, json(round % 1000 + i)) for i in range(4)]
+    for i in range(4):
+        expected = (round % 1000 + i) * (round % 1000 + i)
+        assert(json_int(tasks.wait(started[i], 30000)) == expected)
+        tasks.close(started[i])
+
+fn sockets(listener: stream, port: int, round: int):
+    client = net.connect("127.0.0.1", port, 5000)
+    server = net.accept(listener)
+    io.write(client, "ping " + str(round))
+    net.shutdown_write(client)
+    assert(io.read_all(server, 1024) == "ping " + str(round))
+    io.close(client)
+    io.close(server)
+
+fn resident_pages() -> int:
+    try:
+        return int(split(read_text("/proc/self/statm"), " ")[1])
+    except err:
+        return 0
+
+fn main():
+    arguments = args()
+    if len(arguments) != 2:
+        print("usage: soak.wd SECONDS DIRECTORY")
+        exit(2)
+    seconds = int(arguments[0])
+    directory = arguments[1]
+    listener = net.listen("127.0.0.1", 0, 5000)
+    port = net.port(listener)
+    start = time.monotonic()
+    round = 0
+    warm = 0
+    peak = 0
+    while time.monotonic() - start < float(seconds):
+        containers(round)
+        documents(round)
+        failures()
+        files(directory, round)
+        # Every closed connection holds a port for a while, so a faster pace exhausts them.
+        if round % 64 == 0:
+            sockets(listener, port, round)
+        if round % 8 == 0:
+            workers(round)
+        round = round + 1
+        if round % 512 == 0:
+            pages = resident_pages()
+            elapsed = time.monotonic() - start
+            if warm == 0 and elapsed * 4.0 >= float(seconds):
+                warm = pages
+            if pages > peak:
+                peak = pages
+    io.close(listener)
+    print("soak ok:", round, "rounds in", seconds, "seconds; resident pages after warm-up", warm, "peak", peak)
+    assert(warm == 0 or peak <= warm + warm // 5, "memory kept growing after warm-up")
+
+main()

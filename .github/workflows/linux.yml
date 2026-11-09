@@ -1,0 +1,44 @@
+name: linux
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validation:
+    runs-on: ubuntu-24.04
+    container: debian:13-slim
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+        profile: [release, sanitizers]
+    env:
+      WOOD_REQUIRE_TLS_TESTS: '1'
+      WOOD_TEST_JOBS: '1'
+      WOOD_PYTHON_TESTS: 'OFF'
+    steps:
+      - name: Toolchains and optional test runtimes
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ clang libclang-rt-19-dev libssl3t64 libsqlite3-0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, test, install and run OBJ application
+        shell: bash
+        run: bash tools/validate-linux.sh '${{ matrix.cxx }}' 'out/linux-${{ strategy.job-index }}' '${{ matrix.profile }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: linux-validation-${{ strategy.job-index }}
+          if-no-files-found: warn
+          path: |
+            out/linux-${{ strategy.job-index }}/environment.txt
+            out/linux-${{ strategy.job-index }}/ctest.xml
+            out/linux-${{ strategy.job-index }}/ctest.log
+            out/linux-${{ strategy.job-index }}/artifact-sha256.txt
+            out/linux-${{ strategy.job-index }}/validation-complete.txt

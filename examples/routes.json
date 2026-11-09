@@ -1,0 +1,10 @@
+{
+  "start": "depot",
+  "graph": {
+    "depot": [{"to":"market","cost":10},{"to":"park","cost":2}],
+    "market": [{"to":"station","cost":1}],
+    "park": [{"to":"market","cost":3},{"to":"station","cost":20}],
+    "station": [],
+    "island": []
+  }
+}

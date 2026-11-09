@@ -1,0 +1,28 @@
+import store as notes
+import std.sqlite as sql
+
+with sql.open(":memory:", 1000) as connection:
+    notes.initialize(connection)
+    notes.initialize(connection)
+    assert(notes.recent(connection) == [])
+    assert(notes.add(connection, "A note 🌳") == 1)
+    assert(notes.add(connection, "'); DROP TABLE notes; --") == 2)
+    rows = notes.recent(connection)
+    assert(len(rows) == 2 and json_int(rows[0]["id"]) == 2)
+    assert(json_str(rows[1]["body"]) == "A note 🌳")
+    for bad in ["", "bad\0text", byte_string(192)+byte_string(175)]:
+        caught = false
+        try:
+            notes.add(connection, bad)
+        except err:
+            caught = err.code == "R4010"
+        assert(caught)
+    assert(len(notes.recent(connection)) == 2)
+    for bad in [0,101]:
+        caught = false
+        try:
+            notes.recent(connection,bad)
+        except err:
+            caught = err.code == "R4010"
+        assert(caught)
+print("shared notes store passed")

@@ -1,0 +1,68 @@
+# Native CSV/assembly kernels. Inputs and output verification are not measured.
+import std.csv as csv
+import std.time as time
+extern fn bench_reset()
+extern fn bench_stop() -> int
+extern fn bench_bytes() -> int
+extern fn bench_peak() -> int
+extern fn bench_rss() -> int
+
+record Metrics:
+    checksum: int
+    elapsed_ns: int
+    allocations: int
+    allocated_bytes: int
+    peak_bytes: int
+    process_peak_bytes: int
+
+fn csv_rows(fields: list[str], mode: str) -> list[list[str]]:
+    count = len(fields)
+    if mode == "csv_plain":
+        return [[str(i), fields[i], "ready"] for i in range(count)]
+    if mode == "csv_dense":
+        return [[str(i), '"\r\n,' * 32, "ready"] for i in range(count)]
+    if mode == "csv_wide":
+        return [[fields[(i + j) % count] for j in range(16)] for i in range(count)]
+    if mode == "csv_empty":
+        rows: list[list[str]] = []
+        for i in range(count):
+            if i % 3 == 0:
+                append(rows, [])
+            elif i % 3 == 1:
+                append(rows, [""])
+            else:
+                append(rows, ["", ""])
+        return rows
+    return [[str(i), 'mesh,"' + fields[i] + '"', "ready"] for i in range(count)]
+
+arguments = args()
+if len(arguments) != 4:
+    raise "expected mode, count, rounds, output path"
+mode = arguments[0]
+count = int(arguments[1])
+rounds = int(arguments[2])
+if count < 1 or count > 20000 or rounds < 1 or rounds > 100:
+    raise "unsupported benchmark size"
+fields = ["member-" + str(i) + ":" + "payload-" * 12 for i in range(count)]
+text = join(fields, "|")
+rows = csv_rows(fields, mode)
+result = ""
+checksum = 0
+bench_reset()
+started = time.perf_counter_ns()
+for round in range(rounds):
+    if mode == "join":
+        result = join(fields, "::")
+    elif mode == "replace":
+        result = replace(text, "|", "::")
+    elif mode == "absent":
+        result = replace(text, "not-present", "::")
+    elif mode == "csv" or mode == "csv_plain" or mode == "csv_dense" or mode == "csv_wide" or mode == "csv_empty":
+        result = csv.dump(rows, ",")
+    else:
+        raise "unknown benchmark mode"
+    checksum += len(result)
+elapsed = time.perf_counter_ns() - started
+allocations = bench_stop()
+write_text(arguments[3], result)
+print(json_dump(Metrics(checksum, elapsed, allocations, bench_bytes(), bench_peak(), bench_rss())))

@@ -1,0 +1,30 @@
+{
+  "owner": "wood",
+  "name": "process",
+  "package": "wood_process",
+  "tier": "official",
+  "description": "Run programs, set their environment and find files beside the executable.",
+  "readme": "# wood_process 0.1.0\n\nStart other programs and find your application's own files. Listed in the catalog as\n`wood@process`. Pure Wood over the native runtime's process support, on Windows and Linux.\n\n```sh\nwood add wood@process\n```\n\n```wood\nimport process.process as process\n\nresult = process.run([\"git\", \"--version\"], 5000)\nprint(result.status)\nprint(result.output)\n\nlogo = process.resource(\"assets/logo.png\")\n```\n\n| Function | Purpose |\n| --- | --- |\n| `run(arguments, timeout_ms, output_limit)` | Run to completion; returns `status` and combined `output` |\n| `checked(arguments, timeout_ms)` | Like `run`, raising an error on a nonzero status |\n| `set_environment(name, value)` | Set a variable for programs started afterwards |\n| `executable()` | This program's own path |\n| `resource(relative)` | A file beside the executable; `..` is rejected |\n\nThere is no shell, so each argument reaches the program exactly as given. On a timeout or\nwhen output exceeds its limit, the whole process tree is stopped and an error is raised. A\nprogram that cannot be started also raises an error.\n\nStatus: experimental, native LLVM backend only. It runs programs to completion and gives\nno streaming, stdin or background handles. To wait without blocking, call it from a\n`std.task` worker. On Linux, standard error and output arrive merged, as on Windows.\n\nLicensed MIT OR Apache-2.0.\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_process/README.md",
+  "categories": [
+    "system"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import process.process as process\n\nresult = process.run([\"git\", \"--version\"], 5000)\nprint(result.output)\n",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "published": "2026-11-01",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_process-0.1.0.woodpkg",
+        "sha256": "b24b989725762a1c8c58980add252ec12593a738fc5fd43d5b73cc80feb1e833"
+      }
+    }
+  ]
+}

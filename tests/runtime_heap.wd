@@ -1,0 +1,89 @@
+# The runtime's small-block heap: every size class, recycling, large blocks, and sharing with
+# worker threads. Corruption here would show up as wrong values, so every value is checked.
+import std.task as task
+
+fn pattern(size: int, seed: int) -> str:
+    pieces: list[str] = []
+    for index in range(size):
+        append(pieces,byte_string(65+(index+seed)%26))
+    return join(pieces,"")
+
+fn check_pattern(text: str, size: int, seed: int):
+    assert(len(text) == size)
+    if size > 0:
+        assert(byte_value(text[0]) == 65+seed%26)
+        assert(byte_value(text[size-1]) == 65+(size-1+seed)%26)
+
+# Sizes around every class boundary, up to past the point where the OS takes over.
+sizes = [0,1,2,7,8,15,16,17,31,32,33,47,48,63,64,65,127,128,129,255,256,257,479,480,481,495,496,497,511,512,513,1000,1023,1024,1025,2047,2048,2049,4095,4096,4097,8191,8192,8193,16384,32767,32768,32769,65000,65535,65536,65537,100000,1048575,1048576,1048577]
+kept: list[str] = []
+for index in range(len(sizes)):
+    append(kept,pattern(sizes[index],index))
+for index in range(len(sizes)):
+    check_pattern(kept[index],sizes[index],index)
+
+# Freed blocks are reused without disturbing what is still alive.
+survivors: list[str] = []
+for round in range(200):
+    temporary: list[str] = []
+    for index in range(50):
+        append(temporary,pattern(index*7,round))
+    if round%10 == 0:
+        append(survivors,temporary[round%50])
+for round in range(20):
+    check_pattern(survivors[round],(round*10%50)*7,round*10)
+for index in range(len(sizes)):
+    check_pattern(kept[index],sizes[index],index)
+
+# Growing and copying containers walk through many classes.
+grown: list[int] = []
+table: dict[str,int] = {}
+for value in range(5000):
+    append(grown,value*3)
+    table[str(value)] = value
+for value in range(5000):
+    assert(grown[value] == value*3)
+    assert(table[str(value)] == value)
+
+# Value semantics: changing a copy must not touch the original, also after a block is recycled.
+original = [1,2,3]
+copy = original
+append(copy,4)
+assert(len(original) == 3 and len(copy) == 4)
+
+# Blocks allocated before the first thread must stay valid once they are shared.
+shared = pattern(2000,3)
+
+fn exercise(seed: int) -> int:
+    total = 0
+    for round in range(300):
+        items: list[str] = []
+        for index in range(40):
+            append(items,pattern(index*11%600,seed+round))
+        for index in range(40):
+            check_pattern(items[index],index*11%600,seed+round)
+            total += len(items[index])
+    return total
+
+fn worker(payload: json) -> json:
+    # The string arrives through the task boundary, so its bytes are shared with the main thread.
+    data = json_dict(payload)
+    check_pattern(json_str(data["shared"]),2000,3)
+    return json(exercise(json_int(data["seed"])))
+
+expected = exercise(1)
+work = [task.spawn(worker,json({"seed":json(1),"shared":json(shared)})) for index in range(8)]
+for item in work:
+    assert(json_int(task.wait(item,120000)) == expected)
+    task.close(item)
+check_pattern(shared,2000,3)
+for index in range(len(sizes)):
+    check_pattern(kept[index],sizes[index],index)
+
+# And the main thread can keep allocating alongside what threads have freed.
+after: list[str] = []
+for index in range(2000):
+    append(after,pattern(index%300,index))
+for index in range(2000):
+    check_pattern(after[index],index%300,index)
+print("heap ok")

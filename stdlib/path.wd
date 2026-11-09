@@ -1,0 +1,28 @@
+# Host-native path syntax; no string-based emulation of drive/UNC rules.
+fn combine(base: str, child: str) -> str:
+    return path_join(base, child)
+
+fn name(path: str) -> str:
+    return path_name(path)
+
+fn parent(path: str) -> str:
+    return path_parent(path)
+
+fn absolute(path: str) -> str:
+    return path_absolute(path)
+
+fn normalize(path: str) -> str:
+    return path_normalize(path)
+
+# Canonical, link-aware operations share the compiler's native filesystem policy.
+fn resolve(path: str, allow_missing: bool = false) -> str:
+    return path_resolve(path, allow_missing)
+
+fn identity(path: str) -> str:
+    return path_identity(path)
+
+fn within(path: str, root: str) -> bool:
+    return path_within(path, root)
+
+fn is_absolute(path: str) -> bool:
+    return path_is_absolute(path)

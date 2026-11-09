@@ -1,0 +1,205 @@
+import python@builtins as builtins
+import python@math as math
+import python@sys as sys
+import python@collections as collections
+import std.python as py
+import std.task as task
+
+fn worker(payload: json) -> json:
+    with math.call("sqrt", [py.value(payload)]) as value:
+        return json(py.to_float(value))
+
+fn lifecycle():
+    values = [1, 2, 3]
+    object = py.value(values)
+    alias = object
+    assert(py.to_json(object) == json(values))
+    before = py.to_int(sys.call("getrefcount", [object]))
+    copies = [object, alias, object]
+    assert(py.to_int(sys.call("getrefcount", [object])) == before)
+    values[0] = 99
+    assert(py.to_json(object) == json([1, 2, 3]))
+    py.close(copies[0])
+    assert(py.closed(alias))
+    py.close(alias)
+    caught = false
+    try:
+        py.text(object)
+    except err:
+        caught = err.code == "R4032"
+    assert(caught)
+
+fn conversions():
+    assert(py.to_int(py.value(9223372036854775807)) == 9223372036854775807)
+    assert(py.to_int(py.value(-9223372036854775808)) == -9223372036854775808)
+    assert(py.to_float(py.value(1.25)) == 1.25)
+    assert(py.to_bool(py.value(true)))
+    assert(not py.to_bool(py.value(false)))
+    assert(py.to_json(py.value(None)) == json_null())
+    optional: int | None = 7
+    assert(py.to_json(py.value(optional)) == json(7))
+    optional = None
+    assert(py.to_json(py.value(optional)) == json_null())
+    text = "héllo\0world"
+    assert(py.to_json(py.value(text)) == json(text))
+    bytes = byte_string(0) + byte_string(255) + "abc"
+    assert(py.to_bytes(py.bytes(bytes)) == bytes)
+    nested = json_parse("{\"a\":[1,true,null,2.5],\"empty\":{}}")
+    assert(py.to_json(py.value(nested)) == nested)
+    assert(py.to_json(py.tuple([py.value(1), py.value("two")])) == json_parse("[1,\"two\"]"))
+    assert(py.to_json(py.value((1, "two"))) == json_parse("[1,\"two\"]"))
+    with builtins.call("dict", [], {"a":py.value(1), "b":py.value(2)}) as mapping:
+        assert(py.to_json(mapping) == json({"a":1, "b":2}))
+    assert(py.to_float(math.call("sqrt", [py.value(81)])) == 9.0)
+    assert(py.to_int(builtins.call("len", [py.value([1,2,3])])) == 3)
+
+fn failures():
+    caught = 0
+    try:
+        py.import_module("__wood_missing_module_9f85a__")
+    except err:
+        assert(err.code == "R4031" and find(err.message,"ModuleNotFoundError") >= 0)
+        caught += 1
+    try:
+        math.call("sqrt", [py.value(-1)])
+    except err:
+        assert(err.code == "R4031" and find(err.message,"ValueError") >= 0)
+        caught += 1
+    try:
+        math.attr("__wood_missing_attribute__")
+    except err:
+        assert(err.code == "R4031" and find(err.message,"AttributeError") >= 0)
+        caught += 1
+    try:
+        py.to_int(builtins.call("pow", [py.value(2), py.value(80)]))
+    except err:
+        assert(err.code == "R4031" and find(err.message,"OverflowError") >= 0)
+        caught += 1
+    try:
+        py.to_json(py.bytes("bytes are explicit"))
+    except err:
+        assert(err.code == "R4032")
+        caught += 1
+    try:
+        py.value(byte_string(255))
+    except err:
+        assert(err.code == "R4012")
+        caught += 1
+    try:
+        py.to_json(builtins.call("dict", [py.value([[1,2]])]))
+    except err:
+        assert(err.code == "R4032")
+        caught += 1
+    with builtins.call("list") as cyclic:
+        py.call(py.attr(cyclic,"append"), [cyclic])
+        try:
+            py.to_json(cyclic)
+        except err:
+            assert(err.code == "R4032" and find(err.message,"cyclic") >= 0)
+            caught += 1
+        py.call(py.attr(cyclic,"clear"))
+    assert(caught == 8)
+    for scenario in range(4):
+        caught_error = false
+        try:
+            if scenario == 0:
+                py.call(py.value(1))
+            elif scenario == 1:
+                py.to_int(py.value(1.5))
+            elif scenario == 2:
+                sys.call("exit", [py.value(5)])
+            else:
+                py.text(builtins.call("chr", [py.value(55296)]))
+        except err:
+            caught_error = err.code == "R4031"
+        assert(caught_error)
+    # A caught Python exception must not poison the next call.
+    assert(py.to_float(math.call("sqrt", [py.value(16)])) == 4.0)
+
+fn scoped():
+    alias = py.value("before")
+    with collections.call("UserList", [py.value([1,2])]) as object:
+        alias = object
+        py.call(py.attr(object,"append"), [py.value(3)])
+        assert(py.to_json(py.attr(object,"data")) == json([1,2,3]))
+    assert(py.closed(alias))
+    caught = false
+    try:
+        with py.value(1) as object:
+            alias = object
+            raise "scope failure"
+    except err:
+        caught = err.code == "R4010"
+    assert(caught and py.closed(alias))
+
+fn finalizers():
+    with py.import_module("weakref") as weakref:
+        with builtins.call("list") as finalized:
+            object = collections.call("UserList")
+            alias = object
+            finalizer = py.call(py.attr(weakref,"finalize"), [object, py.attr(finalized,"append"), py.value("released")])
+            assert(py.to_json(finalized) == json([]))
+            py.close(object)
+            assert(py.closed(alias))
+            assert(py.to_json(finalized) == json(["released"]))
+            py.close(alias)
+            assert(py.to_json(finalized) == json(["released"]))
+
+fn returned_scope() -> py_object:
+    with py.value(5) as object:
+        return object
+
+fn structured_exits():
+    assert(py.closed(returned_scope()))
+    alias = py.value(0)
+    for number in range(2):
+        if number > 0:
+            assert(py.closed(alias))
+        with py.value(number) as object:
+            alias = object
+            if number == 0:
+                continue
+            break
+    assert(py.closed(alias))
+    object = py.value(42)
+    snapshot = fn() => py.to_int(object)
+    assert(snapshot() == 42)
+    py.close(object)
+    caught = false
+    try:
+        snapshot()
+    except err:
+        caught = err.code == "R4032"
+    assert(caught)
+
+fn failed_formatting():
+    # A malicious Python exception formatter must not poison the next C API call.
+    with py.value(json_parse("{}")) as globals:
+        code = "class BadError(Exception):\n    def __str__(self):\n        raise RuntimeError('broken formatter')\ndef fail():\n    raise BadError()\n"
+        builtins.call("exec", [py.value(code), globals])
+        with py.call(py.attr(globals,"__getitem__"), [py.value("fail")]) as function:
+            caught = false
+            try:
+                py.call(function)
+            except err:
+                caught = err.code == "R4031" and find(err.message,"BadError") >= 0
+            assert(caught)
+        assert(py.to_int(builtins.call("len", [py.value([1])])) == 1)
+
+lifecycle()
+conversions()
+failures()
+scoped()
+finalizers()
+structured_exits()
+failed_formatting()
+for repetition in range(100):
+    lifecycle()
+# First initialization is on the main thread; workers use the same interpreter
+# through the GIL and return native immutable JSON, never raw Python pointers.
+with task.spawn(worker, json(25)) as first:
+    with task.spawn(worker, json(36)) as second:
+        assert(task.wait(first, 10000) == json(5.0))
+        assert(task.wait(first, 10000) == json(5.0))
+        assert(task.wait(second, 10000) == json(6.0))
+print("Python interop correctness passed")

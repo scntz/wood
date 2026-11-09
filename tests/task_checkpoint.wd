@@ -1,0 +1,25 @@
+import std.task as task
+import std.time as time
+
+task.checkpoint()
+assert(not task.cancelled())
+
+fn cooperative(payload: json) -> json:
+    while not task.cancelled():
+        time.sleep(0.001)
+    task.checkpoint()
+    return json("checkpoint failed to throw")
+
+for iteration in range(8):
+    with task.spawn(cooperative, json_null()) as work:
+        task.cancel(work)
+        for retry in range(2):
+            caught = false
+            try:
+                task.wait(work, 10000)
+            except err:
+                caught = err.code == "R4022" and err.message == "task cancelled"
+            assert(caught)
+task.checkpoint()
+assert(not task.cancelled())
+print("task checkpoint contracts passed")

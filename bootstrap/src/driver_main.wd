@@ -1,0 +1,2 @@
+import driver as driver
+exit(driver.main(args()))

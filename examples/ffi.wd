@@ -1,0 +1,85 @@
+# Build tests/ffi_fixture.cpp as a native static library, then:
+# wood examples/ffi.wd --link-library /absolute/path/to/library.lib
+import std.task as tasks
+extern fn wood_saturating_add(left: int, right: int) -> int
+extern fn wood_native_lerp(left: float, right: float, weight: float) -> float
+extern fn wood_native_accept(count: int, ratio: float)
+extern fn wood_bytes_sum(data: str) -> int
+extern fn wood_native_fold(count: int, step: fn(int, int) -> int) -> int
+extern fn wood_native_map(value: float, transform: fn(float) -> float) -> float
+extern fn wood_native_visit(value: int, visitor: fn(int) -> void)
+extern fn wood_native_pair(first: fn(int) -> int, second: fn(int) -> int) -> int
+
+fn add(left: int, right: int) -> int:
+    return left + right
+
+fn recursive(left: int, right: int) -> int:
+    if right == 2:
+        return left + wood_native_fold(3, add)
+    return left + right
+
+fn twice(value: float) -> float:
+    return value * 2.0
+
+fn visit(value: int):
+    assert(value == 42)
+
+fn failure(left: int, right: int) -> int:
+    raise "foreign callback failed"
+
+fn plus_one(value: int) -> int:
+    return value + 1
+
+fn double_int(value: int) -> int:
+    return value * 2
+
+fn first_error(value: int) -> int:
+    raise "first callback was called after failure"
+
+fn second_error(value: int) -> int:
+    raise "second callback failed first"
+
+fn subtract(left: int, right: int) -> int:
+    return left - right
+
+fn foreign_worker(payload: json) -> json:
+    if json_bool(payload):
+        return json(wood_native_fold(1000, add))
+    return json(wood_native_fold(1000, subtract))
+
+assert(wood_bytes_sum("a\0" + byte_string(255)) == 352)
+assert(wood_bytes_sum("") == 0)
+assert(wood_native_fold(10, add) == 45)
+assert(wood_native_fold(4, recursive) == 7)
+assert(wood_native_map(1.25, twice) == 2.5)
+wood_native_visit(42, visit)
+assert(wood_native_pair(plus_one, double_int) == 9)
+try:
+    wood_native_pair(first_error, second_error)
+    assert(false)
+except err:
+    assert(err.message == "second callback failed first")
+try:
+    wood_native_fold(10, failure)
+    assert(false)
+except err:
+    assert(err.code == "R4010")
+    assert(err.message == "foreign callback failed")
+jobs: list[task] = []
+for index in range(8):
+    append(jobs, tasks.spawn(foreign_worker, json(index % 2 == 0)))
+for index in range(8):
+    expected = -499500
+    if index % 2 == 0:
+        expected = 499500
+    assert(json_int(tasks.wait(jobs[index], 5000)) == expected)
+    tasks.close(jobs[index])
+
+assert(wood_saturating_add(9223372036854775807, 1) == 9223372036854775807)
+assert(wood_saturating_add(-9223372036854775808, -1) == -9223372036854775808)
+assert(wood_saturating_add(2, 3) == 5)
+assert(wood_native_lerp(10, 20, 0.25) == 12.5)
+wood_native_accept(7, 1)
+callback = wood_saturating_add
+assert(callback(10, 32) == 42)
+print("native C ABI passed")

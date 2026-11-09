@@ -1,0 +1,19 @@
+import std.time as time
+
+fn sum_to(limit: int) -> int:
+    total = 0
+    for value in range(1, limit + 1):
+        total = total + value
+    return total
+
+# Warm up, verify the result, then measure the native workload without I/O.
+assert(sum_to(100000) == 5000050000)
+started = time.perf_counter_ns()
+checksum = sum_to(100000)
+elapsed = time.perf_counter_ns() - started
+assert(checksum == 5000050000)
+print(json_dump({"checksum": checksum, "elapsed_ns": elapsed}))
+
+before = time.monotonic()
+time.sleep(0.01)
+print("sleep elapsed seconds:", time.monotonic() - before)

@@ -1,0 +1,164 @@
+import std.num as num
+
+record Vec3:
+    x: float
+    y: float
+    z: float
+    fn plus(self, other: Vec3):
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+    fn minus(self, other: Vec3):
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+    fn scaled(self, amount: float):
+        return Vec3(self.x * amount, self.y * amount, self.z * amount)
+    fn dot(self, other: Vec3) -> float:
+        return self.x * other.x + self.y * other.y + self.z * other.z
+    fn cross(self, other: Vec3):
+        return Vec3(self.y * other.z - self.z * other.y, self.z * other.x - self.x * other.z, self.x * other.y - self.y * other.x)
+    fn length(self) -> float:
+        if not num.finite(self.x) or not num.finite(self.y) or not num.finite(self.z):
+            raise "vector components must be finite"
+        # Scale first to avoid overflow/underflow from squaring finite components.
+        scale = num.abs(self.x)
+        if num.abs(self.y) > scale:
+            scale = num.abs(self.y)
+        if num.abs(self.z) > scale:
+            scale = num.abs(self.z)
+        if not num.finite(scale):
+            raise "vector components must be finite"
+        if scale == 0.0:
+            return 0.0
+        x = self.x / scale
+        y = self.y / scale
+        z = self.z / scale
+        return scale * num.sqrt(x*x + y*y + z*z)
+    fn normalized(self):
+        length = self.length()
+        if length == 0.0 or not num.finite(length):
+            raise "cannot normalize a zero or unrepresentable vector"
+        # A subnormal length can round by a large fraction of its magnitude.
+        # Normalize scaled components, while retaining length()'s validation and
+        # the existing rejection of an unrepresentable original magnitude.
+        scale = num.abs(self.x)
+        if num.abs(self.y) > scale:
+            scale = num.abs(self.y)
+        if num.abs(self.z) > scale:
+            scale = num.abs(self.z)
+        x = self.x / scale
+        y = self.y / scale
+        z = self.z / scale
+        unit = num.sqrt(x*x + y*y + z*z)
+        return Vec3(x / unit, y / unit, z / unit)
+
+fn identity(size: int) -> array[float]:
+    result = num.zeros((size,size))
+    for index in range(size):
+        result[index,index] = 1.0
+    return result
+
+fn translation(x: float, y: float, z: float) -> array[float]:
+    result = identity(4)
+    result[0,3] = x
+    result[1,3] = y
+    result[2,3] = z
+    return result
+
+fn scaling(x: float, y: float, z: float) -> array[float]:
+    result = identity(4)
+    result[0,0] = x
+    result[1,1] = y
+    result[2,2] = z
+    return result
+
+fn rotation_x(angle: float) -> array[float]:
+    result = identity(4)
+    cosine = num.cos(angle)
+    sine = num.sin(angle)
+    result[1,1] = cosine
+    result[1,2] = -sine
+    result[2,1] = sine
+    result[2,2] = cosine
+    return result
+
+fn rotation_y(angle: float) -> array[float]:
+    result = identity(4)
+    cosine = num.cos(angle)
+    sine = num.sin(angle)
+    result[0,0] = cosine
+    result[0,2] = sine
+    result[2,0] = -sine
+    result[2,2] = cosine
+    return result
+
+fn rotation_z(angle: float) -> array[float]:
+    result = identity(4)
+    cosine = num.cos(angle)
+    sine = num.sin(angle)
+    result[0,0] = cosine
+    result[0,1] = -sine
+    result[1,0] = sine
+    result[1,1] = cosine
+    return result
+
+# Column-vector transform convention; point rows multiply by transpose(matrix).
+# Affine matrices only: projective division is an explicit future API.
+fn transform_points(points: array[float], matrix: array[float]) -> array[float]:
+    return array_affine(points,matrix)
+
+# Pivoted elimination solves A*X=B for one or more right-hand sides. Inputs keep
+# value semantics. A relative pivot threshold deliberately rejects ill-conditioned
+# or singular systems instead of promising a stable result for every matrix.
+fn solve(matrix: array[float], right: array[float], tolerance: float = 0.000000000001) -> array[float]:
+    shape = num.shape(matrix)
+    rhs_shape = num.shape(right)
+    if len(shape) != 2 or len(rhs_shape) != 2:
+        raise "solve requires rank-two arrays"
+    size = shape[0]
+    if shape[1] != size or rhs_shape[0] != size:
+        raise "solve requires square A and matching B rows"
+    if tolerance < 0.0 or not num.finite(tolerance):
+        raise "solve tolerance must be finite and nonnegative"
+    scale = 0.0
+    for value in matrix:
+        if not num.finite(value):
+            raise "solve requires finite coefficients"
+        if num.abs(value) > scale:
+            scale = num.abs(value)
+    for value in right:
+        if not num.finite(value):
+            raise "solve requires finite right-hand sides"
+    a = num.copy(matrix)
+    x = num.copy(right)
+    columns = rhs_shape[1]
+    for pivot in range(size):
+        best = pivot
+        for row in range(pivot + 1,size):
+            if num.abs(a[row,pivot]) > num.abs(a[best,pivot]):
+                best = row
+        if num.abs(a[best,pivot]) <= scale * tolerance:
+            raise "singular or ill-conditioned linear system"
+        if best != pivot:
+            for column in range(size):
+                saved = a[pivot,column]
+                a[pivot,column] = a[best,column]
+                a[best,column] = saved
+            for column in range(columns):
+                saved = x[pivot,column]
+                x[pivot,column] = x[best,column]
+                x[best,column] = saved
+        for row in range(pivot + 1,size):
+            factor = a[row,pivot] / a[pivot,pivot]
+            a[row,pivot] = 0.0
+            for column in range(pivot + 1,size):
+                a[row,column] -= factor * a[pivot,column]
+            for column in range(columns):
+                x[row,column] -= factor * x[pivot,column]
+    for offset in range(size):
+        row = size - 1 - offset
+        for column in range(columns):
+            value = x[row,column]
+            for index in range(row + 1,size):
+                value -= a[row,index] * x[index,column]
+            x[row,column] = value / a[row,row]
+            if not num.finite(x[row,column]):
+                raise "linear solution is not finite"
+    return x

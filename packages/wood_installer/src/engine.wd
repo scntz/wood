@@ -1,0 +1,281 @@
+# Reusable policy layer. The private adapter confines writes below one locked
+# root; Wood owns validation, transactions, recovery and owned-file decisions.
+import std.fs as fs
+import std.path as path
+import manifest as schema
+import bundle as bundle
+import _native as native
+
+fn _kind(name: str) -> int:
+    return native.check(native.wood_setup_kind(name), "inspect " + name)
+
+fn _put(name: str, value: json, overwrite: bool = false):
+    text = json_dump(value)
+    if len(text) > 4194304:
+        raise "setup: receipt/journal exceeds 4 MiB"
+    native.check(native.wood_setup_write(name, text, 1 if overwrite else 0), "publish " + name)
+
+fn _read(root: str, name: str) -> json:
+    if _kind(name) != 1:
+        raise "setup: expected regular metadata file '" + name + "'"
+    file = path.combine(root, name)
+    if fs.size(file) > 4194304:
+        raise "setup: installation metadata exceeds 4 MiB"
+    return json_parse(read_text(file))
+
+fn _receipt(root: str, id: str) -> dict[str,json]:
+    if _kind("receipt.json") == 0:
+        empty: list[json] = []
+        return {"format": json(1), "id": json(id), "history": json(empty)}
+    value = schema.object(_read(root, "receipt.json"))
+    if json_int(value["format"]) != 1 or schema.text(value, "id") != id:
+        raise "setup: destination belongs to another application or receipt format"
+    history = json_list(value["history"])
+    if len(history) == 0 or len(history) > 32:
+        raise "setup: invalid retained-generation count"
+    seen: dict[str,bool] = {}
+    for item in history:
+        entry = schema.object(item)
+        generation = _generation(entry)
+        if generation in seen:
+            raise "setup: duplicate receipt generation"
+        seen[generation] = true
+        app = schema.decode(entry["metadata"])
+        if app.id != id or native.bytes_digest(json_dump(entry["metadata"])) != schema.text(entry, "digest"):
+            raise "setup: generation metadata integrity/ownership failure"
+    if schema.text(value, "active") not in seen:
+        raise "setup: active generation is not retained in receipt"
+    return value
+
+fn _generation(value: dict[str,json]) -> str:
+    digest = schema.text(value, "digest")
+    schema.hash_text(digest)
+    return "versions/" + digest
+
+fn installed_receipt(destination: str, id: str) -> json:
+    root = path.absolute(destination)
+    if fs.kind(path.combine(root, "receipt.json")) != "file":
+        raise "setup: installation has no regular receipt"
+    native.check(native.wood_setup_open(root, 0), "lock installation for inspection")
+    value: dict[str,json] = {}
+    try:
+        value = _receipt(root, id)
+    except err:
+        native.wood_setup_close()
+        raise err
+    native.wood_setup_close()
+    return json(value)
+
+fn _hook(hooks: list[callable(str,str,json) -> json], phase: str, root: str, value: json) -> json:
+    if len(hooks) != 1:
+        raise "setup: Windows integration requires its original frontend for recovery"
+    return hooks[0](phase, root, value)
+
+fn _remove_owned(root: str, files: list[json], directories: list[json], strict: bool, deferred: list[str] = [], hooks: list[callable(str,str,json) -> json] = []) -> int:
+    preserved = 0
+    for item in files:
+        entry = schema.object(item)
+        name = schema.text(entry, "name")
+        schema.relative(name)
+        digest = schema.text(entry, "sha256")
+        schema.hash_text(digest)
+        if len(hooks) > 0:
+            _hook(hooks, "uninstall_progress", root, json(name))
+        kind = _kind(name)
+        if name in deferred:
+            if kind != 1 or native.digest(path.combine(root, name)) != digest:
+                raise "setup: deferred uninstaller was modified"
+            continue
+        if kind == 1 and native.digest(path.combine(root, name)) == digest:
+            native.check(native.wood_setup_remove(name, 0), "remove owned file " + name)
+        elif kind != 0:
+            preserved += 1
+    for index in range(len(directories) - 1, -1, -1):
+        name = json_str(directories[index])
+        schema.relative(name)
+        if _kind(name) == 2:
+            # A nonempty directory may contain user additions. Never recurse.
+            if native.wood_setup_remove(name, 1) < 0:
+                preserved += 1
+        elif _kind(name) != 0:
+            preserved += 1
+    if strict and preserved != 0:
+        raise "setup: recovery preserved modified/unknown files; retain journal and review destination"
+    return preserved
+
+fn _recover(root: str, id: str, hooks: list[callable(str,str,json) -> json] = []):
+    if _kind("uninstall.json") != 0:
+        pending = schema.object(_read(root, "uninstall.json"))
+        if schema.text(pending, "id") != id:
+            raise "setup: uninstall journal belongs to another application"
+        if _kind("receipt.json") != 0:
+            _hook(hooks, "rollback", root, pending["plan"])
+        else:
+            _hook(hooks, "apply", root, pending["plan"])
+        native.check(native.wood_setup_remove("uninstall.json", 0), "finish interrupted uninstall integration")
+    if _kind("journal.json") == 0:
+        return
+    journal = schema.object(_read(root, "journal.json"))
+    if json_int(journal["format"]) != 1 or schema.text(journal, "id") != id:
+        raise "setup: recovery journal belongs to another application/format"
+    # A committed receipt makes this an interrupted post-commit journal cleanup.
+    receipt = _receipt(root, id)
+    transaction = schema.text(journal, "transaction")
+    schema.hash_text(transaction)
+    committed = "transaction" in receipt and schema.text(receipt, "transaction") == transaction
+    generation = _generation(journal)
+    for item in json_list(journal["files"]):
+        if not starts_with(schema.text(schema.object(item), "name"), generation + "/"):
+            raise "setup: recovery file is outside its generation"
+    for item in json_list(journal["directories"]):
+        name = json_str(item)
+        if name not in ["versions", generation] and not starts_with(name, generation + "/"):
+            raise "setup: recovery directory is outside its generation"
+    if not committed:
+        if "integration" in journal:
+            _hook(hooks, "rollback", root, journal["integration"])
+        _remove_owned(root, json_list(journal["files"]), json_list(journal["directories"]), true)
+    native.check(native.wood_setup_remove("journal.json", 0), "complete recovery")
+
+fn _directory(name: str, mut_journal: dict[str,json]) -> dict[str,json]:
+    if _kind(name) == 0:
+        dirs = json_list(mut_journal["directories"])
+        append(dirs, json(name))
+        mut_journal["directories"] = json(dirs)
+        _put("journal.json", json(mut_journal), true)
+        native.check(native.wood_setup_mkdir(name), "create " + name)
+    elif _kind(name) != 2:
+        raise "setup: destination contains a link or file where a directory is needed"
+    return mut_journal
+
+fn install(payload: bundle.Bundle, destination: str, progress: fn(int, int, str) -> bool, hooks: list[callable(str,str,json) -> json] = []) -> str:
+    expected = "windows-x86_64" if native.wood_setup_platform() == 1 else "linux-x86_64"
+    if payload.app.architecture != expected:
+        raise "setup: payload architecture does not match host " + expected
+    # Verify ALL bytes before touching the destination, and again while copying.
+    bundle.verify(payload, progress)
+    root = path.absolute(destination)
+    if fs.kind(root) == "directory":
+        names = fs.entries(root, 16384)
+        if len(names) != 0 and names != [".setup-lock"] and fs.kind(path.combine(root, "receipt.json")) != "file" and fs.kind(path.combine(root, "journal.json")) != "file" and fs.kind(path.combine(root, "uninstall.json")) != "file":
+            raise "setup: choose an empty directory or this application's managed installation"
+    elif fs.kind(root) != "missing":
+        raise "setup: destination must be a regular directory, not a link/file"
+    native.check(native.wood_setup_open(root, 1), "open/lock installation directory")
+    generation = "versions/" + payload.digest
+    try:
+        _recover(root, payload.app.id, hooks)
+        receipt = _receipt(root, payload.app.id)
+        history = json_list(receipt["history"])
+        existing = false
+        for item in history:
+            if schema.text(schema.object(item), "digest") == payload.digest:
+                existing = true
+        if len(history) >= 32 and not existing:
+            raise "setup: at most 32 retained generations; uninstall before adding another"
+        empty: list[json] = []
+        journal = {"format": json(1), "id": json(payload.app.id), "digest": json(payload.digest), "transaction": json(native.nonce()), "files": json(empty), "directories": json(empty)}
+        if len(hooks) > 0:
+            journal["integration"] = _hook(hooks, "prepare", root, json({"receipt": json(receipt), "generation": json(generation)}))
+        elif "integration" in receipt:
+            raise "setup: managed Windows integration requires its original frontend"
+        _put("journal.json", json(journal))
+        journal = _directory("versions", journal)
+        journal = _directory(generation, journal)
+        for i in range(len(payload.app.files)):
+            entry = payload.app.files[i]
+            if not progress(i, len(payload.app.files), "Install " + entry.name):
+                raise "setup: cancelled"
+            name = generation + "/" + entry.name
+            pieces = split(name, "/")
+            for n in range(3, len(pieces)):
+                journal = _directory(join(pieces[:n], "/"), journal)
+            item = json({"name": json(name), "sha256": json(entry.digest)})
+            kind = _kind(name)
+            if kind == 0:
+                planned = json_list(journal["files"])
+                append(planned, item)
+                journal["files"] = json(planned)
+                _put("journal.json", json(journal), true)
+                native.check(native.wood_setup_extract(payload.file, entry.offset, entry.size, name, entry.digest), "deploy " + entry.name)
+            elif kind != 1 or native.digest(path.combine(root, name)) != entry.digest:
+                raise "setup: refusing to overwrite modified or unknown file '" + name + "'"
+        retained: list[json] = []
+        for old in history:
+            if schema.text(schema.object(old), "digest") != payload.digest:
+                append(retained, old)
+        append(retained, json({"digest": json(payload.digest), "metadata": payload.metadata}))
+        receipt["history"] = json(retained)
+        receipt["active"] = json(generation)
+        receipt["transaction"] = journal["transaction"]
+        if len(hooks) > 0:
+            if not progress(len(payload.app.files), len(payload.app.files), "Finalize installation"):
+                raise "setup: cancelled"
+            _hook(hooks, "apply", root, journal["integration"])
+            receipt["integration"] = journal["integration"]
+        _put("receipt.json", json(receipt), _kind("receipt.json") != 0)
+        native.check(native.wood_setup_remove("journal.json", 0), "finish transaction")
+    except err:
+        # Crash recovery uses exactly this same durable journal on the next run.
+        try:
+            _recover(root, payload.app.id, hooks)
+        except recovery_error:
+            native.wood_setup_close()
+            raise "setup: " + err.message + "; recovery: " + recovery_error.message
+        native.wood_setup_close()
+        raise err
+    native.wood_setup_close()
+    return path.combine(root, generation)
+
+fn uninstall(destination: str, id: str, hooks: list[callable(str,str,json) -> json] = [], deferred: list[str] = []) -> int:
+    schema.identifier(id)
+    root = path.absolute(destination)
+    if fs.kind(path.combine(root, "receipt.json")) != "file" and fs.kind(path.combine(root, "journal.json")) != "file" and fs.kind(path.combine(root, "uninstall.json")) != "file":
+        raise "setup: destination has no managed receipt or recovery journal"
+    native.check(native.wood_setup_open(root, 0), "open/lock installation directory")
+    preserved = 0
+    try:
+        _recover(root, id, hooks)
+        if _kind("receipt.json") == 0:
+            native.wood_setup_close()
+            return 0
+        receipt = _receipt(root, id)
+        if "integration" in receipt and len(hooks) != 1:
+            raise "setup: managed Windows uninstall requires its original frontend"
+        plan: dict[str,json] = {}
+        if "integration" in receipt:
+            plan = schema.object(_hook(hooks, "uninstall_prepare", root, json(receipt)))
+            _put("uninstall.json", json({"id": json(id), "plan": json(plan)}))
+        for old in json_list(receipt["history"]):
+            value = schema.object(old)
+            generation = _generation(value)
+            app = schema.decode(value["metadata"])
+            if app.id != id:
+                raise "setup: corrupt generation ownership"
+            # Derive every owned name/hash from the validated original manifest.
+            files: list[json] = []
+            dirs: list[json] = [json(generation)]
+            seen: dict[str,bool] = {}
+            for entry in app.files:
+                name = generation + "/" + entry.name
+                append(files, json({"name": json(name), "sha256": json(entry.digest)}))
+                pieces = split(name, "/")
+                for n in range(3, len(pieces)):
+                    parent = join(pieces[:n], "/")
+                    if parent not in seen:
+                        seen[parent] = true
+                        append(dirs, json(parent))
+            preserved += _remove_owned(root, files, dirs, false, deferred, hooks)
+        if "integration" in receipt:
+            _hook(hooks, "apply", root, json(plan))
+        if _kind("receipt.json") == 1:
+            native.check(native.wood_setup_remove("receipt.json", 0), "remove receipt")
+        if _kind("versions") == 2:
+            native.wood_setup_remove("versions", 1)
+        if _kind("uninstall.json") != 0:
+            native.check(native.wood_setup_remove("uninstall.json", 0), "finish uninstall integration")
+    except err:
+        native.wood_setup_close()
+        raise err
+    native.wood_setup_close()
+    return preserved

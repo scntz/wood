@@ -1,0 +1,67 @@
+import std.io as io
+import std.task as tasks
+import std.fs as fs
+
+fn fail_output(message: json) -> json:
+    if json_bool(message):
+        eprint("worker", 17, [1, 2])
+    else:
+        print("worker", 17, [1, 2])
+    return json(false)
+
+arguments = args()
+marker = arguments[0]
+stderr = starts_with(arguments[1], "stderr")
+# A truly closed descriptor must be exercised before another open could reuse
+# its number. Invalid-write handles below additionally cover resource unwinding.
+if ends_with(arguments[1], "closed"):
+    caught = false
+    try:
+        fail_output(json(stderr))
+    except err:
+        caught = err.code == "R4008" and err.message == "could not write to output stream"
+        assert(err.line == (7 if stderr else 9) and err.column == 9)
+    assert(caught)
+    write_text(marker, "caught and cleaned\n")
+    exit(0)
+initial_signals = signal_state()
+for attempt in range(2):
+    resource = io.open(marker+".temporary", "w")
+    try:
+        with resource as scoped:
+            io.write(resource, "scope")
+            if stderr:
+                eprint("direct", 42, true, None)
+            else:
+                print("direct", 42, true, None)
+        assert(false)
+    except err:
+        assert(err.code == "R4008" and err.message == "could not write to output stream")
+        assert(err.line == (34 if stderr else 36) and err.column == 17)
+    assert(io.closed(resource))
+assert(signal_state() == initial_signals)
+with tasks.spawn(fail_output, json(stderr)) as job:
+    for attempt in range(2):
+        try:
+            tasks.wait(job, 30000)
+            assert(false)
+        except err:
+            assert(err.code == "R4008" and err.message == "could not write to output stream")
+            assert(err.line == (7 if stderr else 9) and err.column == 9)
+assert(signal_state() == initial_signals)
+write_text(marker, "caught and cleaned\n")
+
+fn signal_state() -> list[bool]:
+    # Linux-only observation of this thread; no /proc dependency in the runtime.
+    # Inspect only SIGPIPE, allowing unrelated signals to change normally.
+    if fs.kind("/proc/thread-self/status") != "file":
+        return []
+    text = ""
+    with io.open("/proc/thread-self/status", "r") as status:
+        text = io.read_all(status, 65536)
+    result: list[bool] = []
+    for line in split(text, "\n"):
+        if starts_with(line, "SigBlk:") or starts_with(line, "SigPnd:"):
+            append(result, find("0123456789abcdef", line[-4])%2 == 1)
+    assert(len(result) == 2)
+    return result

@@ -1,0 +1,22 @@
+# Exact error values (including source positions) are compared across backends.
+import std.num as num
+
+fn report[F](action: F):
+    caught = false
+    try:
+        action()
+    except err:
+        print(json_dump(err))
+        caught = true
+    assert(caught)
+
+report(fn() => array_full(-1,0))
+report(fn() => array_full([9223372036854775807,2],0))
+report(fn() => array_from_list([1,2])[3])
+report(fn() => num.reshape(num.ones(3),(2,2)))
+report(fn() => num.ones((2,3))[0])
+report(fn() => num.transpose(num.ones((2,3)),[0,0]))
+report(fn() => num.ones(2) / 0)
+report(fn() => num.sum(num.from_list([9223372036854775807,1])))
+report(fn() => num.integers(num.from_list([9223372036854775808.0])))
+report(fn() => num.sqrt(-1.0))

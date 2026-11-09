@@ -1,0 +1,9 @@
+from report import summarize
+
+assert(summarize("3\n1\n2\n") == "count: 3\nsum: 6\nsorted: [1, 2, 3]\n")
+assert(summarize("") == "count: 0\nsum: 0\nsorted: []\n")
+try:
+    summarize("-1\n")
+    assert(false, "negative measurements must fail")
+except err:
+    assert(err.code == "R4010")

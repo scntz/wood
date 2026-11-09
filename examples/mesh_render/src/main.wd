@@ -1,0 +1,13 @@
+# Renders a mesh to a PNG, with std.geometry and the scene module of wood_image.
+# wood run examples/mesh_render -- torus.png
+# wood run examples/mesh_render -- model.png model.obj
+import image.codecs as codecs
+import image.scene as scene
+import std.geometry as geo
+
+arguments = args()
+if len(arguments) != 1 and len(arguments) != 2:
+    raise "usage: mesh_render OUTPUT.png [MODEL.obj]"
+mesh = geo.read_obj(arguments[1]) if len(arguments) == 2 else geo.torus(64,32)
+codecs.save(arguments[0],scene.render(mesh,640,480,scene.framing(mesh),scene.style()))
+print("wrote",arguments[0])

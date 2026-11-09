@@ -1,0 +1,185 @@
+# RGBA8 images, pixel operations and 2D drawing in pure Wood.
+record Image:
+    width: int
+    height: int
+    pixels: array[int]
+
+record Color:
+    r: int
+    g: int
+    b: int
+    a: int
+
+fn rgb(r: int, g: int, b: int) -> Color:
+    return Color(r, g, b, 255)
+
+fn new(width: int, height: int) -> Image:
+    return filled(width, height, Color(0, 0, 0, 0))
+
+fn filled(width: int, height: int, fill: Color) -> Image:
+    if width < 1 or height < 1 or width > 65535 or height > 65535 or width*height > 268435456:
+        raise "unsupported image dimensions"
+    result = Image(width, height, array_full(width*height*4, 0))
+    for i in range(width*height):
+        result.pixels[i*4] = fill.r
+        result.pixels[i*4+1] = fill.g
+        result.pixels[i*4+2] = fill.b
+        result.pixels[i*4+3] = fill.a
+    return result
+
+fn get(image: Image, x: int, y: int) -> Color:
+    if x < 0 or y < 0 or x >= image.width or y >= image.height:
+        raise "pixel coordinate out of bounds"
+    at = (y*image.width+x)*4
+    return Color(image.pixels[at], image.pixels[at+1], image.pixels[at+2], image.pixels[at+3])
+
+fn crop(image: Image, x: int, y: int, width: int, height: int) -> Image:
+    if x < 0 or y < 0 or width < 1 or height < 1 or x+width > image.width or y+height > image.height:
+        raise "crop rectangle is outside the image"
+    result = new(width, height)
+    for row in range(height):
+        for column in range(width*4):
+            result.pixels[(row*width)*4+column] = image.pixels[((y+row)*image.width+x)*4+column]
+    return result
+
+fn resize(image: Image, width: int, height: int) -> Image:
+    # Bilinear for smooth results in both directions.
+    result = new(width, height)
+    for row in range(height):
+        source_y = (float(row)+0.5)*float(image.height)/float(height)-0.5
+        top = int(source_y) if source_y > 0.0 else 0
+        bottom = top+1 if top+1 < image.height else top
+        vertical = source_y-float(top) if source_y > 0.0 else 0.0
+        for column in range(width):
+            source_x = (float(column)+0.5)*float(image.width)/float(width)-0.5
+            left = int(source_x) if source_x > 0.0 else 0
+            right = left+1 if left+1 < image.width else left
+            horizontal = source_x-float(left) if source_x > 0.0 else 0.0
+            for channel in range(4):
+                a = float(image.pixels[(top*image.width+left)*4+channel])
+                b = float(image.pixels[(top*image.width+right)*4+channel])
+                c = float(image.pixels[(bottom*image.width+left)*4+channel])
+                d = float(image.pixels[(bottom*image.width+right)*4+channel])
+                upper = a+(b-a)*horizontal
+                lower = c+(d-c)*horizontal
+                result.pixels[(row*width+column)*4+channel] = int(upper+(lower-upper)*vertical+0.5)
+    return result
+
+fn map_pixels(image: Image, transform: fn(Color) -> Color) -> Image:
+    result = image
+    for i in range(image.width*image.height):
+        at = i*4
+        color = transform(Color(image.pixels[at], image.pixels[at+1], image.pixels[at+2], image.pixels[at+3]))
+        result.pixels[at] = color.r
+        result.pixels[at+1] = color.g
+        result.pixels[at+2] = color.b
+        result.pixels[at+3] = color.a
+    return result
+
+fn _gray(c: Color) -> Color:
+    level = (c.r*299+c.g*587+c.b*114)//1000
+    return Color(level, level, level, c.a)
+
+fn grayscale(image: Image) -> Image:
+    return map_pixels(image, _gray)
+
+fn _inverted(c: Color) -> Color:
+    return Color(255-c.r, 255-c.g, 255-c.b, c.a)
+
+fn invert(image: Image) -> Image:
+    return map_pixels(image, _inverted)
+
+fn flip_horizontal(image: Image) -> Image:
+    result = image
+    for y in range(image.height):
+        for x in range(image.width):
+            for channel in range(4):
+                result.pixels[(y*image.width+x)*4+channel] = image.pixels[(y*image.width+image.width-1-x)*4+channel]
+    return result
+
+fn flip_vertical(image: Image) -> Image:
+    result = image
+    for y in range(image.height):
+        for x in range(image.width*4):
+            result.pixels[y*image.width*4+x] = image.pixels[(image.height-1-y)*image.width*4+x]
+    return result
+
+fn set_pixel(image: Image, x: int, y: int, color: Color) -> Image:
+    # Value semantics: returns a changed copy. Out-of-bounds drawing is clipped.
+    if x < 0 or y < 0 or x >= image.width or y >= image.height:
+        return image
+    result = image
+    at = (y*image.width+x)*4
+    result.pixels[at] = color.r
+    result.pixels[at+1] = color.g
+    result.pixels[at+2] = color.b
+    result.pixels[at+3] = color.a
+    return result
+
+fn fill_rect(image: Image, x: int, y: int, width: int, height: int, color: Color) -> Image:
+    result = image
+    for row in range(y if y > 0 else 0, y+height if y+height < image.height else image.height):
+        for column in range(x if x > 0 else 0, x+width if x+width < image.width else image.width):
+            at = (row*image.width+column)*4
+            result.pixels[at] = color.r
+            result.pixels[at+1] = color.g
+            result.pixels[at+2] = color.b
+            result.pixels[at+3] = color.a
+    return result
+
+fn draw_line(image: Image, x0: int, y0: int, x1: int, y1: int, color: Color) -> Image:
+    # Bresenham with clipping at the image edge.
+    result = image
+    dx = x1-x0 if x1 >= x0 else x0-x1
+    dy = y0-y1 if y1 >= y0 else y1-y0
+    step_x = 1 if x0 < x1 else -1
+    step_y = 1 if y0 < y1 else -1
+    drift = dx+dy
+    x = x0
+    y = y0
+    while true:
+        if x >= 0 and y >= 0 and x < image.width and y < image.height:
+            at = (y*image.width+x)*4
+            result.pixels[at] = color.r
+            result.pixels[at+1] = color.g
+            result.pixels[at+2] = color.b
+            result.pixels[at+3] = color.a
+        if x == x1 and y == y1:
+            break
+        doubled = 2*drift
+        if doubled >= dy:
+            drift += dy
+            x += step_x
+        if doubled <= dx:
+            drift += dx
+            y += step_y
+    return result
+
+fn fill_circle(image: Image, cx: int, cy: int, radius: int, color: Color) -> Image:
+    result = image
+    for y in range(cy-radius, cy+radius+1):
+        for x in range(cx-radius, cx+radius+1):
+            if (x-cx)*(x-cx)+(y-cy)*(y-cy) <= radius*radius and x >= 0 and y >= 0 and x < image.width and y < image.height:
+                at = (y*image.width+x)*4
+                result.pixels[at] = color.r
+                result.pixels[at+1] = color.g
+                result.pixels[at+2] = color.b
+                result.pixels[at+3] = color.a
+    return result
+
+fn blit(target: Image, source: Image, x: int, y: int) -> Image:
+    # Source-over alpha compositing, clipped to the target.
+    result = target
+    for row in range(source.height):
+        for column in range(source.width):
+            tx = x+column
+            ty = y+row
+            if tx < 0 or ty < 0 or tx >= target.width or ty >= target.height:
+                continue
+            from_at = (row*source.width+column)*4
+            to_at = (ty*target.width+tx)*4
+            alpha = source.pixels[from_at+3]
+            for channel in range(3):
+                result.pixels[to_at+channel] = (source.pixels[from_at+channel]*alpha+target.pixels[to_at+channel]*(255-alpha))//255
+            result.pixels[to_at+3] = alpha+target.pixels[to_at+3]*(255-alpha)//255
+    return result

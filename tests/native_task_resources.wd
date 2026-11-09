@@ -1,0 +1,23 @@
+import std.task as tasks
+import std.fs as fs
+extern fn wood_task_handles() -> int
+fn identity(message: json) -> json:
+    return message
+fn handles() -> int:
+    if fs.kind("/proc/self/fd") == "directory":
+        return len(fs.entries("/proc/self/fd",4096))
+    return wood_task_handles()
+with tasks.spawn(identity,json_null()) as warmup:
+    tasks.wait(warmup,10000)
+before = handles()
+assert(before >= 0)
+retained: list[task] = []
+for i in range(200):
+    work = tasks.spawn(identity,json(i))
+    assert(tasks.wait(work,10000) == json(i))
+    tasks.close(work)
+    append(retained,work)
+after = handles()
+assert(after <= before+4,"closed task aliases retained native handles")
+assert(len(retained) == 200)
+print("native task resource bounds passed",before,after)

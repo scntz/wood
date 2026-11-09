@@ -1,0 +1,35 @@
+import installer.bundle as bundle
+import installer.engine as engine
+import std.path as path
+import std.fs as fs
+
+fn allow(done: int, total: int, operation: str) -> bool:
+    return true
+
+arguments = args()
+payload = bundle.load(arguments[0])
+raw = read_text(arguments[0])
+first = payload.app.files[0]
+assert(first.size > 0)
+offset = first.offset
+bad = raw[:offset] + byte_string(byte_value(raw[offset]) ^ 1) + raw[offset + 1:]
+file = path.combine(arguments[1], "corrupt-payload")
+root = path.combine(arguments[1], "must-not-exist")
+write_text(file, bad)
+caught = false
+try:
+    engine.install(bundle.load(file), root, allow)
+except err:
+    caught = "payload integrity verification failed" in err.message
+assert(caught and fs.kind(root) == "missing")
+footer = raw[-112:]
+offset = bundle.decimal(footer[8:28])
+bad = raw[:offset] + byte_string(byte_value(raw[offset]) ^ 1) + raw[offset + 1:]
+write_text(file, bad)
+caught = false
+try:
+    bundle.load(file)
+except err:
+    caught = "manifest integrity verification failed" in err.message
+assert(caught)
+print("installer bundle integrity contracts passed")

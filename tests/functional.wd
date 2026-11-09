@@ -1,0 +1,48 @@
+import std.functional as functional
+
+fn odd(value: int) -> bool:
+    return value % 2 != 0
+
+fn stop_after_match(value: int) -> bool:
+    if value == 0:
+        raise 'find_first evaluated past a matching element'
+    return value == 1
+
+fn box[T](value: T) -> list[T]:
+    result: list[T] = [value]
+    return result
+
+fn left[T](value: T, count: int) -> T:
+    if count == 0:
+        return value
+    return right(value, count - 1)
+
+fn right[T](value: T, count: int) -> T:
+    return left(value, count)
+
+record Outer:
+    value: tuple[int, Inner | None]
+
+record Inner:
+    name: str
+
+assert(functional.lookup({'a':3}, 'a') == 3)
+assert(functional.lookup({'a':3}, 'b') is None)
+assert(functional.lookup({1:'a'}, key=1) == 'a')
+assert(functional.lookup(key=false, items={false:[1], true:[2]}) == [1])
+empty: dict[str,list[int]] = {}
+assert(functional.lookup(empty, 'missing') is None)
+optional_values: dict[str,int | None] = {'x':None,'y':3}
+assert(functional.lookup(optional_values, 'x') is None)
+assert(functional.lookup(optional_values, 'y') == 3)
+assert(functional.enumerate(['a','b']) == [(0,'a'),(1,'b')])
+assert(functional.zip([1,2,3], ['a']) == [(1,'a')])
+assert(functional.find_first(stop_after_match, [1,0]) == 1)
+assert(functional.partition(odd, [1,2,3,4]) == ([1,3],[2,4]))
+assert(box(('x',None)) == [('x',None)])
+assert(left('mutual recursion', 100) == 'mutual recursion')
+outer = Outer((1, Inner('nested')))
+assert(json_dump(outer) == '{"value":[1,{"name":"nested"}]}')
+assert(unwrap(outer.value[-1]).name == 'nested')
+assert(Outer((2,None)).value[1] is None)
+print('native generic algorithms passed')

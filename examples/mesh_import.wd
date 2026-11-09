@@ -1,0 +1,24 @@
+# wood examples/mesh_import.wd -- input.obj output.obj
+import std.geometry as geo
+import std.linalg as la
+import std.num as num
+
+record MeshSummary:
+    vertices: int
+    triangles: int
+    input_area: float
+    output_area: float
+    low: la.Vec3
+    high: la.Vec3
+
+arguments = args()
+if len(arguments) != 2:
+    raise "usage: mesh_import INPUT.obj OUTPUT.obj"
+mesh = geo.read_obj(arguments[0])
+limits = geo.bounds(mesh)
+print("input bounds:",limits)
+matrix = num.matmul(la.translation(1.0,2.0,-3.0),la.scaling(2.0,2.0,2.0))
+result = geo.transformed(mesh,matrix)
+geo.write_obj(result,arguments[1])
+output_bounds = geo.bounds(result)
+print(json_dump(MeshSummary(num.shape(result.vertices)[0],num.shape(result.triangles)[0],geo.area(mesh),geo.area(result),output_bounds[0],output_bounds[1])))

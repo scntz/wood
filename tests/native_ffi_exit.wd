@@ -1,0 +1,5 @@
+extern fn wood_native_visit(value:int,callback:fn(int)->void)
+fn stop(value:int):
+    exit(value)
+wood_native_visit(23,stop)
+assert(false,"foreign exit was not propagated")

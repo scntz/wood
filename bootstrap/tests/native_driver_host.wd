@@ -1,0 +1,83 @@
+import driver_host as host
+import std.path as path
+import std.fs as fs
+
+fixture = args()[0]
+root = host.temporary()
+assert(fs.kind(root) == "directory")
+assert(not host.same(root,path.combine(root,"missing")))
+sub = path.combine(root,"árbol 🌳/nested")
+assert(fs.make_dirs(sub))
+assert(not fs.make_dirs(sub))
+file = path.combine(sub,"binary.txt")
+host.atomic(file,"a\0b\r\n")
+assert(fs.size(file) == 5)
+assert(read_text(file) == "a\0b\r\n")
+assert(host.same(file,path.combine(sub,"./binary.txt")))
+copy = path.combine(sub,"copy")
+host.call("copy_new",{"from":json(file),"to":json(copy)})
+try:
+    host.call("copy_new",{"from":json(file),"to":json(copy)})
+    assert(false)
+except err:
+    assert(starts_with(err.message,"__WOOD_DRIVER__D5001:"))
+assert(read_text(copy) == "a\0b\r\n")
+host.call("rename",{"from":json(copy),"to":json(copy+" renamed")})
+assert(not path_exists(copy))
+try:
+    host.release(sub)
+    assert(false)
+except err:
+    assert(starts_with(err.message,"__WOOD_DRIVER__D5001:"))
+assert(fs.kind(sub) == "directory")
+log = path.combine(root,"process.log")
+assert(host.process([fixture,"--echo","","two words","quote\"\\","árbol & %!"],log,5000,1024) == 17)
+assert(read_text(log) == "0:\n9:two words\n7:quote\"\\\n11:árbol & %!\nstderr\n")
+for mode in ["--flood","--sleep","--tree"]:
+    arguments = [fixture,mode]
+    if mode == "--tree":
+        append(arguments,path.combine(root,"escaped.txt"))
+    try:
+        host.process(arguments,log,100 if mode == "--sleep" else 500,1024 if mode == "--flood" else 16777216)
+        assert(false)
+    except err:
+        expected = "D5004" if mode == "--flood" else "D5003"
+        assert(starts_with(err.message,"__WOOD_DRIVER__"+expected+":"),err.message)
+    if mode == "--flood":
+        assert(fs.size(log) == 1024)
+    if mode == "--tree":
+        assert("spawned" in read_text(log))
+        # Let an escaped ordinary descendant reach its marker write, if any.
+        assert(host.process([fixture,"--marker",path.combine(root,"wait.txt")],log,5000,1024) == 0)
+assert(not path_exists(path.combine(root,"escaped.txt")))
+try:
+    host.process([fixture,"bad\0argument"],log,5000,1024)
+    assert(false)
+except err:
+    assert(starts_with(err.message,"__WOOD_DRIVER__D5001:") or err.code == "R4012")
+assert(host.process([fixture,"--echo"],log,5000,7) == 17)
+assert(read_text(log) == "stderr\n")
+assert(host.process([fixture,"--stdin-eof"],log,5000,1024,false) == 0)
+if fs.kind("/proc/self/exe") != "missing":
+    try:
+        host.process([fixture,"--cancel"],log,2000,1024)
+        assert(false)
+    except err:
+        assert(starts_with(err.message,"__WOOD_DRIVER__D5005:"))
+# The private transport accepts an escaped request exceeding public json_parse's
+# 16 MiB source budget; the actual atomic document remains a bounded 3 MiB.
+large = "\0"*3000000
+host.atomic(file,large)
+assert(fs.size(file) == 3000000)
+assert(read_text(file) == large)
+assert(fs.remove(file))
+assert(not fs.remove(file))
+try:
+    fs.remove(sub)
+    assert(false)
+except err:
+    assert(err.code == "R4008")
+host.release(root)
+assert(not path_exists(root))
+host.call("cleanup")
+print("native driver filesystem/process bridge passed")

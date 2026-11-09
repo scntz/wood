@@ -1,0 +1,89 @@
+{
+  "format": 1,
+  "stage": "semantic-preparation",
+  "production_replacement": false,
+  "integrated_compiler_contract": "compiler-contract.json",
+  "integration_note": "This file describes the unchanged default isolated preparation API. The separate integrated body analyzer opts into resumable expression requests using Checker.requests/requested/requested_expected; construct Checker through expressions.checker so those internal fields are initialized.",
+  "python_required": false,
+  "bodies_checked": false,
+  "lock_verified": false,
+  "signature_contract": "semantic-contract.json",
+  "entry": "preparation_frontend.load(input: str, standards: dict[str,str]) -> semantic_preparation.Result",
+  "implemented": [
+    "call-independent bidirectional expression typing with caller-supplied concrete bindings",
+    "literal bounds and canonical decimal spelling, including INT64_MIN",
+    "contextual lists, dictionaries, tuples and optional expected types",
+    "scalar, collection, numerical array, optional and comparison operator rules",
+    "tuple literal indexing, collection/array indexing and slices",
+    "record/error fields and conservative identifier suggestions",
+    "return-type joins for already-typed return sites",
+    "eager literal-default type checking for unspecialized file-scope functions and non-generic methods of non-generic records",
+    "structural exit masks, unreachable statements, loop-control context, explicit return completeness",
+    "structural closure traversal with independent loop and expression contexts"
+  ],
+  "not_implemented": [
+    "complete body expression typing", "lexical scope and symbol binding", "call resolution and argument binding",
+    "return inference dependency scheduling", "generic instantiation and layout validation",
+    "local closure default type checking", "capture and mutation analysis", "comprehension typing",
+    "iterator protocols", "resource type/lifetime analysis", "lowering", "code generation",
+    "lock verification", "self-compilation", "independent native backend"
+  ],
+  "expression_families": ["Integer", "Float", "String", "Bool", "None", "Name", "Tuple", "List", "Dict", "Unary", "Binary", "CompareChain", "Conditional", "Index", "Slice", "Member"],
+  "unsupported_expression_families": ["Call", "Invoke", "Closure", "ListComprehension", "DictComprehension"],
+  "invalid_type_application": "E3024; a standalone TypeApply is invalid in production too",
+  "apis": {
+    "expressions.checker": "owned syntax/pool, concrete name types, resolved declarations, source identity, visit limit, optional nominal generic parameter context -> Checker",
+    "Checker.expression": "syntax expression ID, expected semantic type ID=0 -> actual semantic type ID; contextual hint is not a final assignability check",
+    "Checker.require": "actual type, expected type, token; exact production mismatch diagnostic",
+    "Checker.types": "one semantic type ID per syntax expression; 0 means unvisited/unknown",
+    "Checker.symbols": "special INT64_MIN marker or tuple/field ordinal; not local variable symbol resolution",
+    "return_types.infer": "pool, already-typed Site(type,token) list, function token, source identity -> Result(pool,type,diagnostic); does not type conditions or resolve calls",
+    "control_flow.check": "parser-owned tree, source identity, visit limit, optional inferred-return kind overrides -> Result(statement masks, functions, script exits, visits, diagnostic)",
+    "semantic_preparation.check": "resolved signatures.Result, visit_limit=1048576 -> owned prepared Result; default checking then structural flow",
+    "preparation_frontend.load": "signature frontend followed by semantic preparation",
+    "semantic_queries.inspect": "test/benchmark fixture adapter; not a general compiler validation API"
+  },
+  "flow": {
+    "Next": 1, "Returned": 2, "Broken": 4, "Continued": 8, "Raised": 16,
+    "unvisited_statement": 0,
+    "loop": "Next | (body & Returned); deliberately matches existing conservative production rules",
+    "try": "(body & ~Raised) | handler",
+    "deferred_returns": "Unknown return types retain return_check_deferred=true until real body inference",
+    "generic_bodies": "deferred until instantiation; generic record methods are not eagerly checked",
+    "closures": "structural checking only; no capture/type-safety guarantee"
+  },
+  "limits": {
+    "default_visit_limit": 1048576, "maximum_visit_limit": 1048576,
+    "minimum_visit_limit": 1, "expression_depth": 256,
+    "structural_block_depth": 256, "closure_depth": 64,
+    "type_pool": "inherited 2..1048576 nodes; structural type depth 64",
+    "visit_accounting": "default expressions share one budget across modules; flow has one budget per module; these are algorithm limits, not OS heap/stack quotas"
+  },
+  "bootstrap_only_diagnostics": {
+    "B3301": "invalid semantic visit budget or test query mode",
+    "B3302": "semantic expression/control-flow visit budget exceeded",
+    "B3303": "operation needs an unported body/call/specialization stage or unresolved binding"
+  },
+  "ownership": {
+    "input": "parser/loader/binder-produced acyclic arena graph and valid pool IDs; preserve their invariants",
+    "result": "owned values and snapshot semantics; syntax and semantic IDs are separate",
+    "normalization": "integer spellings, contextual literal kind/text and typed facts in an owned output snapshot; coordinates preserved",
+    "failure": "preparation exports empty graph/facts/defaults/flows with located diagnostic",
+    "low_level_errors": "Checker.fail records problem and raises; pool exhaustion can propagate R4010 from low-level primitives; preparation translates it to B3202",
+    "record_context": "simple field substitution requires explicit nominal generic parameter names; does not instantiate records or establish layouts"
+  },
+  "wire": {
+    "format": 1,
+    "fields": ["format", "stage", "bodies_checked", "lock_verified", "default_scope", "diagnostic", "signatures", "defaults", "flows", "deferred_defaults"],
+    "default_scope": "eager-unspecialized",
+    "nested_signatures": "existing format-1 signature reply is embedded unchanged",
+    "default_fields": ["module", "declaration", "parameter", "actual_type", "events"],
+    "event_fields": ["kind", "text_hex", "type", "marker", "offset", "line", "column"],
+    "flow_module_fields": ["statements", "functions", "script"],
+    "flow_function_fields": ["statement", "exits", "return_check_deferred"],
+    "identities": "module/declaration/parameter indices refer to the owned preparation result; statement and expression positions use module-local syntax arenas; no stable cross-build symbol ABI",
+    "encoding": "JSON Lines; raw text/messages are lowercase hex bytes; exact byte coordinates",
+    "priority": "isolated prepass errors are not a promise of complete production first-error ordering",
+    "exit_status": {"inspect_success": 0, "inspect_frontend_failure": 1, "usage": 2, "runtime_failure": 70}
+  }
+}

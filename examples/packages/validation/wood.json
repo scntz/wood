@@ -1,0 +1,1 @@
+{"format":1,"name":"validation","version":"1.0.0","source":"src","dependencies":{"rules":{"path":"../rules","version":"1.0.0"}}}

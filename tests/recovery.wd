@@ -1,0 +1,156 @@
+from std.math import gcd, lcm, pow_int, clamp_int
+import std.stats as stats
+from std.collections import sorted_int, binary_search
+
+fn reject() -> int:
+    raise "invalid input"
+
+fn rethrow() -> int:
+    try:
+        return reject()
+    except err:
+        assert(err.code == "R4010")
+        raise err
+
+handled = 0
+try:
+    int("bad")
+except err:
+    assert(err.code == "R4003")
+    assert(len(err.message) > 0)
+    assert(err.line > 0)
+    assert(err.column > 0)
+    handled = handled + 1
+
+try:
+    rethrow()
+except err:
+    assert(err.message == "invalid input")
+    assert(err.line == 6)
+    handled = handled + 1
+
+try:
+    read_text("missing-wood-recovery-file.txt")
+except err:
+    assert(err.code == "R4008")
+    handled = handled + 1
+
+try:
+    assert(false, "caught assertion")
+except err:
+    assert(err.code == "R4004")
+    assert(str(err) == "R4004: caught assertion")
+    handled = handled + 1
+assert(handled == 4)
+assert(gcd(48, -18) == 6)
+assert(gcd(0, 0) == 0)
+assert(lcm(6, 15) == 30)
+assert(pow_int(3, 5) == 243)
+assert(pow_int(5, 0) == 1)
+assert(clamp_int(15, 0, 10) == 10)
+assert(stats.sum_int([1, 2, 3]) == 6)
+assert(stats.mean([1.0, 2.0, 3.0]) == 2.0)
+assert(stats.mean([1.0e308, -1.0e308]) == 0.0)
+assert(stats.mean([-1.0e308, 1.0e308]) == 0.0)
+assert(stats.mean([1.0e308, 1.0e308]) == 1.0e308)
+assert(stats.mean([-1.0e308, -1.0e308]) == -1.0e308)
+assert(stats.mean([1.0e308, -1.0e308, 3.0]) == 1.0)
+scaled_variance = stats.variance([1.0e154, -1.0e154, 1.0e154, -1.0e154])
+assert(scaled_variance / 1.0e308 > 0.99999999999999)
+assert(scaled_variance / 1.0e308 < 1.00000000000001)
+assert(stats.variance([1.0e308]) == 0.0)
+assert(stats.variance([0.0, -0.0]) == 0.0)
+assert(stats.variance([1.0e308, -1.0e308]) > 1.0e308)
+assert(stats.variance([1.0, 2.0, 3.0]) > 0.6666666666666)
+assert(stats.variance([1.0, 2.0, 3.0]) < 0.6666666666667)
+try:
+    stats.mean([])
+except err:
+    assert(err.code == "R4010")
+    assert(err.file == "<std.stats>")
+
+values = [9, -1, 5, 5, 0, -9223372036854775808, 9223372036854775807]
+ordered = sorted_int(values)
+assert(ordered == [-9223372036854775808, -1, 0, 5, 5, 9, 9223372036854775807])
+assert(values[0] == 9)
+assert(sorted_int([]) == [])
+assert(binary_search(ordered, 5) == 3)
+assert(binary_search(ordered, 4) == -1)
+assert(binary_search([], 1) == -1)
+
+# Exercise sorting across sizes, duplicates, both signs and repeated COW passes.
+seed = 1729
+for size in range(80):
+    sample: list[int] = []
+    for i in range(size):
+        seed = (seed * 48271) % 2147483647
+        append(sample, seed % 31 - 15)
+    result = sorted_int(sample)
+    assert(len(result) == size)
+    for i in range(1, size):
+        assert(result[i - 1] <= result[i])
+    assert(stats.sum_int(sample) == stats.sum_int(result))
+    for needle in range(-16, 17):
+        expected = -1
+        for i in range(size):
+            if expected == -1 and result[i] == needle:
+                expected = i
+        assert(binary_search(result, needle) == expected)
+        original_count = 0
+        sorted_count = 0
+        for item in sample:
+            if item == needle:
+                original_count = original_count + 1
+        for item in result:
+            if item == needle:
+                sorted_count = sorted_count + 1
+        assert(original_count == sorted_count)
+
+for a in range(-20, 21):
+    for b in range(-20, 21):
+        divisor = gcd(a, b)
+        assert(divisor >= 0)
+        if divisor != 0:
+            assert(a % divisor == 0 and b % divisor == 0)
+        assert(lcm(a, b) >= 0)
+        assert(divisor * lcm(a, b) == a * b or divisor * lcm(a, b) == -(a * b))
+
+failures = 0
+try:
+    gcd(-9223372036854775808, 0)
+except err:
+    assert(err.code == "R4001")
+    stored: list[error] = [err]
+    assert(stored[0] == err)
+    try:
+        raise stored[0]
+    except again:
+        assert(again == err)
+    failures = failures + 1
+try:
+    pow_int(2, 63)
+except err:
+    assert(err.code == "R4001")
+    failures = failures + 1
+try:
+    pow_int(1, -1)
+except err:
+    assert(err.code == "R4010")
+    failures = failures + 1
+try:
+    clamp_int(1, 2, 0)
+except err:
+    assert(err.code == "R4010")
+    failures = failures + 1
+try:
+    exit(-1)
+except err:
+    assert(err.code == "R4003")
+    failures = failures + 1
+try:
+    stats.variance([])
+except err:
+    assert(err.code == "R4010")
+    failures = failures + 1
+assert(failures == 6)
+print("recovery and standard modules ok")

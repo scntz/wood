@@ -1,0 +1,258 @@
+# Media Desk: a native desktop library for images and audio, written in wood. It brings
+# together the GUI, image and audio packages, SQLite storage, configuration, logging,
+# file access, background tasks and error handling in one real application.
+import gui.widgets as gui
+import image.image as img
+import image.codecs as codecs
+import audio.buffer as audio
+import audio.wav as wav
+import audio.device as device
+import config.config as config
+import log.log as logging
+import std.fs as fs
+import std.path as path
+import std.sqlite as sql
+import std.task as task
+
+fn lower_name(name: str) -> str:
+    pieces: list[str] = []
+    for byte in name:
+        code = byte_value(byte)
+        append(pieces, byte_string(code+32) if code >= 65 and code <= 90 else byte)
+    return join(pieces, "")
+
+fn media_kind(file: str) -> str:
+    name = lower_name(file)
+    if ends_with(name, ".png") or ends_with(name, ".bmp"):
+        return "image"
+    if ends_with(name, ".wav"):
+        return "audio"
+    return ""
+
+fn scan_worker(payload: json) -> json:
+    # Runs on a background thread, so a large folder never freezes the window.
+    data = json_dict(payload)
+    found: list[json] = []
+    for file in fs.walk_files(json_str(data["folder"]), 20000):
+        task.checkpoint()
+        if media_kind(file) != "":
+            append(found, json(file))
+    gui.post(json_int(data["window"]), 1, json_dump(json(found)))
+    return json(len(found))
+
+fn play_worker(payload: json) -> json:
+    # Playback blocks until finished, so it also belongs on a background thread.
+    data = json_dict(payload)
+    message = "Finished playing"
+    try:
+        sound = wav.load(json_str(data["file"]))
+        device.play(sound, json_float(data["volume"]))
+    except err:
+        message = "Could not play the file: "+err.message
+    gui.post(json_int(data["window"]), 2, message)
+    return json(true)
+
+record Library:
+    connection: database
+    files: list[str]
+
+fn open_tables(connection: database):
+    sql.execute(connection, "CREATE TABLE IF NOT EXISTS media (path TEXT PRIMARY KEY, kind TEXT NOT NULL, added INTEGER NOT NULL DEFAULT (strftime('%s','now')))", [])
+    sql.execute(connection, "CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)", [])
+
+fn load_files(connection: database) -> list[str]:
+    rows = sql.query(connection, "SELECT path FROM media ORDER BY path", [], 100000, 16000000)
+    return [json_str(row["path"]) for row in rows]
+
+fn add_file(connection: database, file: str) -> bool:
+    kind = media_kind(file)
+    if kind == "":
+        raise "Only PNG, BMP and WAV files can be added"
+    return sql.execute(connection, "INSERT OR IGNORE INTO media (path, kind) VALUES (?, ?)", [json(file), json(kind)]) > 0
+
+fn setting(connection: database, name: str, fallback: str) -> str:
+    rows = sql.query(connection, "SELECT value FROM settings WHERE name = ?", [json(name)], 1, 1048576)
+    return json_str(rows[0]["value"]) if len(rows) > 0 else fallback
+
+fn store_setting(connection: database, name: str, value: str):
+    sql.execute(connection, "INSERT INTO settings (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value", [json(name), json(value)])
+
+fn fit(picture: img.Image, width: int, height: int) -> img.Image:
+    # Shrinks to fit the preview, keeping the proportions. Small images keep their size.
+    if picture.width <= width and picture.height <= height:
+        return picture
+    scale = float(width)/float(picture.width)
+    other = float(height)/float(picture.height)
+    if other < scale:
+        scale = other
+    target_width = int(float(picture.width)*scale)
+    target_height = int(float(picture.height)*scale)
+    return img.resize(picture, target_width if target_width > 0 else 1, target_height if target_height > 0 else 1)
+
+fn make_samples(folder: str):
+    # Writes real files so that a new user, and the tests, have something to open.
+    fs.make_dirs(folder)
+    card = img.filled(320, 200, img.rgb(244, 241, 234))
+    card = img.fill_rect(card, 24, 24, 110, 152, img.rgb(120, 78, 44))
+    card = img.fill_circle(card, 226, 100, 62, img.rgb(46, 110, 80))
+    card = img.draw_line(card, 0, 199, 319, 0, img.rgb(20, 20, 20))
+    codecs.save(path.combine(folder, "sample-card.png"), card)
+    codecs.save(path.combine(folder, "sample-gray.bmp"), img.grayscale(card))
+    chord = audio.mix(audio.tone(440.0, 0.4, 22050, 0.4), audio.tone(660.0, 0.4, 22050, 0.3))
+    wav.save(path.combine(folder, "sample-chord.wav"), audio.fade(audio.normalize(chord, 0.8), 0.02))
+    write_text(path.combine(folder, "broken.png"), "this is not an image")
+    print("wrote samples to "+folder)
+
+fn application(token: int) -> int:
+    window = gui.Window(token)
+    options = json_dict(json_parse(window.context()))
+    logger = logging.logger("media-desk", "info", json_str(options["log"]))
+    volume = json_float(options["volume"])
+    with sql.open(json_str(options["database"]), 5000) as connection:
+        open_tables(connection)
+        files = load_files(connection)
+        window.menu("File", 101, "Add file...")
+        window.menu("File", 102, "Quit")
+        window.menu("Help", 103, "About Media Desk")
+        window.label(1, "Folder", 16, 18, 60)
+        window.entry(2, setting(connection, "folder", ""), 76, 16, 402, 28)
+        window.button(3, "Scan", 486, 15, 80)
+        window.button(4, "Add file...", 574, 15, 100)
+        window.listbox(5, 16, 54, 320, 300)
+        window.image(6, 346, 54, 328, 300)
+        window.button(7, "Play", 16, 364, 90)
+        window.button(8, "Remove", 114, 364, 90)
+        window.checkbox(9, "Remember the folder", 216, 367, 200)
+        window.label(10, str(len(files))+" item(s) in your library", 16, 404, 658)
+        window.set_checked(9, setting(connection, "remember", "yes") == "yes")
+        for file in files:
+            window.list_add(5, file)
+        window.show()
+        logging.info(logger, "started", {"items":str(len(files))})
+        scanning: list[task] = []
+        playing: list[task] = []
+        while true:
+            event = window.wait()
+            try:
+                if event.kind == "close" or (event.kind == "menu" and event.control == 102):
+                    break
+                action = ""
+                if event.kind == "click":
+                    if event.control == 3:
+                        action = "scan"
+                    elif event.control == 4:
+                        action = "add"
+                    elif event.control == 7:
+                        action = "play"
+                    elif event.control == 8:
+                        action = "remove"
+                    elif event.control == 9:
+                        store_setting(connection, "remember", "yes" if window.checked(9) else "no")
+                elif event.kind == "menu" and event.control == 101:
+                    action = "add"
+                elif event.kind == "menu" and event.control == 103:
+                    window.alert("About Media Desk", "A native desktop application written in wood.")
+                elif event.kind == "select" and event.control == 5:
+                    action = "show"
+                elif event.kind == "message" and event.control == 1:
+                    added = 0
+                    for value in json_list(json_parse(event.payload)):
+                        if add_file(connection, json_str(value)):
+                            added += 1
+                    files = load_files(connection)
+                    window.list_clear(5)
+                    for file in files:
+                        window.list_add(5, file)
+                    window.set_text(10, "Scan found "+str(added)+" new item(s); "+str(len(files))+" in your library")
+                    logging.info(logger, "scan finished", {"added":str(added)})
+                    for work in scanning:
+                        task.close(work)
+                    scanning = []
+                elif event.kind == "message" and event.control == 2:
+                    window.set_text(10, event.payload)
+                    logging.info(logger, event.payload)
+                    for work in playing:
+                        task.close(work)
+                    playing = []
+                if action == "scan":
+                    folder = window.text(2)
+                    if fs.kind(folder) != "directory":
+                        raise "That folder does not exist: "+folder
+                    if window.checked(9):
+                        store_setting(connection, "folder", folder)
+                    window.set_text(10, "Scanning in the background...")
+                    if len(scanning) == 0:
+                        append(scanning, task.spawn(scan_worker, json({"folder":json(folder),"window":json(token)})))
+                elif action == "add":
+                    file = window.open_file("Add to library", "Media files|*.png;*.bmp;*.wav|All files|*.*")
+                    if file != "":
+                        add_file(connection, file)
+                        files = load_files(connection)
+                        window.list_clear(5)
+                        for item in files:
+                            window.list_add(5, item)
+                        window.set_text(10, "Added "+path.name(file))
+                elif action == "remove":
+                    row = window.selected(5)
+                    if row < 0:
+                        raise "Select an item first"
+                    sql.execute(connection, "DELETE FROM media WHERE path = ?", [json(files[row])])
+                    files = load_files(connection)
+                    window.list_clear(5)
+                    for item in files:
+                        window.list_add(5, item)
+                    window.set_text(10, "Removed; "+str(len(files))+" in your library")
+                elif action == "show" or action == "play":
+                    row = window.selected(5)
+                    if row < 0:
+                        raise "Select an item first"
+                    file = files[row]
+                    kind = media_kind(file)
+                    if action == "show" and kind == "image":
+                        shown = fit(codecs.load(file), 328, 300)
+                        window.set_image(6, shown.pixels, shown.width, shown.height)
+                        window.set_text(10, "Showing "+path.name(file)+" at "+str(shown.width)+" x "+str(shown.height))
+                    elif action == "show":
+                        info = wav.load(file)
+                        window.set_text(10, path.name(file)+": "+str(info.rate)+" Hz, "+str(info.channels)+" channel(s), "+str(audio.duration(info))+" seconds")
+                    elif kind != "audio":
+                        raise "Only WAV files can be played"
+                    elif len(playing) > 0:
+                        raise "Already playing"
+                    else:
+                        window.set_text(10, "Playing "+path.name(file))
+                        append(playing, task.spawn(play_worker, json({"file":json(file),"volume":json(volume),"window":json(token)})))
+            except err:
+                # Bad files and mistakes are reported in the window; the application keeps running.
+                window.set_text(10, "Error: "+err.message)
+                logging.warn(logger, err.message)
+        for work in scanning+playing:
+            task.cancel(work)
+            task.close(work)
+    logging.info(logger, "stopped")
+    return 0
+
+arguments = args()
+settings = config.load("media-desk.conf", "MEDIA_DESK_")
+database_path = config.text(settings, "database", "media-desk.db")
+log_path = config.text(settings, "log", "media-desk.log")
+volume_text = config.text(settings, "volume", "1.0")
+i = 0
+sample_folder = ""
+while i < len(arguments):
+    if arguments[i] == "--database":
+        database_path = arguments[i+1]
+    elif arguments[i] == "--log":
+        log_path = arguments[i+1]
+    elif arguments[i] == "--volume":
+        volume_text = arguments[i+1]
+    elif arguments[i] == "--make-samples":
+        sample_folder = arguments[i+1]
+    else:
+        raise "usage: media_desk [--database FILE] [--log FILE] [--volume 0.0-1.0] [--make-samples FOLDER]"
+    i += 2
+if sample_folder != "":
+    make_samples(sample_folder)
+else:
+    context = json_dump({"database":json(database_path),"log":json(log_path),"volume":json(float(volume_text))})
+    exit(gui.run("Media Desk", 690, 440, context, application))

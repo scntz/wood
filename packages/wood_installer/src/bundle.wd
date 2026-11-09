@@ -1,0 +1,66 @@
+import std.fs as fs
+import std.io as io
+import manifest as schema
+import _native as native
+
+record Bundle:
+    file: str
+    metadata: json
+    app: schema.Application
+    digest: str
+
+fn decimal(text: str) -> int:
+    if len(text) != 20:
+        raise "setup: invalid bundle footer"
+    for c in text:
+        if c not in "0123456789":
+            raise "setup: invalid bundle offset"
+    return int(text)
+
+fn load(file: str) -> Bundle:
+    size = fs.size(file)
+    if size < 112 or size > 4294967296:
+        raise "setup: invalid bundle size"
+    footer = ""
+    metadata = ""
+    with io.open(file, "r") as source:
+        io.seek(source, size - 112)
+        footer = io.read_exact(source, 112)
+        if footer[:8] != "WDSETUP1":
+            raise "setup: no supported payload is attached to this executable"
+        offset = decimal(footer[8:28])
+        count = decimal(footer[28:48])
+        if count <= 0 or count > 4194304 or offset < 1 or offset + count != size - 112:
+            raise "setup: invalid manifest extent"
+        schema.hash_text(footer[48:])
+        if native.digest(file, offset, count) != footer[48:]:
+            raise "setup: manifest integrity verification failed"
+        io.seek(source, offset)
+        metadata = io.read_exact(source, count)
+    value = json_parse(metadata)
+    if metadata != json_dump(value):
+        raise "setup: manifest must use canonical JSON serialization"
+    app = schema.decode(value)
+    data = schema.object(value)
+    previous = json_int(data["template_size"])
+    if previous <= 0 or previous > decimal(footer[8:28]):
+        raise "setup: invalid executable template extent"
+    template_digest = schema.text(data, "template_sha256")
+    schema.hash_text(template_digest)
+    if native.digest(file, 0, previous) != template_digest:
+        raise "setup: executable template integrity verification failed"
+    for entry in app.files:
+        if entry.offset != previous:
+            raise "setup: overlapping or non-contiguous payload extents"
+        previous += entry.size
+    if previous != decimal(footer[8:28]):
+        raise "setup: payload extent does not match manifest"
+    return Bundle(file, value, app, footer[48:])
+
+fn verify(payload: Bundle, progress: fn(int, int, str) -> bool):
+    for i in range(len(payload.app.files)):
+        entry = payload.app.files[i]
+        if not progress(i, len(payload.app.files), "Verify " + entry.name):
+            raise "setup: cancelled"
+        if native.digest(payload.file, entry.offset, entry.size) != entry.digest:
+            raise "setup: payload integrity verification failed for '" + entry.name + "'"

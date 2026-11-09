@@ -1,0 +1,29 @@
+import std.csv as csv
+
+for size in [0,1,15,16,31,32,255,2048]:
+    payload = "x" * size
+    pieces = [payload, "", payload + byte_string(0) + "árbol", ""]
+    snapshot = pieces
+    combined = join(pieces, "::")
+    assert(combined == payload + "::::" + payload + byte_string(0) + "árbol::")
+    assert(pieces == snapshot)
+    pieces[0] = "changed"
+    assert(snapshot[0] == payload)
+    assert(replace(combined, "::", "|") == join(snapshot, "|"))
+    assert(replace(payload, "missing", "changed") == payload)
+    assert(replace(payload, "x", "") == "")
+    assert(replace(payload, "xx", "xxx") == "x" * (size // 2 * 3 + size % 2))
+    assert(replace(payload, "x", payload) == payload * size)
+assert(join([], "separator") == "")
+assert(join([""], "separator") == "")
+assert(replace("aaa", "aa", "x") == "xa")
+assert(replace("ababa", "aba", "abaaba") == "abaababa")
+assert(replace("A" + byte_string(0) + "B", byte_string(0), "!") == "A!B")
+rows = [["name", "payload"], ["oak", '"quoted",\nline' + byte_string(0)], ["", "árbol"]]
+assert(csv.parse(csv.dump(rows, ","), ",") == rows)
+try:
+    replace("unchanged", "", "x")
+    assert(false)
+except err:
+    assert(err.code == "R4009" and err.message == "replacement pattern cannot be empty")
+print("native string buffers passed")

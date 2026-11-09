@@ -1,0 +1,12 @@
+import driver_inspect as inspection
+import body_semantics as semantic
+import project as project
+import sources as src
+arguments = args()
+standards: dict[str,str] = {}
+bundle = project.object(json_parse(src.read(arguments[0],16777216)))
+for name in bundle:
+    standards[name] = project.string(bundle[name])
+checked = semantic.load(arguments[1],standards)
+assert(checked.diagnostic.code == "")
+print(json_dump(inspection.inspect(checked)))

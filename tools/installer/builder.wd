@@ -1,0 +1,7 @@
+import installer.builder as builder
+arguments = args()
+if len(arguments) != 4:
+    print("Usage: installer-builder TEMPLATE CONFIG.json PAYLOAD-DIRECTORY OUTPUT")
+    exit(2)
+builder.build(arguments[0], arguments[1], arguments[2], arguments[3])
+print("Installer payload verified: " + arguments[3])

@@ -1,0 +1,431 @@
+[
+  {
+    "source": "a:array[int]=array_from_list([1,2])\n"
+  },
+  {
+    "source": "a:array[float]=array_from_list([])\n"
+  },
+  {
+    "source": "fn f[T](a:array[T])->array[T]:\n    return a\nx=f(array_from_list([1]))\n"
+  },
+  {
+    "source": "fn f[T]()->array[T]:\n    return array_full(2,1)\nx:array[int]=f()\n"
+  },
+  {
+    "source": "a:array[str]=None\n"
+  },
+  {
+    "source": "a:array[bool]=None\n"
+  },
+  {
+    "source": "a:array[void]=None\n"
+  },
+  {
+    "source": "a=array_full(1,2)\nb=a[0]\na[0]+=2\n"
+  },
+  {
+    "source": "a=array_full((2,3),2.0)\na[0,1]=2\nx=a[-1,-1]\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=[v+1 for v in a]\ny={v:v for v in a}\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nc:cursor[array[int]]=iter(a)\nx=next(c)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nf=fn()=>a\nx=f()\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx:array[float]=a\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=json(a)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a < a\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a == a\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=1 in a\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a[true]\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a[()]\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a[(0,0.5)]\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a[0:1]\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=+a\ny=-a\nz=a / 2\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a + true\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=a // 2\n"
+  },
+  {
+    "source": "fn f():\n    return array_from_list([1])\nf()[0]=2\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float])\nx=bad\n"
+  },
+  {
+    "source": "extern fn bad(a:bool)\n"
+  },
+  {
+    "source": "extern fn bad()->str\n"
+  },
+  {
+    "source": "extern fn bad(a:array[str])\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float]=None)\n"
+  },
+  {
+    "source": "extern fn bad(a:fn(str)->int)\n"
+  },
+  {
+    "source": "extern fn bad(a:callable(int)->int)\n"
+  },
+  {
+    "source": "extern fn bad(a:array[int])->int\nx=bad(array_full(2,1))\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float],v:float)\na=array_full(2,1.0)\nbad(a,2)\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float])\nbad(array_full(2,1.0))\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float])\na=array_full(2,1.0)\nbad(a[0:1])\n"
+  },
+  {
+    "source": "extern fn bad(mut a:array[float])\nrecord R:\n    a:array[float]\n    fn f(self):\n        bad(self.a)\n"
+  },
+  {
+    "source": "extern fn bad(a:int=1)->int\nx=bad()\n"
+  },
+  {
+    "source": "extern fn bad(f:fn(int)->int)->int\nfn f(x:int)->int:\n    return x\nx=bad(f)\n"
+  },
+  {
+    "source": "extern fn bad(a:str)->int\nf:fn(str)->int=bad\n"
+  },
+  {
+    "source": "extern fn bad(a:fn(int))->int\nfn f(x:int):\n    pass\nx=bad(f)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,2)\n"
+  },
+  {
+    "source": "a=array_full((2,3),1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,(2,3))\n"
+  },
+  {
+    "source": "a=array_full([2,3],1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,[2,3])\n"
+  },
+  {
+    "source": "a=array_full([],1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,[])\n"
+  },
+  {
+    "source": "a=array_full((),1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,())\n"
+  },
+  {
+    "source": "a=array_full((1,2,3,4,5,6,7,8),1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,(1,2,3,4,5,6,7,8))\n"
+  },
+  {
+    "source": "a=array_full((1,2,3,4,5,6,7,8,9),1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,(1,2,3,4,5,6,7,8,9))\n"
+  },
+  {
+    "source": "a=array_full(true,1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,true)\n"
+  },
+  {
+    "source": "a=array_full((1,2.0),1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,(1,2.0))\n"
+  },
+  {
+    "source": "a=array_full([1.0],1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nb=array_reshape(a,[1.0])\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_shape(a)\n"
+  },
+  {
+    "source": "x=array_shape(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_rank(a)\n"
+  },
+  {
+    "source": "x=array_rank(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_contiguous(a)\n"
+  },
+  {
+    "source": "x=array_contiguous(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_copy(a)\n"
+  },
+  {
+    "source": "x=array_copy(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_to_list(a)\n"
+  },
+  {
+    "source": "x=array_to_list(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_sum(a)\n"
+  },
+  {
+    "source": "x=array_sum(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_floats(a)\n"
+  },
+  {
+    "source": "x=array_floats(1)\n"
+  },
+  {
+    "source": "a=array_from_list([1,2])\nx=array_integers(a)\n"
+  },
+  {
+    "source": "x=array_integers(1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_dot(a,a)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_dot(a,array_full(2,1.0))\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_dot(a,[1])\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_matmul(a,a)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_matmul(a,array_full(2,1.0))\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_matmul(a,[1])\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_affine(a,a)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_affine(a,array_full(2,1.0))\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_affine(a,[1])\n"
+  },
+  {
+    "source": "x=array_from_list([])\n"
+  },
+  {
+    "source": "x=array_from_list([true])\n"
+  },
+  {
+    "source": "x=array_full(2,true)\n"
+  },
+  {
+    "source": "x=array_full(2,print(1))\n"
+  },
+  {
+    "source": "x=array_full(2)\n"
+  },
+  {
+    "source": "x=array_full(2,1,3)\n"
+  },
+  {
+    "source": "x=array_from_list(2)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_transpose(a,[])\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_transpose(a,[1.0])\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_slice(a,0,0,2,1)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_slice(a,0,0,2,1.0)\n"
+  },
+  {
+    "source": "x=math_sqrt(2)\n"
+  },
+  {
+    "source": "x=math_finite(2.0)\n"
+  },
+  {
+    "source": "x=math_cos(true)\n"
+  },
+  {
+    "source": "x=array_full()\n"
+  },
+  {
+    "source": "x=array_full(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_from_list()\n"
+  },
+  {
+    "source": "x=array_from_list(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_shape()\n"
+  },
+  {
+    "source": "x=array_shape(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_rank()\n"
+  },
+  {
+    "source": "x=array_rank(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_contiguous()\n"
+  },
+  {
+    "source": "x=array_contiguous(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_copy()\n"
+  },
+  {
+    "source": "x=array_copy(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_to_list()\n"
+  },
+  {
+    "source": "x=array_to_list(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_reshape()\n"
+  },
+  {
+    "source": "x=array_reshape(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_transpose()\n"
+  },
+  {
+    "source": "x=array_transpose(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_slice()\n"
+  },
+  {
+    "source": "x=array_slice(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_sum()\n"
+  },
+  {
+    "source": "x=array_sum(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_dot()\n"
+  },
+  {
+    "source": "x=array_dot(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_matmul()\n"
+  },
+  {
+    "source": "x=array_matmul(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_affine()\n"
+  },
+  {
+    "source": "x=array_affine(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_floats()\n"
+  },
+  {
+    "source": "x=array_floats(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "x=array_integers()\n"
+  },
+  {
+    "source": "x=array_integers(1,2,3,4,5,6)\n"
+  },
+  {
+    "source": "a=array_full(dimensions=2,value=0)\n"
+  },
+  {
+    "source": "a=array_full(2,1)\nx=array_shape(value=a)\n"
+  },
+  {
+    "source": "extern fn take(mut a:array[float])\na=array_full(2,1.0)\nf=fn()=>take(a)\n"
+  },
+  {
+    "source": "extern fn take(mut a:array[float])\na=array_full(2,1.0)\nf=fn[mut a]()=>take(a)\n"
+  },
+  {
+    "source": "fn make[T](a:array[T]):\n    return a\nx=make(array_from_list([1]))\n"
+  },
+  {
+    "source": "fn bad[T](a:T):\n    x:array[T]=array_full(1,a)\n    return x\nx=bad(true)\n"
+  },
+  {
+    "source": "extern fn call(f:fn(int)->int)->int\ny=1\nx=call(fn(a:int)=>a+y)\n"
+  },
+  {
+    "source": "x=array_full(missing)\n"
+  },
+  {
+    "source": "x=array_full(2,print(1),3)\n"
+  },
+  {
+    "source": "x=array_sum(missing,1)\n"
+  },
+  {
+    "source": "x=array_dot(array_from_list([1]),missing,1)\n"
+  }
+]

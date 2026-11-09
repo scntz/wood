@@ -1,0 +1,578 @@
+# Production command orchestration written in Wood. The C++ bridge is OS-only.
+import driver_cli as cli
+import driver_host as host
+import driver_inspect as inspection
+import project as project
+import project_trust as trust
+import frontend as frontend
+import modules as mod
+import body_semantics as semantic
+import emit_cpp as backend
+import driver_llvm as native
+import package_cli as packages
+import package_python as python_provider
+import package_tools as package_tools
+import lsp as lsp
+import formatter as formatter
+import sources as src
+import std.path as path
+import std.fs as fs
+
+record Assets:
+    root: str
+    cxx: str
+    windows: bool
+    standards: dict[str,str]
+    runtime: str
+    native: bool
+
+# An installed distribution records its version beside bin and share; a development build has no such file.
+fn distribution() -> dict[str,json]:
+    empty: dict[str,json] = {}
+    try:
+        root = project.string(project.object(host.call("assets"))["root"])
+        file = path.combine(path.parent(path.parent(root)),"distribution.json")
+        if fs.kind(file) == "file":
+            return project.object(json_parse(src.read(file,65536)))
+    except err:
+        pass
+    return empty
+
+fn version_text() -> str:
+    info = distribution()
+    if "distribution_version" in info and "language_version" in info and "runtime_abi" in info:
+        return "wood "+project.string(info["distribution_version"])+" (language "+project.string(info["language_version"])+", native runtime ABI "+str(json_int(info["runtime_abi"]))+")"
+    return "wood 0.4.0"
+
+fn assets() -> Assets:
+    data = project.object(host.call("assets"))
+    root = project.string(data["root"])
+    standards: dict[str,str] = {}
+    bundle = project.object(json_parse(src.read(path.combine(root,"stdlib.json"),16777216)))
+    for name in bundle:
+        standards[name] = project.string(bundle[name])
+    is_native = "native" in data and json_bool(data["native"])
+    runtime = "" if is_native else src.read(path.combine(root,"runtime.hpp"),16777216)
+    return Assets(root,project.string(data["cxx"]),json_bool(data["windows"]),standards,runtime,is_native)
+
+fn emit_error(code: str, message: str, machine: bool, file: str = "", line: int = 0, column: int = 0):
+    if machine:
+        data: dict[str,json] = {"severity":json("error"),"code":json(code),"file":json(cli.diagnostic_text(file)),"line":json(line),"column":json(column),"message":json(cli.diagnostic_text(message))}
+        eprint(json_dump(data))
+    elif line > 0 and file != "":
+        eprint(file+":"+str(line)+":"+str(column)+": error["+code+"]: "+message)
+    else:
+        eprint("wood: "+message)
+
+fn problem(err: error) -> tuple[str,str]:
+    prefix = "__WOOD_DRIVER__"
+    if starts_with(err.message,prefix):
+        value = err.message[len(prefix):]
+        return (value[:5],value[6:])
+    return ("D5001",err.message)
+
+fn diagnostic_source(value: src.Diagnostic, compilation: mod.Compilation) -> str:
+    # Render the bytes that were checked, including imported/standard modules.
+    for unit in compilation.modules:
+        if unit.file == value.file:
+            return unit.source
+    # Loading stopped before the module joined the compilation, but its file is still there.
+    if value.file != "" and fs.kind(value.file) == "file":
+        return src.read(value.file,16777216)
+    return ""
+
+fn diagnostic(value: src.Diagnostic, machine: bool, compilation: mod.Compilation):
+    emit_error(value.code,value.message,machine,value.file,value.line,value.column)
+    if machine or value.line < 1 or value.file == "":
+        return
+    text = diagnostic_source(value,compilation)
+    lines = split(text,"\n")
+    if value.line <= len(lines):
+        eprint("  "+replace(lines[value.line-1],"\r",""))
+        eprint("  "+join([" " for i in range(value.column-1 if value.column > 0 else 0)],"")+"^")
+
+fn compiler(options: cli.Options, data: Assets) -> str:
+    if options.cxx != "":
+        return options.cxx
+    environment = host.string("environment",{"name":json("WOOD_CXX")})
+    if environment != "":
+        return environment
+    if path_exists(data.cxx):
+        return data.cxx
+    return "cl.exe" if data.windows else "c++"
+
+fn init_target(target: str) -> bool:
+    kind = fs.kind(target)
+    if kind == "symlink":
+        raise "init target must not be a filesystem link: "+target
+    if kind != "missing" and (kind != "directory" or len(fs.entries(target,65536)) != 0):
+        raise "init target must be absent or an empty directory: "+target+". Choose a new name: wood init NAME"
+    return kind != "missing"
+
+fn library_files(stage: str, name: str):
+    write_text(path.combine(stage,"src/"+name+".wd"),"fn greet(name: str) -> str:\n    return \"hello, \" + name\n\nfn _private_helper() -> int:\n    return 0\n")
+    write_text(path.combine(stage,"tests/test_"+name+".wd"),"from "+name+" import greet\nassert(greet(\"world\") == \"hello, world\")\n")
+    write_text(path.combine(stage,".gitignore"),"build/\ndist/\nvendor/\n")
+    write_text(path.combine(stage,"README.md"),"# "+name+"\n\nDescribe what this wood library does.\n\n## Install\n\n```sh\nwood install dependency github@OWNER/REPOSITORY#v0.1.0\n```\n\n## Publish\n\nAdd a LICENSE file, then run `wood package validate`, `wood test` and\n`wood package prepare`. Names starting with `_` stay private.\n")
+
+fn initialize(input: str, library: bool = false):
+    target = path.normalize(path.absolute("." if input == "" else input))
+    while path.name(target) == "" and path.parent(target) != target:
+        target = path.parent(target)
+    init_target(target)
+    parent = path.parent(target)
+    if project.kind(parent) != "directory":
+        raise "init parent must be an existing directory: "+parent
+    pieces: list[str] = []
+    for byte in path.name(target):
+        append(pieces,byte if (("a" <= byte and byte <= "z") or ("A" <= byte and byte <= "Z") or ("0" <= byte and byte <= "9") or byte == "_") else "_")
+    name = join(pieces,"")
+    if not project.identifier(name) or name == "std":
+        name = "wood_app"
+    stage = host.temporary(parent)
+    try:
+        fs.make_dirs(path.combine(stage,"src"))
+        fs.make_dirs(path.combine(stage,"tests"))
+        dependencies: dict[str,json] = {}
+        manifest: dict[str,json] = {"format":json(1),"name":json(name),"version":json("0.1.0"),"source":json("src"),"entry":json("main.wd"),"tests":json("tests"),"dependencies":json(dependencies)}
+        if library:
+            remove(manifest,"entry")
+        write_text(path.combine(stage,"wood.json"),json_dump(manifest)+"\n")
+        if library:
+            library_files(stage,name)
+        else:
+            write_text(path.combine(stage,"src/greeting.wd"),"fn greet(name: str) -> str:\n    return \"hello, \" + name\n")
+            write_text(path.combine(stage,"src/main.wd"),"from greeting import greet\nname = \"wood\"\nif len(args()) > 0:\n    name = args()[0]\nprint(greet(name))\n")
+            write_text(path.combine(stage,"tests/test_greeting.wd"),"from greeting import greet\nassert(greet(\"world\") == \"hello, world\")\n")
+        if init_target(target):
+            for subtree in (["src","tests","wood.json",".gitignore","README.md"] if library else ["src","tests","wood.json"]):
+                host.call("copy_new",{"from":json(path.combine(stage,subtree)),"to":json(path.combine(target,subtree))})
+            host.release(stage)
+        else:
+            host.call("rename",{"from":json(stage),"to":json(target)})
+    except err:
+        # Remaining owned staging directories are also released at process exit.
+        raise err
+    if library:
+        print("Created wood library in "+target+"\n\nFrom the library directory:\n  wood test\n  wood package validate\n  wood package api\n  wood package prepare")
+    else:
+        print("Created wood project in "+target+"\n\nFrom the project directory:\n  wood run\n  wood build\n  wood test")
+
+fn output_path(options: cli.Options, snapshot: project.Snapshot, modules: list[str], data: Assets) -> str:
+    entry = snapshot.configured.entry
+    output = options.output
+    if output == "":
+        if len(snapshot.manifests) > 0:
+            package = snapshot.configured.packages[0]
+            directory = path.combine(package.root,"build")
+            fs.make_dirs(directory)
+            output = path.combine(directory,package.name)
+        else:
+            name = path.name(entry)
+            output = path.absolute(name[:len(name)-3])
+        if options.command == "emit-cpp":
+            output += ".cpp"
+        elif options.command == "emit-llvm":
+            output += ".ll"
+        elif data.windows:
+            output += ".exe"
+    elif data.windows and options.command == "build" and "." not in path.name(output):
+        output += ".exe"
+    output = path.absolute(output)
+    if ends_with(path.name(output),".wd"):
+        raise "output must not replace a Wood source file"
+    for module in modules:
+        if not starts_with(module,"<") and host.same(module,output):
+            raise "output must not overwrite a source module"
+    if len(snapshot.manifests) > 0:
+        for package in snapshot.configured.packages:
+            if host.same(path.combine(package.root,"wood.json"),output) or host.same(path.combine(package.root,"wood.lock"),output):
+                raise "output must not overwrite project metadata"
+    if fs.kind(path.parent(output)) != "directory":
+        raise "output directory does not exist"
+    return output
+
+fn build_native(options: cli.Options, data: Assets, generated: str, output: str, execution_log: str) -> int:
+    directory = host.temporary(path.parent(output) if output != "" else "")
+    status = 2
+    try:
+        cpp = path.combine(directory,"program.cpp")
+        executable = path.combine(directory,"program.exe" if data.windows else "program")
+        write_text(cpp,generated)
+        if options.command == "emit-cpp":
+            host.publish(cpp,output)
+            status = 0
+        else:
+            cxx = compiler(options,data)
+            name = path.name(cxx)
+            for i in range(26):
+                name = replace(name,"ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i],"abcdefghijklmnopqrstuvwxyz"[i])
+            msvc = name in ["cl","cl.exe","clang-cl","clang-cl.exe"]
+            command = [cxx]
+            if msvc:
+                # Distinct declarations must keep distinct function addresses.
+                if options.sanitize:
+                    command = command+["/fsanitize=address","/Zi"]
+                command = command+["/nologo","/std:c++latest","/EHsc","/utf-8","/permissive-","/bigobj","/O2" if options.optimize else "/Od","/Fe:"+executable,"/Fo:"+path.combine(directory,"program.obj"),"/Fd:"+path.combine(directory,"program.pdb"),cpp,"/link","/INCREMENTAL:NO","/OPT:NOICF"]
+            else:
+                if options.sanitize:
+                    command = command+["-fsanitize=address","-fno-omit-frame-pointer","-g"]
+                command = command+["-std=c++23","-O2" if options.optimize else "-O0","-o",executable,cpp]
+            command = command+options.libraries
+            if not msvc:
+                append(command,"-pthread")
+                if data.windows:
+                    append(command,"-lws2_32")
+                else:
+                    append(command,"-ldl")
+            log = path.combine(directory,"compiler.log")
+            native_status = host.process(command,log,options.timeout,options.limit,false)
+            if native_status != 0:
+                message = src.read(log,options.limit)
+                if options.json:
+                    emit_error("D5002","native compilation failed (exit "+str(native_status)+"): "+message,true,options.input)
+                else:
+                    eprint(message)
+                    eprint("wood: native compilation failed (exit "+str(native_status)+"). Use --cxx to select a compiler"+("; run from a Visual Studio developer shell" if msvc else "")+".")
+            elif options.command == "build":
+                host.publish(executable,output)
+                status = 0
+            else:
+                status = host.process([executable]+options.program_args,execution_log,options.timeout,options.limit)
+    except err:
+        host.release(directory)
+        raise err
+    host.release(directory)
+    return status
+
+fn select_project_python(root: str, manifest_text: str):
+    # An explicit WOOD_PYTHON always wins; this only fills in the project's own environment.
+    if host.string("environment",{"name":json("WOOD_PYTHON")}) != "":
+        return
+    manifest = project.object(json_parse(manifest_text))
+    if "python" not in manifest:
+        return
+    python = python_provider.environment_interpreter(path.combine(python_provider.environment_root(root),"env"),python_provider.host_platform())
+    if project.kind(python) != "file":
+        raise "__WOOD_DRIVER__D5108:this project's Python environment is missing; run 'wood install'"
+    host.call("environment_set",{"name":json("WOOD_PYTHON"),"value":json(python)})
+
+fn execute(options: cli.Options, data: Assets, execution_log: str = "") -> int:
+    if options.command == "init":
+        initialize(options.input,options.library)
+        return 0
+    input = "." if options.input == "" else options.input
+    absolute = path.absolute(input)
+    script = ends_with(path.name(absolute),".wd") and path.name(absolute) != ".wd"
+    if script and not path_exists(absolute) and project.discover(absolute) == "":
+        # Match production's clean UTF-8 unreadable-entry error before canonical
+        # resolution can introduce a host-encoded filesystem exception message.
+        src.read(absolute,16777216)
+    snapshot = project.snapshot(input,false)
+    if snapshot.configured.diagnostic.code != "":
+        raise snapshot.configured.diagnostic.message
+    configured = snapshot.configured
+    has_project = len(snapshot.manifests) > 0
+    if options.command in ["lock","deps"]:
+        if not has_project:
+            raise "command requires a wood.json project"
+        if options.command == "lock" and options.locked:
+            raise "lock refresh cannot be combined with --locked"
+        if options.command == "deps" and options.locked:
+            trust.prepare(snapshot,data.standards,true)
+        inventory = json_dump(trust.inventory(snapshot,data.standards))+"\n"
+        if len(inventory) > 16777216:
+            raise "lock document exceeds 16 MiB"
+        lock_file = path.combine(configured.packages[0].root,"wood.lock")
+        if options.command == "lock" and path_exists(lock_file):
+            # Refreshing content keeps deliberately recorded commit and wheel pins.
+            existing = project.object(json_parse(src.read(lock_file,16777216)))
+            document = project.object(trust.inventory(snapshot,data.standards))
+            for key in ["remote","python"]:
+                if key in existing:
+                    document[key] = existing[key]
+            inventory = json_dump(document)+"\n"
+        if options.command == "lock":
+            host.atomic(path.combine(configured.packages[0].root,"wood.lock"),inventory)
+            print("Updated wood.lock")
+        else:
+            print(inventory[:len(inventory)-1])
+        return 0
+    verified = trust.prepare(snapshot,data.standards,options.locked)
+    if options.command == "test":
+        tests: list[str] = []
+        if script:
+            append(tests,configured.entry)
+        elif configured.packages[0].test_root != "":
+            files = trust.source_files(configured.packages[0].test_root)
+            ordered: dict[str,int] = {}
+            for file in files:
+                if starts_with(path.name(file),"test_"):
+                    ordered[file] = 0
+            for file in json_dict(json(ordered)):
+                append(tests,file)
+        if len(tests) == 0:
+            raise "no test_*.wd files found in the declared tests directory"
+        results: list[json] = []
+        failed = 0
+        logs = host.temporary()
+        try:
+            for i in range(len(tests)):
+                nested = options
+                nested.command = "run"
+                nested.input = tests[i]
+                nested.report_json = false
+                log = path.combine(logs,str(i)+".log")
+                status = 2
+                message = ""
+                code = ""
+                try:
+                    status = execute(nested,data,log)
+                except err:
+                    failure = problem(err)
+                    message = failure[1]
+                    if failure[0] in ["D5003","D5004","D5005"]:
+                        code = failure[0]
+                output = src.read(log,16777216) if path_exists(log) else ""
+                if message != "":
+                    output += "\n"+message
+                if status != 0:
+                    failed += 1
+                label = replace(tests[i],"\\","/") if data.windows else tests[i]
+                row: dict[str,json] = {"file":json(label),"exit_code":json(status),"passed":json(status == 0),"driver_error":json(code),"output":json(output)}
+                append(results,json(row))
+                if not options.report_json:
+                    print(("PASS " if status == 0 else "FAIL ")+label)
+                    if status != 0:
+                        print(output)
+        except err:
+            host.release(logs)
+            raise err
+        host.release(logs)
+        if options.report_json:
+            row: dict[str,json] = {"schema_version":json(1),"passed":json(len(tests)-failed),"failed":json(failed),"tests":json(results)}
+            print(json_dump(row))
+        else:
+            print(str(len(tests)-failed)+" passed, "+str(failed)+" failed")
+        return 1 if failed > 0 else 0
+    if configured.entry == "":
+        raise "project has no entry; declare entry or provide a .wd file"
+    # Production classifies an unreadable entry as a driver failure.
+    src.read(configured.entry,16777216)
+    loaded = frontend.load_configured(configured,data.standards,input)
+    if loaded.diagnostic.code != "":
+        diagnostic(loaded.diagnostic,options.json,loaded.compilation)
+        return 2 if loaded.diagnostic.code == "D5001" else 1
+    trust.verify_loaded(verified,loaded.compilation)
+    checked = semantic.analyze(loaded)
+    if checked.diagnostic.code != "":
+        diagnostic(checked.diagnostic,options.json,loaded.compilation)
+        return 1
+    if options.command == "inspect":
+        print(json_dump(inspection.inspect(checked)))
+        return 0
+    if options.command == "check":
+        return 0
+    uses_python = false
+    for type in checked.signatures.pool.types:
+        if type.kind == "PythonObject":
+            uses_python = true
+    if options.command in ["run","test"] and uses_python and has_project:
+        select_project_python(configured.packages[0].root,snapshot.manifests[configured.packages[0].root])
+    bundle_directory = ""
+    if options.bundle_python:
+        if not uses_python:
+            raise "--bundle-python: this application does not use Python; 'wood build' already gives a Python-free executable"
+        if not has_project:
+            raise "--bundle-python requires a wood.json project"
+        package = configured.packages[0]
+        bundle_directory = path.absolute(options.output) if options.output != "" else path.combine(path.combine(package.root,"dist"),package.name)
+        if path_exists(bundle_directory):
+            raise "--bundle-python output already exists: "+bundle_directory
+        fs.make_dirs(bundle_directory)
+        options.output = path.combine(bundle_directory,package.name+(".exe" if data.windows else ""))
+    output = ""
+    if options.command in ["build","emit-cpp","emit-llvm"]:
+        output = output_path(options,snapshot,[unit.file for unit in loaded.compilation.modules],data)
+    selected = options.backend
+    if selected == "":
+        selected = "cpp" if options.command == "emit-cpp" else "llvm" if (data.native or options.command == "emit-llvm") else "cpp"
+    if selected == "llvm":
+        if options.cxx != "":
+            raise "--cxx requires --backend=cpp"
+        if options.sanitize:
+            raise "freestanding LLVM --sanitize=address is not supported; use the separate hosted native sanitizer gates"
+        config = native.configuration(options,data.root,data.windows)
+        generated = native.emit(config,checked,options.json)
+        if generated.diagnostic.code != "":
+            diagnostic(generated.diagnostic,options.json,loaded.compilation)
+            return 1
+        try:
+            built = native.build(options,config,generated.text,output,execution_log)
+            if built == 0 and bundle_directory != "":
+                python_provider.bundle(bundle_directory,configured.packages[0].root,data.root)
+            return built
+        except err:
+            failure = problem(err)
+            if failure[0] == "D5002":
+                emit_error(failure[0],failure[1],options.json,options.input)
+                return 2
+            raise err
+    for type in checked.signatures.pool.types:
+        if type.kind == "PythonObject":
+            emit_error("B3501","optional Python interoperability requires --backend=llvm",options.json,options.input)
+            return 1
+    if options.llvm_dir != "" or options.linker != "" or options.llvm_wsl != "" or options.native_home != "":
+        raise "LLVM tool options require --backend=llvm"
+    runtime = data.runtime if data.runtime != "" else src.read(path.combine(data.root,"runtime.hpp"),16777216)
+    generated = backend.emit(checked,runtime,options.json)
+    return build_native(options,data,generated,output,execution_log)
+
+fn explain(arguments: list[str], data: Assets) -> int:
+    usage = "Usage: wood explain CODE [--diagnostics=json]"
+    entries = project.object(json_parse(src.read(path.combine(data.root,"explanations.json"),1048576)))
+    available = "Available explanations: "+join([code for code in entries],", ")
+    if arguments == ["explain","--help"]:
+        print(usage+"\n"+available)
+        return 0
+    code = ""
+    for argument in arguments[1:]:
+        if argument == "--diagnostics=json":
+            continue
+        if starts_with(argument,"-"):
+            raise "unsupported option for explain '"+argument+"'. "+usage
+        if code != "":
+            raise "explain requires exactly one error code. "+usage
+        if argument == "":
+            raise "explain requires a nonempty error code, for example E3030"
+        code = argument
+    if code == "":
+        raise "explain requires an error code. "+usage
+    valid = len(code) == 5 and code[0] in ["E","D","R"]
+    for byte in code[1:]:
+        if byte < "0" or byte > "9":
+            valid = false
+    if not valid:
+        raise "expected an uppercase code such as E3030 (E, D or R and four digits)"
+    if code not in entries:
+        raise "No built-in explanation is available for '"+code+"'. This does not mean the code is invalid.\n"+available+"\nSee docs/cli.md for diagnostic categories."
+    text = project.string(entries[code])
+    print(text[:len(text)-1])
+    return 0
+
+# The .wd files under a directory, skipping the directories the language server skips: hidden ones,
+# build output and installed dependencies.
+fn wood_files(root: str) -> list[str]:
+    result: list[str] = []
+    pending = [root]
+    while len(pending) > 0:
+        current = pop(pending)
+        names = fs.entries(current,1048576)
+        for i in range(len(names)-1,-1,-1):
+            child = path.combine(current,names[i])
+            kind = fs.kind(child)
+            if kind == "directory" and not lsp.ignored_directory(names[i]):
+                append(pending,child)
+            elif kind == "file" and ends_with(names[i],".wd"):
+                append(result,child)
+    return result
+
+fn format_files(arguments: list[str]) -> int:
+    usage = "Usage: wood fmt [--check] [FILE_OR_DIRECTORY ...]"
+    check = false
+    targets: list[str] = []
+    for argument in arguments:
+        if argument == "--help":
+            print(usage+"\nFormats .wd files in place. --check changes nothing and lists the files that would change.\nWithout a path it formats the project around the current directory.")
+            return 0
+        if argument == "--check":
+            check = true
+        elif starts_with(argument,"-"):
+            raise "unsupported option for fmt '"+argument+"'. "+usage
+        else:
+            append(targets,argument)
+    if len(targets) == 0:
+        manifest = project.discover(".")
+        if manifest == "":
+            raise "fmt needs a file or directory, or a wood.json project around the current directory. "+usage
+        append(targets,path.parent(manifest))
+    files: list[str] = []
+    for target in targets:
+        kind = fs.kind(target)
+        if kind == "file":
+            append(files,target)
+        elif kind == "directory":
+            files = files+wood_files(target)
+        else:
+            raise "fmt cannot find '"+target+"'"
+    changed = 0
+    failed = false
+    for file in files:
+        source = src.read(file,16777216)
+        result = formatter.format(source,file)
+        if result.problem.code != "":
+            emit_error(result.problem.code,result.problem.message,false,file,result.problem.line,result.problem.column)
+            failed = true
+        elif result.text != source:
+            changed += 1
+            if check:
+                print("would reformat "+file)
+            else:
+                host.atomic(file,result.text)
+                print("formatted "+file)
+    return 1 if failed or (check and changed > 0) else 0
+
+fn main(arguments: list[str]) -> int:
+    status = 2
+    try:
+        if arguments == ["--help"] or (len(arguments) == 0 and project.discover(".") == ""):
+            print(cli.help_text())
+            return 0
+        if arguments == ["--version"]:
+            print(version_text())
+            host.call("cleanup")
+            return 0
+        data = assets()
+        if arguments == ["--language-info"]:
+            info = project.object(json_parse(src.read(path.combine(data.root,"language.json"),16777216)))
+            info["driver_backends"] = json(["cpp","llvm"])
+            info["driver_default_backend"] = json("llvm" if data.native else "cpp")
+            info["driver_native_runtime_abi"] = json(4)
+            info["driver_extra_commands"] = json(["emit-llvm"])
+            info["driver_llvm_full_compatibility"] = json(false)
+            if data.native:
+                info["backend"] = json("LLVM 19 native code from the self-hosted compiler")
+                # The C++ reference explains a frozen subset; native wood explains docs/reference/explanations.md.
+                diagnostics = project.object(info["diagnostics"])
+                catalog = project.object(diagnostics["explain"])
+                catalog["codes"] = json([code for code in project.object(json_parse(src.read(path.combine(data.root,"explanations.json"),1048576)))])
+                diagnostics["explain"] = json(catalog)
+                info["diagnostics"] = json(diagnostics)
+                release = distribution()
+                if "distribution_version" in release:
+                    info["driver_distribution_version"] = release["distribution_version"]
+            print(json_dump(info))
+            status = 0
+        elif len(arguments) > 0 and arguments[0] == "explain":
+            status = explain(arguments,data)
+        elif len(arguments) == 2 and arguments[1] == "--help" and arguments[0] in ["run","check","build","emit-cpp","emit-llvm","init","lock","deps","inspect","test"]:
+            print(cli.help_text())
+            status = 0
+        elif len(arguments) > 0 and arguments[0] == "lsp":
+            status = lsp.serve(arguments[1:],data.standards)
+        elif len(arguments) > 0 and arguments[0] == "fmt":
+            status = format_files(arguments[1:])
+        elif len(arguments) > 0 and arguments[0] == "install":
+            status = packages.install(arguments[1:],data.standards,data.root)
+        elif len(arguments) > 0 and arguments[0] in ["add","remove","update","list","info"]:
+            status = packages.dispatch(arguments[0],arguments[1:],data.standards,data.root)
+        elif len(arguments) > 0 and arguments[0] == "package":
+            status = package_tools.run(arguments[1:],data.standards)
+        else:
+            status = execute(cli.parse(arguments),data)
+    except err:
+        failure = problem(err)
+        emit_error(failure[0],failure[1],cli.json_requested(arguments))
+    # OS bridge owns only directories it created; no arbitrary recursive delete.
+    host.call("cleanup")
+    return status

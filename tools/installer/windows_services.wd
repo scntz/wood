@@ -1,0 +1,212 @@
+# Windows-only integration policy. C exposes whitelisted current-user primitives;
+# this module owns snapshots, consent, component ownership and recovery plans.
+import installer.manifest as schema
+import installer._native as native
+import std.path as path
+import std.utf8 as utf8
+import std.fs as fs
+
+extern fn wood_setup_registry_scope(space: str, application: str) -> int
+extern fn wood_setup_settings_lock(enter: int) -> int
+extern fn wood_setup_setting_read(section: int, key: str, mut info: array[int], mut output: array[int]) -> int
+extern fn wood_setup_setting_write(section: int, key: str, expected_type: int, expected: str, next_type: int, next_value: str) -> int
+extern fn wood_setup_registration_available(owner: str) -> int
+extern fn wood_setup_known_path(kind: int, mut output: array[int]) -> int
+extern fn wood_setup_start_cleanup(encoded: str) -> int
+extern fn wood_setup_process_identity(mut output: array[int]) -> int
+
+fn known(kind: int) -> str:
+    output = array_full(131072, 0)
+    size = native.check(wood_setup_known_path(kind, output), "read Windows installation path")
+    if size > len(output):
+        raise "setup: invalid Windows path length"
+    return join([byte_string(output[i]) for i in range(size)], "")
+
+fn read_setting(section: int, key: str) -> json:
+    info = array_full(1, 0)
+    output = array_full(131072, 0)
+    size = native.check(wood_setup_setting_read(section, key, info, output), "read setting " + key)
+    if size > len(output):
+        raise "setup: invalid setting length"
+    return json({"type": json(info[0]), "text": json(join([byte_string(output[i]) for i in range(size)], ""))})
+
+fn _same(a: json, b: json) -> bool:
+    return json_dump(a) == json_dump(b)
+
+fn _state(kind: int, value: str) -> json:
+    return json({"type": json(kind), "text": json(value)})
+
+fn _change(section: int, key: str, before: json, after: json) -> json:
+    return json({"section": json(section), "key": json(key), "before": before, "after": after})
+
+fn _set(change: dict[str,json], before: json, after: json):
+    a = schema.object(before)
+    b = schema.object(after)
+    native.check(wood_setup_setting_write(json_int(change["section"]), schema.text(change, "key"), json_int(a["type"]), schema.text(a, "text"), json_int(b["type"]), schema.text(b, "text")), "publish setting " + schema.text(change, "key"))
+
+fn _component(value: str) -> str:
+    while len(value) > 0 and value[0] in " \t":
+        value = value[1:]
+    while len(value) > 0 and value[-1] in " \t":
+        value = value[:-1]
+    if len(value) >= 2 and value[0] == "\"" and value[-1] == "\"":
+        value = value[1:-1]
+    value = schema.lower(replace(value, "\\", "/"))
+    while len(value) > 3 and ends_with(value, "/"):
+        value = value[:-1]
+    return value
+
+fn contains_component(value: str, entry: str) -> bool:
+    for item in split(value, ";"):
+        if _component(item) == _component(entry):
+            return true
+    return false
+
+fn without_component(value: str, entry: str) -> str:
+    items = split(value, ";")
+    index = -1
+    for i in range(len(items)):
+        if _component(items[i]) == _component(entry):
+            index = i
+    if index < 0:
+        return value
+    return join([items[i] for i in range(len(items)) if i != index], ";")
+
+fn _context(plan: dict[str,json], root: str, space: str, id: str):
+    if json_int(plan["format"]) != 1 or schema.text(plan, "id") != id or schema.text(plan, "root") != path.identity(root) or schema.text(plan, "namespace") != space:
+        raise "setup: integration identity/namespace mismatch; use the original installer mode"
+
+fn prepare(app: schema.Application, root: str, value: json, add_path: bool, space: str) -> json:
+    source = schema.object(value)
+    receipt = schema.object(source["receipt"])
+    generation = schema.text(source, "generation")
+    owner = "wood-installer-v1:" + path.identity(root)
+    if native.check(wood_setup_registration_available(owner), "check application registration ownership") != 1:
+        raise "setup: application registration belongs to another installation"
+    previous: dict[str,json] = {}
+    if "integration" in receipt:
+        previous = schema.object(receipt["integration"])
+        _context(previous, root, space, app.id)
+    before = read_setting(0, "Path")
+    prior_path = schema.object(before)
+    text = schema.text(prior_path, "text")
+    created = json_int(prior_path["type"]) == 0
+    if "created_path" in previous:
+        created = json_bool(previous["created_path"])
+    if "owned" in previous and json_bool(previous["owned"]):
+        text = without_component(text, schema.text(previous, "bin"))
+    directory = path.combine(root, generation + "/bin")
+    owned = false
+    if add_path:
+        if ";" in directory or (json_int(prior_path["type"]) == 2 and "%" in directory):
+            raise "setup: choose a location without ';' or expandable '%' for PATH, or uncheck Add to PATH"
+        if not contains_component(text, directory):
+            text = text + ";" + directory if text != "" else directory
+            owned = true
+    after = _state(json_int(prior_path["type"]) if json_int(prior_path["type"]) != 0 else 1, text)
+    if text == "" and json_int(prior_path["type"]) == 0:
+        after = before
+    values = [_change(0, "Path", before, after)]
+    executable = path.combine(root, generation + "/bin/wood-uninstall.exe")
+    command = "\"" + executable + "\" --uninstall \"" + root + "\""
+    if space != "":
+        command += " --sandbox " + space
+    fields = {"DisplayName": app.name, "DisplayVersion": app.version, "Publisher": app.publisher, "InstallLocation": root, "UninstallString": command, "WoodInstallerOwner": owner, "DisplayIcon": path.combine(root, generation + "/" + app.command)}
+    for key in fields:
+        current = read_setting(1, key)
+        if len(previous) > 0:
+            for old in json_list(previous["values"]):
+                item = schema.object(old)
+                if json_int(item["section"]) == 1 and schema.text(item, "key") == key and not _same(current, item["after"]):
+                    raise "setup: application registration was edited; preserving '" + key + "'"
+        append(values, _change(1, key, current, _state(1, fields[key])))
+    return json({"format": json(1), "id": json(app.id), "root": json(path.identity(root)), "namespace": json(space), "values": json(values), "bin": json(directory), "owned": json(owned), "created_path": json(created), "uninstaller": json(generation + "/bin/wood-uninstall.exe")})
+
+fn uninstall_plan(receipt: json, root: str, space: str, id: str) -> json:
+    original = schema.object(schema.object(receipt)["integration"])
+    _context(original, root, space, id)
+    values: list[json] = []
+    for value in json_list(original["values"]):
+        item = schema.object(value)
+        section = json_int(item["section"])
+        key = schema.text(item, "key")
+        current = read_setting(section, key)
+        if section == 0:
+            state = schema.object(current)
+            text = schema.text(state, "text")
+            removed = json_bool(original["owned"]) and contains_component(text, schema.text(original, "bin"))
+            if removed:
+                text = without_component(text, schema.text(original, "bin"))
+            after = _state(json_int(state["type"]), text)
+            if removed and text == "" and json_bool(original["created_path"]):
+                after = _state(0, "")
+            append(values, _change(section, key, current, after))
+        else:
+            if not _same(current, item["after"]):
+                raise "setup: application registration changed; preserving '" + key + "'"
+            append(values, _change(section, key, current, _state(0, "")))
+    result = original
+    result["values"] = json(values)
+    return json(result)
+
+fn apply(plan: json, root: str, space: str, id: str, undo: bool = false):
+    data = schema.object(plan)
+    _context(data, root, space, id)
+    entries = json_list(data["values"])
+    # Validate the whole snapshot before modifying any value. Each native write
+    # compares again. Non-cooperating concurrent registry writers are not locked.
+    for entry in entries:
+        change = schema.object(entry)
+        current = read_setting(json_int(change["section"]), schema.text(change, "key"))
+        if not _same(current, change["before"]) and not _same(current, change["after"]):
+            raise "setup: concurrent setting change; preserving user edits to '" + schema.text(change, "key") + "'"
+    for n in range(len(entries)):
+        index = len(entries) - 1 - n if undo else n
+        change = schema.object(entries[index])
+        current = read_setting(json_int(change["section"]), schema.text(change, "key"))
+        target = change["before"] if undo else change["after"]
+        if not _same(current, target):
+            _set(change, current, target)
+
+fn _ps_literal(value: str) -> str:
+    return "'" + replace(value, "'", "''") + "'"
+
+fn _encoded(script: str) -> str:
+    bytes: list[int] = []
+    for point in utf8.decode(script):
+        if point > 65535:
+            point -= 65536
+            high = 55296 + point // 1024
+            append(bytes, high % 256)
+            append(bytes, high // 256)
+            point = 56320 + point % 1024
+        append(bytes, point % 256)
+        append(bytes, point // 256)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    pieces: list[str] = []
+    for i in range(0, len(bytes), 3):
+        a = bytes[i]
+        b = bytes[i + 1] if i + 1 < len(bytes) else 0
+        c = bytes[i + 2] if i + 2 < len(bytes) else 0
+        append(pieces, alphabet[a // 4] + alphabet[(a % 4) * 16 + b // 16] + (alphabet[(b % 16) * 4 + c // 64] if i + 1 < len(bytes) else "=") + (alphabet[c % 64] if i + 2 < len(bytes) else "="))
+    return join(pieces, "")
+
+fn handoff(root: str, space: str, executable: str, digest: str):
+    # A fixed OS helper only waits, invokes the Wood uninstaller and removes its
+    # verified now-unmapped image/empty directories. No arbitrary install hook.
+    if fs.kind(known(1)) != "file":
+        raise "setup: Windows PowerShell is required for safe uninstaller cleanup"
+    process = array_full(2, 0)
+    native.check(wood_setup_process_identity(process), "read uninstaller process identity")
+    schema.hash_text(digest)
+    script = "$ErrorActionPreference='Stop';$exe=" + _ps_literal(executable) + ";$root=" + _ps_literal(root) + ";$space=" + _ps_literal(space) + ";$sha=" + _ps_literal(digest) + ";"
+    # Use OS .NET methods, not discoverable PowerShell modules. A launching
+    # terminal may have an incompatible/custom PSModulePath; never load it.
+    script += "function OwnedHash($file){$s=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($s)).Replace('-','').ToLowerInvariant()}finally{$s.Dispose();$h.Dispose()}};try{"
+    script += "try{$p=[Diagnostics.Process]::GetProcessById(" + str(process[0]) + ");if($p.StartTime.ToFileTimeUtc() -eq " + str(process[1]) + "){$p.WaitForExit()};$p.Dispose()}catch [ArgumentException]{};"
+    script += "if([IO.File]::GetAttributes($exe) -band [IO.FileAttributes]::ReparsePoint){throw 'Uninstaller is a link'};if((OwnedHash $exe) -ne $sha){throw 'Uninstaller integrity mismatch'};"
+    script += "$start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$exe;$start.UseShellExecute=$false;$start.Arguments='--uninstall-worker \"'+$root+'\"';if($space -ne ''){$start.Arguments+=' --sandbox '+$space};$child=[Diagnostics.Process]::Start($start);$child.WaitForExit();if($child.ExitCode -ne 0){exit $child.ExitCode};$child.Dispose();"
+    script += "for($retry=0;$retry -lt 30;$retry++){if([IO.File]::GetAttributes($exe) -band [IO.FileAttributes]::ReparsePoint){throw 'Uninstaller changed to a link'};if((OwnedHash $exe) -ne $sha){throw 'Uninstaller integrity changed'};try{[IO.File]::Delete($exe);break}catch{if($retry -eq 29){throw};[Threading.Thread]::Sleep(100)}};$dir=[IO.Path]::GetDirectoryName($exe);"
+    script += "for($i=0;$i -lt 3;$i++){try{if(([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -eq 0){[IO.Directory]::Delete($dir,$false)}}catch{};$dir=[IO.Path]::GetDirectoryName($dir)}"
+    script += "}catch{try{$log=[IO.File]::Open([IO.Path]::Combine($root,'uninstall-error-'+[Guid]::NewGuid().ToString('N')+'.log'),[IO.FileMode]::CreateNew);$writer=[IO.StreamWriter]::new($log);$writer.WriteLine($_.ToString());$writer.Dispose()}catch{};exit 2}"
+    native.check(wood_setup_start_cleanup(_encoded(script)), "start Windows uninstaller cleanup controller")

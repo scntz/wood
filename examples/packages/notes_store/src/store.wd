@@ -1,0 +1,20 @@
+import std.sqlite as sql
+import std.utf8 as utf8
+
+fn initialize(connection: database):
+    sql.execute(connection, "CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL, created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)", [])
+
+fn add(connection: database, body: str) -> int:
+    if len(body) == 0 or len(body) > 65536 or find(body, "\0") >= 0:
+        raise "note must contain 1..65536 UTF-8 bytes without NUL"
+    utf8.length(body)
+    with sql.begin(connection) as transaction:
+        sql.execute(connection, "INSERT INTO notes(body) VALUES(?)", [json(body)])
+        id = sql.last_id(connection)
+        sql.commit(transaction)
+        return id
+
+fn recent(connection: database, limit: int = 20) -> list[dict[str,json]]:
+    if limit < 1 or limit > 100:
+        raise "note query limit must be in 1..100"
+    return sql.query(connection, "SELECT id,body,created FROM notes ORDER BY id DESC LIMIT ?", [json(limit)], limit, 8388608)

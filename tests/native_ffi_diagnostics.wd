@@ -1,0 +1,19 @@
+import std.num as num
+extern fn wood_array_sum(values:array[float]) -> float
+extern fn wood_array_scale(mut values:array[float],factor:float)
+extern fn wood_native_fold(count:int,step:fn(int,int)->int) -> int
+fn failure(a:int,b:int) -> int:
+    raise "callback diagnostic"
+view = num.transpose(num.reshape(num.full(6,1.0),(2,3)))
+try:
+    wood_array_sum(view)
+except err:
+    print(json_dump(err))
+try:
+    wood_array_scale(view,2.0)
+except err:
+    print(json_dump(err))
+try:
+    wood_native_fold(3,failure)
+except err:
+    print(json_dump(err))

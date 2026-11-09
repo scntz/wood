@@ -1,0 +1,47 @@
+# Eager native algorithms. Concrete callback types preserve native dispatch.
+fn map[T, U, F](transform: F(T) -> U, items: list[T]) -> list[U]:
+    return [transform(item) for item in items]
+
+fn filter[T, F](predicate: F(T) -> bool, items: list[T]) -> list[T]:
+    return [item for item in items if predicate(item)]
+
+fn fold[T, U, F](step: F(U, T) -> U, items: list[T], initial: U) -> U:
+    result = initial
+    for item in items:
+        result = step(result, item)
+    return result
+
+fn first[T](items: list[T]) -> T | None:
+    if len(items) == 0:
+        return None
+    return items[0]
+
+fn find_first[T, F](predicate: F(T) -> bool, items: list[T]) -> T | None:
+    for item in items:
+        if predicate(item):
+            return item
+    return None
+
+fn zip[T, U](left: list[T], right: list[U]) -> list[tuple[T, U]]:
+    count = len(left)
+    if len(right) < count:
+        count = len(right)
+    return [(left[index], right[index]) for index in range(count)]
+
+fn enumerate[T](items: list[T], start: int = 0) -> list[tuple[int, T]]:
+    return [(start + index, items[index]) for index in range(len(items))]
+
+fn partition[T, F](predicate: F(T) -> bool, items: list[T]) -> tuple[list[T], list[T]]:
+    accepted: list[T] = []
+    rejected: list[T] = []
+    for item in items:
+        if predicate(item):
+            append(accepted, item)
+        else:
+            append(rejected, item)
+    return (accepted, rejected)
+
+fn lookup[K, V](items: dict[K, V], key: K) -> V | None:
+    if key in items:
+        return items[key]
+    return None

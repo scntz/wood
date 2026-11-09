@@ -1,0 +1,44 @@
+import installer.manifest as schema
+import installer._native as native
+
+for name in ["bin/wood.exe", "docs/á🌳.md", "LICENSE-MIT"]:
+    schema.relative(name)
+for name in ["", "/etc/passwd", "../x", "a/../x", "a\\x", "a//b", "NUL.txt", "COM1", "a.", "a ", "a/./b", "C:/x", "a\0b"]:
+    caught = false
+    try:
+        schema.relative(name)
+    except err:
+        caught = true
+    assert(caught)
+assert(schema.lower("AbC-123-á") == "abc-123-á")
+empty: list[json] = []
+base = {"format": json(1), "id": json("wood"), "name": json("wood"), "version": json("0.4.0-preview"), "publisher": json("Wood"), "architecture": json("windows-x86_64"), "license": json("MIT OR Apache-2.0"), "command": json("bin/wood.exe"), "path_default": json(true), "desktop": json(""), "start_menu": json(""), "files": json([json({"name": json("bin/wood.exe"), "size": json(0), "offset": json(100), "sha256": json("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")})])}
+app = schema.decode(json(base))
+assert(app.desktop == "" and app.path_default)
+for key in ["desktop", "start_menu"]:
+    other = base
+    other["id"] = json("another_application")
+    other[key] = json("bin/wood.exe")
+    schema.decode(json(other))
+    invalid = other
+    invalid[key] = json("missing-target.exe")
+    caught = false
+    try:
+        schema.decode(json(invalid))
+    except err:
+        caught = true
+    assert(caught)
+for name in ["../outside", "bin/WOOD.exe", "bin/wood.exe/child"]:
+    invalid = base
+    entries = json_list(base["files"])
+    entry = json_dict(entries[0])
+    entry["name"] = json(name)
+    append(entries, json(entry))
+    invalid["files"] = json(entries)
+    caught = false
+    try:
+        schema.decode(json(invalid))
+    except err:
+        caught = true
+    assert(caught)
+print("installer manifest contracts passed")

@@ -1,0 +1,6 @@
+import installer._native as native
+arguments = args()
+assert(len(arguments) % 2 == 0)
+for index in range(0, len(arguments), 2):
+    assert(native.digest(arguments[index]) == arguments[index + 1])
+print("installer SHA-256 vectors passed: " + str(len(arguments) // 2))

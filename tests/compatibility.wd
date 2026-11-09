@@ -1,0 +1,15 @@
+# Valid Wood 0.3 names remain usable after adding data helpers/declarations.
+fn get(a: int, b: int, c: int) -> int:
+    return a + b + c
+
+fn json(text: str) -> str:
+    return text
+
+record = 7
+values = [1, 2, 3]
+keys = "legacy"
+slice = true
+assert(get(1, 2, 3) == 6)
+assert(json(keys) == "legacy")
+assert(record == 7 and slice and len(values) == 3)
+print("compatibility ok")

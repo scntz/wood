@@ -1,0 +1,10 @@
+changelog:
+  exclude:
+    labels: [skip-changelog]
+  categories:
+    - title: Fixes
+      labels: [bug]
+    - title: Documentation and tooling
+      labels: [documentation, tooling]
+    - title: Other changes
+      labels: ['*']

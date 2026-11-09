@@ -1,0 +1,21 @@
+from report import StockReport, summarize
+import schema.models as model
+
+result = summarize('[{"sku":"apple","unit_price":1.5,"quantity":4},{"sku":"pear","unit_price":2,"quantity":3}]')
+assert(result.items == 2 and result.units == 7)
+assert(result.inventory_value == 12.0)
+expected: model.Product = model.Product("apple", 1.5, 4)
+assert(result.products["apple"] == expected)
+assert(summarize("[]") == StockReport(0, 0, 0.0, {}))
+unchanged = result
+result.products["apple"].quantity = 99
+assert(unchanged.products["apple"].quantity == 4)
+errors = 0
+for invalid in ['[{"sku":"x","unit_price":1,"quantity":-1}]', '[{"sku":"x","unit_price":1,"quantity":2},{"sku":"x","unit_price":1,"quantity":3}]', '[{"sku":"x","unit_price":1,"quantity":2,"extra":true}]']:
+    try:
+        summarize(invalid)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+        errors = errors + 1
+assert(errors == 3)

@@ -1,0 +1,43 @@
+# Sequential native HTTP JSON service. Explicit bind address; no implicit public
+# exposure. POST /sum with [1,2,3], GET/HEAD /health. No TLS or authentication.
+import std.http as http
+import std.net as net
+
+fn route(message: http.Request) -> http.Response:
+    headers = [http.Header("Content-Type", "application/json")]
+    if message.target == "/health" and message.method in ["GET", "HEAD"]:
+        return http.Response(200, "OK", headers, json_dump({"status": "ok"}))
+    if message.target == "/sum" and message.method == "POST":
+        total = 0
+        for value in json_list(json_parse(message.body)):
+            total = total + json_int(value)
+        return http.Response(200, "OK", headers, json_dump({"sum": total}))
+    return http.Response(404, "Not Found", headers, json_dump({"error": "route not found"}))
+
+arguments = args()
+if len(arguments) < 3 or len(arguments) > 4:
+    eprint("usage: http_json_server address port requests [ready_file]")
+    eprint("requests=0 serves until interrupted; port=0 selects a free port")
+    exit(1)
+maximum = int(arguments[2])
+if maximum < 0:
+    raise "requests must be nonnegative"
+limits = http.Limits(16384, 1048576, 30000)
+with net.listen(arguments[0], int(arguments[1]), 60000) as listener:
+    if len(arguments) == 4:
+        write_text(arguments[3], str(net.port(listener)) + "\n")
+    print("listening on", arguments[0], net.port(listener))
+    served = 0
+    while maximum == 0 or served < maximum:
+        with net.accept(listener) as connection:
+            result = http.Response(400, "Bad Request", [http.Header("Content-Type", "application/json")], json_dump({"error": "invalid request"}))
+            head_only = false
+            try:
+                message = http.read_request(connection, limits)
+                result = route(message)
+                head_only = message.method == "HEAD"
+            except err:
+                # Fixed public error content; source paths and parser details stay private.
+                pass
+            http.write_response(connection, result, head_only, limits)
+        served = served + 1

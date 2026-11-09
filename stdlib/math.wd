@@ -1,0 +1,321 @@
+fn gcd(a: int, b: int) -> int:
+    # The nonnegative result must fit int; abs(INT64_MIN) is an error.
+    if a < 0:
+        a = -a
+    if b < 0:
+        b = -b
+    while b != 0:
+        remainder = a % b
+        a = b
+        b = remainder
+    return a
+
+fn lcm(a: int, b: int) -> int:
+    if a == 0 or b == 0:
+        return 0
+    value = (a // gcd(a, b)) * b
+    if value < 0:
+        return -value
+    return value
+
+fn pow_int(base: int, exponent: int) -> int:
+    if exponent < 0:
+        raise "pow_int requires a nonnegative exponent"
+    result = 1
+    while exponent > 0:
+        if exponent % 2 == 1:
+            result = result * base
+        exponent = exponent // 2
+        if exponent > 0:
+            base = base * base
+    return result
+
+fn clamp_int(value: int, low: int, high: int) -> int:
+    if low > high:
+        raise "clamp_int requires low <= high"
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
+
+# Floating point. These follow IEEE propagation like std.num: a NaN or infinity passes through,
+# log(0) is negative infinity, and arguments outside a function's domain give NaN.
+fn pi() -> float:
+    return 3.141592653589793
+
+fn e() -> float:
+    return 2.718281828459045
+
+fn radians(value: float) -> float:
+    return value*0.017453292519943295
+
+fn degrees(value: float) -> float:
+    return value*57.29577951308232
+
+fn _infinity() -> float:
+    return 1e308*10.0
+
+fn _nan() -> float:
+    return _infinity()-_infinity()
+
+fn abs(value: float) -> float:
+    return -value if value < 0.0 else value
+
+# The earlier name, which the pinned wood_image still calls.
+fn abs_float(value: float) -> float:
+    return abs(value)
+
+# Beyond 2^52 every finite double is already whole, which also keeps int() in range.
+fn _whole(value: float) -> bool:
+    return not math_finite(value) or abs(value) >= 4503599627370496.0
+
+fn trunc(value: float) -> float:
+    if _whole(value):
+        return value
+    return float(int(value))
+
+fn floor(value: float) -> float:
+    if _whole(value):
+        return value
+    whole = float(int(value))
+    return whole-1.0 if whole > value else whole
+
+fn ceil(value: float) -> float:
+    if _whole(value):
+        return value
+    whole = float(int(value))
+    return whole+1.0 if whole < value else whole
+
+# Halfway cases round away from zero.
+fn round(value: float) -> float:
+    if _whole(value):
+        return value
+    whole = trunc(value)
+    rest = abs(value-whole)
+    if rest >= 0.5:
+        return whole+1.0 if value > 0.0 else whole-1.0
+    return whole
+
+# value * 2^power, in steps so an intermediate cannot overflow or lose bits early.
+fn _scale(value: float, power: int) -> float:
+    while power > 1000:
+        value = value*1.0715086071862673e301
+        power = power-1000
+    while power < -1000:
+        value = value*9.332636185032189e-302
+        power = power+1000
+    factor = 1.0
+    step = 2.0 if power > 0 else 0.5
+    count = power if power > 0 else -power
+    while count > 0:
+        if count & 1 == 1:
+            factor = factor*step
+        step = step*step
+        count = count >> 1
+    return value*factor
+
+# Reduction by ln 2 to [-ln2/2, ln2/2], then a polynomial.
+fn exp(value: float) -> float:
+    if not math_finite(value):
+        return 0.0 if value < 0.0 else value
+    if value > 709.782712893384:
+        return _infinity()
+    if value < -745.1332191019412:
+        return 0.0
+    k = int(round(value*1.4426950408889634))
+    high = value-float(k)*0.6931471803691238
+    low = float(k)*1.9082149292705877e-10
+    r = high-low
+    # Taylor terms in Horner form. On this interval the fourteenth is below the last bit.
+    series = 1.0
+    for term in range(14,0,-1):
+        series = 1.0+r*series/float(term)
+    return _scale(series,k)
+
+# Splits value into m * 2^k with m in [sqrt(1/2), sqrt(2)].
+fn _split(value: float) -> tuple[float,int]:
+    k = 0
+    if value < 2.2250738585072014e-308:
+        value = value*18014398509481984.0
+        k = -54
+    while value >= 1.4142135623730951:
+        if value >= 1.8446744073709552e19:
+            value = value*5.421010862427522e-20
+            k = k+64
+        else:
+            value = value*0.5
+            k = k+1
+    while value < 0.7071067811865476:
+        if value < 5.421010862427522e-20:
+            value = value*1.8446744073709552e19
+            k = k-64
+        else:
+            value = value*2.0
+            k = k-1
+    return (value,k)
+
+fn _log_fraction(m: float) -> float:
+    f = m-1.0
+    s = f/(2.0+f)
+    z = s*s
+    w = z*z
+    r = w*(0.3999999999940942+w*(0.22222198432149784+w*0.15313837699209373))+z*(0.6666666666666735+w*(0.2857142874366239+w*(0.1818357216161805+w*0.14798198605116586)))
+    half = 0.5*f*f
+    return f-(half-s*(half+r))
+
+fn log(value: float) -> float:
+    if value == 0.0:
+        return -_infinity()
+    if value < 0.0 or not math_finite(value):
+        return _nan() if value < 0.0 or value != value else value
+    parts = _split(value)
+    k = float(parts[1])
+    return k*0.6931471803691238+(k*1.9082149292705877e-10+_log_fraction(parts[0]))
+
+fn log2(value: float) -> float:
+    if value <= 0.0 or not math_finite(value):
+        return log(value)
+    parts = _split(value)
+    return float(parts[1])+_log_fraction(parts[0])*1.4426950408889634
+
+# Exact for every power of ten a double holds exactly.
+fn log10(value: float) -> float:
+    result = log(value)*0.4342944819032518
+    if not math_finite(result):
+        return result
+    nearest = round(result)
+    if abs(result-nearest) < 0.000000001 and pow(10.0,nearest) == value:
+        return nearest
+    return result
+
+fn pow(base: float, power: float) -> float:
+    if power == 0.0 or base == 1.0:
+        return 1.0
+    if base != base or power != power:
+        return _nan()
+    if not math_finite(power):
+        size = abs(base)
+        if size == 1.0:
+            return 1.0
+        return _infinity() if (size > 1.0) == (power > 0.0) else 0.0
+    whole = power == floor(power)
+    # An odd whole power keeps a negative base's sign. Past 2^53 every double is even.
+    odd = whole and abs(power) < 9007199254740992.0 and int(abs(power)) & 1 == 1
+    if base == 0.0:
+        return 0.0 if power > 0.0 else _infinity()
+    if not math_finite(base):
+        if power < 0.0:
+            return 0.0
+        return -_infinity() if base < 0.0 and odd else _infinity()
+    if base < 0.0 and not whole:
+        return _nan()
+    size = abs(base)
+    result = 1.0
+    if whole and abs(power) <= 1024.0:
+        count = int(abs(power))
+        square = size
+        while count > 0:
+            if count & 1 == 1:
+                result = result*square
+            square = square*square
+            count = count >> 1
+        if power < 0.0:
+            # A reciprocal is rounded once. A subnormal result needs the logarithm instead.
+            if result == 0.0 or not math_finite(result):
+                result = exp(power*log(size))
+            else:
+                result = 1.0/result
+    else:
+        result = exp(power*log(size))
+    return -result if base < 0.0 and odd else result
+
+fn hypot(a: float, b: float) -> float:
+    x = abs(a)
+    y = abs(b)
+    if not math_finite(x) or not math_finite(y):
+        if x == _infinity() or y == _infinity():
+            return _infinity()
+        return _nan()
+    large = x if x > y else y
+    small = y if x > y else x
+    if large == 0.0:
+        return 0.0
+    ratio = small/large
+    return large*math_sqrt(1.0+ratio*ratio)
+
+fn sqrt(value: float) -> float:
+    return math_sqrt(value)
+
+fn sin(value: float) -> float:
+    return math_sin(value)
+
+fn cos(value: float) -> float:
+    return math_cos(value)
+
+fn tan(value: float) -> float:
+    return math_sin(value)/math_cos(value)
+
+# Reduction to [0, 7/16] and a polynomial, after fdlibm.
+fn atan(value: float) -> float:
+    if value != value:
+        return value
+    x = abs(value)
+    if x > 1e300:
+        return 1.5707963267948966 if value > 0.0 else -1.5707963267948966
+    high = 0.0
+    low = 0.0
+    if x >= 0.4375:
+        if x < 0.6875:
+            high = 0.4636476090008061
+            low = 2.2698777452961687e-17
+            x = (2.0*x-1.0)/(2.0+x)
+        elif x < 1.1875:
+            high = 0.7853981633974483
+            low = 3.061616997868383e-17
+            x = (x-1.0)/(x+1.0)
+        elif x < 2.4375:
+            high = 0.982793723247329
+            low = 1.3903311031230998e-17
+            x = (x-1.5)/(1.0+1.5*x)
+        else:
+            high = 1.5707963267948966
+            low = 6.123233995736766e-17
+            x = -1.0/x
+    z = x*x
+    w = z*z
+    s1 = z*(0.3333333333333293+w*(0.14285714272503466+w*(0.09090887133436507+w*(0.06661073137387531+w*(0.049768779946159324+w*0.016285820115365782)))))
+    s2 = w*(-0.19999999999876483+w*(-0.11111110405462356+w*(-0.0769187620504483+w*(-0.058335701337905735+w*-0.036531572744216916))))
+    result = high-((x*(s1+s2)-low)-x)
+    return result if value >= 0.0 else -result
+
+fn atan2(y: float, x: float) -> float:
+    if x != x or y != y:
+        return _nan()
+    if x == 0.0:
+        if y == 0.0:
+            return 0.0
+        return 1.5707963267948966 if y > 0.0 else -1.5707963267948966
+    if not math_finite(x) or not math_finite(y):
+        if not math_finite(x) and not math_finite(y):
+            corner = 0.7853981633974483 if x > 0.0 else 2.356194490192345
+            return corner if y > 0.0 else -corner
+        if not math_finite(y):
+            return 1.5707963267948966 if y > 0.0 else -1.5707963267948966
+        if x > 0.0:
+            return 0.0
+        return 3.141592653589793 if y >= 0.0 else -3.141592653589793
+    angle = atan(y/x)
+    if x > 0.0:
+        return angle
+    return angle+3.141592653589793 if y >= 0.0 else angle-3.141592653589793
+
+fn asin(value: float) -> float:
+    if value != value or abs(value) > 1.0:
+        return _nan()
+    return atan2(value,math_sqrt((1.0-value)*(1.0+value)))
+
+fn acos(value: float) -> float:
+    if value != value or abs(value) > 1.0:
+        return _nan()
+    return atan2(math_sqrt((1.0-value)*(1.0+value)),value)

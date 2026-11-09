@@ -1,0 +1,30 @@
+import std.csv as csv
+import std.env as env
+import std.io as io
+import std.utf8 as utf8
+
+# wood configured_report.wd -- input.csv new-report.json
+# Optional WOOD_CSV_DELIMITER configures a single-byte separator, default comma.
+if len(args()) != 2:
+    eprint("usage: configured_report input.csv new-report.json")
+    exit(2)
+delimiter = ","
+configured = env.get("WOOD_CSV_DELIMITER")
+if configured is not None:
+    delimiter = unwrap(configured)
+contents = ""
+with io.open(args()[0],"r") as input:
+    contents = io.read_all(input,16777216)
+if not utf8.is_valid(contents):
+    raise "report input must be valid UTF-8"
+rows = csv.read_table(contents,delimiter)
+totals: dict[str,int] = {}
+for row in rows:
+    name = row["name"]
+    totals[name] = get(totals,name,0) + int(row["quantity"])
+# Validate all input and encode before exclusively creating the output.
+report = json_dump(totals) + "\n"
+with io.open(args()[1],"x") as output:
+    io.write(output,report)
+    io.flush(output)
+print("wrote",len(totals),"totals")

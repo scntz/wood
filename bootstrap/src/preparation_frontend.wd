@@ -1,0 +1,5 @@
+import signature_frontend as signatures
+import semantic_preparation as preparation
+
+fn load(input: str, standards: dict[str,str]) -> preparation.Result:
+    return preparation.check(signatures.load(input,standards))

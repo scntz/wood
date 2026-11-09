@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.25)
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef id)
+set(TEST_DIR "${TEST_DIR}/run-${id}")
+file(MAKE_DIRECTORY "${TEST_DIR}")
+foreach(case IN ITEMS native_math native_text native_computing obj_import)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -DEMITTER=${EMITTER} -DSTDLIB=${STDLIB}
+        -DINPUT=${SOURCE_DIR}/tests/${case}.wd -DOUTPUT=${TEST_DIR}/${case} -DTARGET=linux-x86_64
+        -DLLC=${LLC} -DOPT=${OPT} -DLINKER=${LINKER} -DOPTIMIZATION=${LEVEL}
+        -DRUNTIME_OBJECT=${RUNTIME_OBJECT} -P "${SOURCE_DIR}/tools/build-native.cmake"
+        RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 300)
+    file(WRITE "${TEST_DIR}/${case}-build.log" "${out}${err}")
+    if(NOT status STREQUAL "0")
+        message(FATAL_ERROR "Native ${case} build failed: ${status}: ${out}${err}")
+    endif()
+    execute_process(COMMAND readelf -l -d "${TEST_DIR}/${case}" RESULT_VARIABLE status OUTPUT_VARIABLE deps)
+    if(NOT status STREQUAL "0" OR deps MATCHES "INTERP|NEEDED")
+        message(FATAL_ERROR "Native math application is not static: ${deps}")
+    endif()
+endforeach()
+set(MATH_EXE "${TEST_DIR}/native_math")
+set(TEXT_EXE "${TEST_DIR}/native_text")
+set(COMPUTING_EXE "${TEST_DIR}/native_computing")
+set(OBJ_EXE "${TEST_DIR}/obj_import")
+set(CXX /usr/bin/g++)
+include("${SOURCE_DIR}/tests/native/math-oracle.cmake")

@@ -1,0 +1,23 @@
+import std.net as net
+import std.io as io
+import std.tls as tls
+import std.task as tasks
+
+fn client(message: json) -> json:
+    values = json_list(message)
+    with tls.connect("::1", json_int(values[0]), json_str(values[1]), 30000) as connection:
+        io.write(connection, "hello IPv6")
+        assert(io.read_all(connection, 3) == "ack")
+    return json(true)
+
+arguments = args()
+assert(len(arguments) == 2)
+with tls.server(arguments[0], arguments[1]) as context:
+    with net.listen("::1", 0, 30000) as listener:
+        with tasks.spawn(client, json([json(net.port(listener)), json(arguments[0])])) as work:
+            with net.accept(listener) as raw:
+                with tls.accept(raw, context) as secure:
+                    assert(io.read_exact(secure, 10) == "hello IPv6")
+                    io.write(secure, "ack")
+            assert(json_bool(tasks.wait(work, 30000)))
+print("IPv6 TLS passed")

@@ -1,0 +1,221 @@
+# Shared reference/native corpus: identity ownership, typed bindings, strict
+# statement phases, rollback on every exit, bounded SQL and real task workers.
+import std.sqlite as sql
+import std.task as tasks
+import std.fs as fs
+import std.time as time
+
+fn retained_statement() -> statement:
+    connection = sql.open(":memory:", 10000)
+    return sql.prepare(connection, "SELECT 42")
+
+fn abandoned_ancestor(connection: database) -> transaction:
+    outer = sql.begin(connection)
+    inner = sql.begin(connection)
+    sql.execute(connection, "INSERT INTO values_table VALUES(123)", [])
+    return inner
+
+fn worker(message: json) -> json:
+    with sql.open(":memory:", 10000) as connection:
+        sql.execute(connection, "CREATE TABLE sample(value INTEGER)", [])
+        with sql.begin(connection) as scope:
+            for value in range(32):
+                sql.execute(connection, "INSERT INTO sample VALUES(?)", [json(value)])
+            sql.commit(scope)
+        rows = sql.query(connection, "SELECT sum(value) AS total FROM sample", [], 1, 100)
+        return rows[0]["total"]
+
+fn scoped_return(connection: database) -> int:
+    with sql.begin(connection) as scope:
+        sql.execute(connection, "INSERT INTO values_table VALUES(11)", [])
+        return 7
+
+fn cancel_query(message: json) -> json:
+    path = json_str(message)
+    try:
+        with sql.open(path, 120000) as connection:
+            sql.execute(connection, "CREATE TABLE counter(value INTEGER)", [])
+            with sql.begin(connection) as scope:
+                write_text(path + ".ready", "ready")
+                sql.execute(connection, "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) INSERT INTO counter SELECT x FROM n", [])
+                sql.commit(scope)
+        return json("unexpected completion")
+    except err:
+        return json(err.code)
+
+# Race first-time library/API initialization in real workers before any main
+# thread SQLite call; each worker owns its own connection and ELF TLS state.
+jobs = [tasks.spawn(worker, json(index)) for index in range(8)]
+for job in jobs:
+    assert(json_int(tasks.wait(job, 120000)) == 496)
+    assert(json_int(tasks.wait(job, 120000)) == 496)
+    tasks.close(job)
+assert(len(sql.version()) > 0)
+cursor = retained_statement()
+assert(stmt_step(cursor) and stmt_int(cursor, 0) == 42)
+stmt_close(cursor)
+assert(str(cursor) == "<statement:closed>")
+root = sql.open(":memory:", 10000)
+alias = root
+with root as connection:
+    assert(alias == connection and str([alias]) == "[<database:open>]")
+    sql.execute(connection, "CREATE TABLE values_table(value INTEGER UNIQUE)", [])
+    assert(scoped_return(connection) == 7)
+    for control in range(2):
+        with sql.begin(connection) as scope:
+            sql.execute(connection, "INSERT INTO values_table VALUES(?)", [json(control)])
+            if control == 0:
+                continue
+            break
+    inner = abandoned_ancestor(connection)
+    assert(str(inner) == "<transaction:closed>")
+    try:
+        sql.commit(inner)
+        assert(false)
+    except err:
+        assert(err.code == "R4020" and err.message == "transaction is closed")
+    assert(json_int(sql.query(connection, "SELECT count(*) AS n FROM values_table", [], 1, 100)[0]["n"]) == 0)
+    closed_transactions: list[transaction] = []
+    with sql.begin(connection) as outer:
+        append(closed_transactions, outer)
+        assert(str([outer]) == "[<transaction:active>]")
+        with sql.begin(connection) as inner_scope:
+            for action in range(2):
+                try:
+                    if action == 0:
+                        sql.commit(outer)
+                    else:
+                        sql.rollback(outer)
+                    assert(false)
+                except err:
+                    assert(err.code == "R4020" and err.message == "transactions must finish in reverse scope order")
+    assert(str(closed_transactions[0]) == "<transaction:closed>")
+    nested: list[transaction] = []
+    for index in range(64):
+        append(nested, sql.begin(connection))
+    try:
+        sql.begin(connection)
+        assert(false)
+    except err:
+        assert(err.code == "R4020" and err.message == "transaction nesting exceeds 64")
+    for index in range(63, -1, -1):
+        sql.rollback(nested[index])
+    with sql.prepare(connection, "SELECT ?, ?, ?") as bound:
+        for invalid in [0, -1, 4, 9223372036854775807]:
+            try:
+                stmt_bind_null(bound, invalid)
+                assert(false)
+            except err:
+                assert(err.code == "R4020")
+        try:
+            stmt_bind_text(bound, 1, byte_string(255))
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+        stmt_bind_text(bound, 1, "")
+        stmt_bind_blob(bound, 2, "")
+        stmt_bind_null(bound, 3)
+        assert(stmt_step(bound))
+        assert(stmt_kind(bound, 0) == "str" and stmt_text(bound, 0) == "")
+        assert(stmt_kind(bound, 1) == "blob" and stmt_blob(bound, 1) == "")
+        assert(stmt_kind(bound, 2) == "null")
+        for action in range(4):
+            try:
+                if action == 0:
+                    stmt_bind_int(bound, 1, 1)
+                elif action == 1:
+                    stmt_text(bound, -1)
+                elif action == 2:
+                    stmt_int(bound, 0)
+                else:
+                    stmt_blob(bound, 0)
+                assert(false)
+            except err:
+                assert(err.code == "R4020")
+    with sql.prepare(connection, "INSERT INTO values_table VALUES(?)") as insert:
+        stmt_bind_int(insert, 1, 1)
+        assert(not stmt_step(insert))
+        stmt_reset(insert)
+        stmt_bind_int(insert, 1, 1)
+        for attempt in range(2):
+            try:
+                stmt_step(insert)
+                assert(false)
+            except err:
+                assert(err.code == "R4020")
+        stmt_reset(insert)
+        stmt_bind_int(insert, 1, 2)
+        assert(not stmt_step(insert))
+    sql.execute(connection, "CREATE TABLE parent(id INTEGER PRIMARY KEY)", [])
+    sql.execute(connection, "CREATE TABLE child(id INTEGER REFERENCES parent(id))", [])
+    try:
+        sql.execute(connection, "INSERT INTO child VALUES(9)", [])
+        assert(false)
+    except err:
+        assert(err.code == "R4020")
+    for invalid in ["SELECT ?1001", "SELECT 1; nonsense", "SELECT 1; SELECT 2", "SELECT 1\0"]:
+        try:
+            sql.prepare(connection, invalid)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+    # Invalid column text is rejected instead of silently transcoded.
+    with sql.prepare(connection, "SELECT CAST(X'ff' AS TEXT)") as invalid_text:
+        assert(stmt_step(invalid_text))
+        try:
+            stmt_text(invalid_text, 0)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+    # Statement registration must not accumulate expired owners or form cycles.
+    for index in range(256):
+        with sql.prepare(connection, "SELECT ?") as repeated:
+            stmt_bind_int(repeated, 1, index)
+            assert(stmt_step(repeated) and stmt_int(repeated, 0) == index)
+assert(sql.closed(alias))
+
+saved: list[database] = []
+with sql.open(":memory:", 10000) as binding:
+    append(saved, binding)
+    replacement = sql.open(":memory:", 10000)
+    append(saved, replacement)
+    binding = replacement
+assert(sql.closed(saved[0]) and not sql.closed(saved[1]))
+sql.close(saved[1])
+
+# A real rollback journal appears only after the worker's INSERT has started.
+# Cancellation must interrupt that in-flight SQLite step and roll back its rows.
+cancel_path = "sqlite-cancellation-test.db"
+assert(fs.kind(cancel_path) == "missing" and fs.kind(cancel_path + ".ready") == "missing")
+assert(fs.kind(cancel_path + "-journal") == "missing")
+cancelled = tasks.spawn(cancel_query, json(cancel_path))
+started = false
+for attempt in range(6000):
+    if fs.kind(cancel_path + ".ready") == "file" and fs.kind(cancel_path + "-journal") == "file":
+        started = true
+        break
+    if tasks.done(cancelled):
+        break
+    time.sleep(0.02)
+if not started:
+    tasks.cancel(cancelled)
+    tasks.close(cancelled)
+    assert(false, "SQLite worker did not enter its write step")
+tasks.cancel(cancelled)
+assert(json_str(tasks.wait(cancelled, 120000)) == "R4020")
+tasks.close(cancelled)
+with sql.open(cancel_path, 10000) as verify:
+    count = sql.query(verify, "SELECT count(*) AS n FROM counter", [], 1, 100)
+    assert(json_int(count[0]["n"]) == 0)
+assert(fs.remove(cancel_path))
+assert(fs.remove(cancel_path + ".ready"))
+
+# Deadline correctness, not a speed benchmark. The query cannot complete within
+# the service's 1 ms budget; a progress-handler interruption must remain catchable.
+with sql.open(":memory:", 1) as bounded:
+    try:
+        sql.query(bounded, "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) AS n FROM n", [], 1, 100)
+        assert(false)
+    except err:
+        assert(err.code == "R4020")
+print("native SQLite lifecycle passed")

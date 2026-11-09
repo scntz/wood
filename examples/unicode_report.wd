@@ -1,0 +1,30 @@
+import std.utf8 as utf8
+from std.collections import sorted_int
+
+record Character:
+    codepoint: int
+    text: str
+    count: int
+
+record TextReport:
+    bytes: int
+    codepoints: int
+    characters: list[Character]
+
+if len(args()) != 2:
+    eprint("usage: unicode_report input.txt report.json")
+    exit(2)
+try:
+    source = read_text(args()[0])
+    points = utf8.decode(source)
+    counts: dict[int, int] = {}
+    for point in points:
+        counts[point] = get(counts, point, 0) + 1
+    characters: list[Character] = []
+    for point in sorted_int(keys(counts)):
+        append(characters, Character(point, utf8.encode([point]), counts[point]))
+    report = TextReport(len(source), len(points), characters)
+    write_text(args()[1], json_dump(report) + "\n")
+except err:
+    eprint(err.code, err.message)
+    exit(1)

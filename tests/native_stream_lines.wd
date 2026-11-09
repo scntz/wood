@@ -1,0 +1,51 @@
+import std.io as io
+import std.iter as it
+
+path = "native-stream-lines.bin"
+write_text(path,"a\0b\r\nlast!")
+with io.open(path,"r") as source:
+    assert(io.line(source,5) == "a\0b\r\n")
+    assert(io.tell(source) == 5)
+    assert(io.read_exact(source,2) == "la")
+    assert(io.tell(source) == 7)
+    assert(io.line(source,3) == "st!")
+    assert(io.line(source,0) == "")
+    io.seek(source,0)
+    assert(io.read_all(source,10) == "a\0b\r\nlast!")
+    io.seek(source,0)
+    try:
+        io.line(source,4)
+        assert(false)
+    except err:
+        assert(err.code == "R4016")
+    io.seek(source,5)
+    assert(io.line(source,5) == "last!")
+
+write_text(path,"first\n\nlast")
+with io.open(path,"r") as source:
+    cursor = it.lines(source,32)
+    assert(step_value(next(cursor)) == "first\n")
+    assert(it.collect(cursor) == ["\n","last"])
+    assert(io.line(source,0) == "")
+
+for size in [0,1,4095,4096,4097,65536]:
+    value = "a" * size
+    write_text(path,value)
+    with io.open(path,"r") as source:
+        assert(io.line(source,size) == value)
+        assert(io.line(source,0) == "")
+    if size > 0:
+        with io.open(path,"r") as source:
+            try:
+                io.line(source,size-1)
+                assert(false)
+            except err:
+                assert(err.code == "R4016")
+write_text(path,"final line\n")
+with io.open(path,"r") as source:
+    alias = source
+    assert(io.line(alias,32) == "final line\n")
+    assert(io.tell(source) == 11)
+    io.seek(alias,0)
+    assert(io.read_exact(source,11) == "final line\n")
+print("native buffered file lines passed")

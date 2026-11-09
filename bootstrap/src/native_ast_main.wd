@@ -1,0 +1,28 @@
+# Exercise the actual compiler-owned AST model through the LLVM backend.
+import syntax as ast
+import lexer as lx
+
+fn make_tree(count: int):
+    tree = ast.empty()
+    append(tree.types,ast.TypeNode("Name","int",-1,-1,[]))
+    for i in range(count):
+        token = lx.Token("Integer",str(i),i,i+1,1)
+        expression = ast.Expr("Integer",token,[],[],[],[],[],-1,1)
+        append(tree.expressions,expression)
+        append(tree.roots,i)
+    return tree
+
+tree = make_tree(1200)
+snapshot = tree
+tree.expressions[0].token.text = "changed"
+tree.expressions[-1].children = [1,2,3]
+assert(snapshot.expressions[0].token.text == "0")
+assert(len(snapshot.expressions[-1].children) == 0)
+assert(tree.expressions[0].token.text == "changed")
+assert(tree.expressions[-1].children == [1,2,3])
+assert(snapshot.expressions[-1].token.text == "1199")
+total = 0
+for index in snapshot.roots:
+    total += int(snapshot.expressions[index].token.text)
+assert(total == 719400)
+print("native compiler AST passed",len(tree.expressions),total)

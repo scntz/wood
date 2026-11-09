@@ -1,0 +1,20 @@
+import config as config
+settings = config.parse("# comment\nname = demo\n[server]\nport = 8080\ndebug = yes\nurl = http://x/?a=b\n")
+assert(config.text(settings, "name") == "demo")
+assert(config.number(settings, "server.port") == 8080)
+assert(config.flag(settings, "server.debug"))
+assert(config.text(settings, "server.url") == "http://x/?a=b")
+assert(config.number(settings, "missing", 7) == 7)
+for bad in ["[broken", "no equals sign"]:
+    failed = false
+    try:
+        config.parse(bad)
+    except err:
+        failed = true
+    assert(failed)
+failed = false
+try:
+    config.number(config.parse("x = y"), "x")
+except err:
+    failed = true
+assert(failed)

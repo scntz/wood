@@ -1,0 +1,8 @@
+{"service":"api","status":200,"elapsed_ms":12}
+{"service":"auth","status":200,"elapsed_ms":8}
+{"service":"api","status":503,"elapsed_ms":120}
+{"service":"worker","status":200,"elapsed_ms":47}
+{"service":"auth","status":500,"elapsed_ms":92}
+{"service":"api","status":200,"elapsed_ms":64}
+{"service":"worker","status":200,"elapsed_ms":150}
+{"service":"auth","status":200,"elapsed_ms":16}

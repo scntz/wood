@@ -1,0 +1,51 @@
+# Cross-module generic APIs used by the native scheduling application.
+record Job:
+    id: int
+    priority: int
+    cost: int
+
+record Box[T]:
+    value: T
+
+    fn replace(mut self, value: T):
+        self.value = value
+
+    fn pair[U](self, other: U) -> tuple[T,U]:
+        return (self.value,other)
+
+    fn copy(self) -> Box[T]:
+        return Box(self.value)
+
+    fn empty(self, values: list[T] = []) -> list[T]:
+        return values
+
+fn identity[T](value: T) -> T:
+    return value
+
+fn apply[T](function: fn(T)->T, value: T) -> T:
+    return function(value)
+
+fn optional[T](value: T | None) -> T | None:
+    return value
+
+fn collect[T](value: T, values: list[T] = []) -> list[T]:
+    append(values,value)
+    return values
+
+fn earlier(a: Job, b: Job) -> bool:
+    return a.priority < b.priority or (a.priority == b.priority and a.id < b.id)
+
+fn integer_items() -> list[int]:
+    return [1,2,3]
+
+fn item_count(items: list[int]) -> int:
+    return len(items)
+
+fn forwarded[F,G](factory: F() -> list[int], consumer: G(F.Result) -> int) -> int:
+    return consumer(factory())
+
+fn from_result[F](factory: F() -> list[int], items: F.Result = []) -> F.Result:
+    return items
+
+fn transformed[F](factory: F() -> list[int], transform: fn(F.Result) -> F.Result) -> F.Result:
+    return transform(factory())

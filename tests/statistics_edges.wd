@@ -1,0 +1,28 @@
+import std.stats as stats
+
+tiny = 4.9406564584124654e-324
+assert(stats.mean([tiny, -tiny]) == 0.0)
+assert(stats.mean([-tiny, tiny]) == 0.0)
+assert(stats.mean([tiny, tiny]) == tiny)
+assert(stats.mean([-tiny, -tiny]) == -tiny)
+assert(stats.mean([1.0e308, -1.0e308]) == 0.0)
+assert(stats.mean([-1.0e308, 1.0e308]) == 0.0)
+assert(stats.mean([1.0e308, -1.0e308, 3.0]) == 1.0)
+assert(stats.mean([1.0e308, 1.0e308]) == 1.0e308)
+for count in range(1, 101):
+    values: list[float] = []
+    for i in range(count):
+        append(values, 1.0e154)
+        append(values, -1.0e154)
+    assert(stats.mean(values) / 1.0e154 > -0.00000000000001)
+    assert(stats.mean(values) / 1.0e154 < 0.00000000000001)
+    variance = stats.variance(values) / 1.0e308
+    assert(variance > 0.9999999999999 and variance < 1.0000000000001)
+assert(stats.variance([tiny, -tiny]) == 0.0)
+assert(stats.variance([1.0e308]) == 0.0)
+infinity = 1.0e308 * 2.0
+nan = infinity - infinity
+assert(stats.mean([nan]) != stats.mean([nan]))
+assert(stats.variance([nan]) != stats.variance([nan]))
+assert(stats.variance([infinity]) != stats.variance([infinity]))
+print("statistics edges ok")

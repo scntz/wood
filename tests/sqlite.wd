@@ -1,0 +1,110 @@
+import std.sqlite as sql
+import std.fs as fs
+
+fn count_rows(db: database) -> int:
+    rows = sql.query(db, "SELECT count(*) AS n FROM notes", [], 1, 100)
+    return json_int(rows[0]["n"])
+
+db = sql.open(":memory:", 1000)
+alias = db
+orphan = sql.prepare(db, "SELECT 1")
+with db as connection:
+    sql.execute(db, "CREATE TABLE notes(id INTEGER PRIMARY KEY, name TEXT UNIQUE, extra BLOB)", [])
+    assert(count_rows(db) == 0)
+    with sql.begin(db) as transaction_scope:
+        sql.execute(db, "INSERT INTO notes(name) VALUES(?)", [json("native")])
+        assert(sql.last_id(db) == 1)
+        with sql.begin(db) as nested:
+            sql.execute(db, "INSERT INTO notes(name) VALUES(?)", [json("rolled back")])
+        assert(count_rows(db) == 1)
+        sql.commit(transaction_scope)
+    assert(count_rows(db) == 1)
+    try:
+        with sql.begin(db) as transaction_scope:
+            sql.execute(db, "INSERT INTO notes(name) VALUES(?)", [json("temporary")])
+            sql.execute(db, "INSERT INTO notes(name) VALUES(?)", [json("native")])
+        assert(false)
+    except err:
+        assert(err.code == "R4020")
+    assert(count_rows(db) == 1)
+    # User bytes cannot become SQL, even when they contain quotes and SQL text.
+    text = "'); DROP TABLE notes; --\0á🌳"
+    sql.execute(db, "INSERT INTO notes(name) VALUES(?)", [json(text)])
+    rows = sql.query(db, "SELECT name FROM notes WHERE name=?", [json(text)], 1, 1000)
+    assert(json_str(rows[0]["name"]) == text)
+    with sql.prepare(db, "SELECT ?, ?, ?, ?, ? -- one statement") as cursor:
+        try:
+            stmt_step(cursor)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+        stmt_bind_int(cursor, 1, -9223372036854775808)
+        stmt_bind_float(cursor, 2, 1.25)
+        stmt_bind_text(cursor, 3, "a\0b")
+        stmt_bind_blob(cursor, 4, byte_string(255) + "\0")
+        stmt_bind_null(cursor, 5)
+        assert(stmt_columns(cursor) == 5)
+        assert(stmt_step(cursor))
+        assert(stmt_int(cursor, 0) == -9223372036854775808)
+        assert(stmt_float(cursor, 1) == 1.25)
+        assert(stmt_text(cursor, 2) == "a\0b")
+        assert(stmt_blob(cursor, 3) == byte_string(255) + "\0")
+        assert(stmt_kind(cursor, 4) == "null")
+        try:
+            stmt_text(cursor, 0)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+        assert(not stmt_step(cursor))
+        assert(not stmt_step(cursor))
+        stmt_reset(cursor)
+        try:
+            stmt_step(cursor)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+    for invalid in ["", "-- empty", "SELECT 1; SELECT 2", "SELECT 1\0;", "SELECT " + byte_string(255)]:
+        try:
+            sql.prepare(db, invalid)
+            assert(false)
+        except err:
+            assert(err.code == "R4020")
+    for limit in [0, 1]:
+        try:
+            sql.query(db, "SELECT name FROM notes", [], limit, 1000)
+            assert(false)
+        except err:
+            assert(err.code == "R4010")
+    try:
+        sql.query(db, "SELECT name FROM notes", [], 10, 1)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+    try:
+        sql.query(db, "SELECT 1 AS n, 2 AS n", [], 10, 100)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+    orphan = sql.prepare(db, "SELECT 1")
+assert(sql.closed(alias))
+try:
+    stmt_step(orphan)
+    assert(false)
+except err:
+    assert(err.code == "R4020")
+sql.close(alias)
+stmt_close(orphan)
+# Exercise UTF-8 filenames through the actual Wood driver and SQLite ABI.
+# Never replace an existing fixture when this corpus is run by hand.
+disk_path = "wood-sqlite-á🌳.db"
+assert(fs.kind(disk_path) == "missing")
+with sql.open(disk_path, 1000) as disk:
+    sql.execute(disk, "CREATE TABLE persisted(value TEXT)", [])
+    sql.execute(disk, "INSERT INTO persisted VALUES(?)", [json("native\0🌳")])
+assert(fs.kind(disk_path) == "file")
+with sql.open(disk_path, 1000) as disk:
+    rows = sql.query(disk, "SELECT value FROM persisted", [], 1, 100)
+    assert(json_str(rows[0]["value"]) == "native\0🌳")
+assert(fs.remove(disk_path))
+assert(fs.kind(disk_path) == "missing")
+print("native SQLite passed")

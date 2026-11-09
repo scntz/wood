@@ -1,0 +1,166 @@
+# Mutation fuzzer for parsers of untrusted text: each must return or raise an ordinary error.
+# A crash ends the process, and the seed reproduces it. Accepted JSON and UTF-8 must also round-trip.
+# usage: wood run tests/fuzz/parsers.wd -- SEED ITERATIONS DIRECTORY
+import std.csv as csv
+import std.geometry as geometry
+import std.http as http
+import std.io as io
+import std.net as net
+import std.path as path
+import std.utf8 as utf8
+
+record Fuzz:
+    state: int
+    accepted: int
+    rejected: int
+    codes: dict[str,int]
+
+    fn below(mut self, bound: int) -> int:
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        return (self.state >> 8) % bound
+
+    fn mutate(mut self, source: str) -> str:
+        text = source
+        pieces = ["\"", "\\", ",", ":", "{", "}", "[", "]", "\n", "\r\n", byte_string(255), "-", "e999", "9223372036854775808", "null", " ", "/", "=", "%"]
+        for round in range(1 + self.below(4)):
+            at = self.below(len(text) + 1)
+            span = 1 + self.below(16)
+            choice = self.below(6)
+            if choice == 0 and at < len(text):
+                text = text[:at] + byte_string(self.below(256)) + text[at+1:]
+            elif choice == 1:
+                text = text[:at] + text[at+span:]
+            elif choice == 2:
+                text = text[:at] + text[at:at+span] + text[at:]
+            elif choice == 3:
+                text = text[:at]
+            elif choice == 4:
+                text = text[:at] + pieces[self.below(len(pieces))] + text[at:]
+            else:
+                text = text[:at] + byte_string(128 + self.below(128)) + byte_string(128 + self.below(128)) + text[at:]
+        return text
+
+    fn accept(mut self):
+        self.accepted = self.accepted + 1
+
+    fn reject(mut self, code: str):
+        self.rejected = self.rejected + 1
+        self.codes[code] = (self.codes[code] if code in self.codes else 0) + 1
+
+    fn json_text(mut self, source: str):
+        text = self.mutate(source)
+        try:
+            again = json_dump(json_parse(text))
+            assert(json_dump(json_parse(again)) == again, "JSON did not round-trip: " + text)
+            self.accept()
+        except err:
+            if err.code == "R4004":
+                raise err
+            self.reject(err.code)
+
+    fn csv_text(mut self, source: str):
+        text = self.mutate(source)
+        try:
+            csv.parse(text, ",")
+            self.accept()
+        except err:
+            self.reject(err.code)
+        try:
+            csv.read_table(text, ",")
+            self.accept()
+        except err:
+            self.reject(err.code)
+
+    fn utf8_text(mut self, source: str):
+        text = self.mutate(source)
+        valid = utf8.is_valid(text)
+        try:
+            points = utf8.decode(text)
+            assert(valid, "decoded invalid UTF-8")
+            assert(utf8.encode(points) == text, "UTF-8 did not round-trip")
+            self.accept()
+        except err:
+            if err.code == "R4004":
+                raise err
+            assert(not valid, "rejected valid UTF-8")
+            self.reject(err.code)
+
+    fn numbers(mut self, source: str):
+        text = self.mutate(source)
+        try:
+            int(text)
+            self.accept()
+        except err:
+            self.reject(err.code)
+        try:
+            float(text)
+            self.accept()
+        except err:
+            self.reject(err.code)
+
+    fn obj(mut self, source: str, file: str):
+        write_text(file, self.mutate(source))
+        try:
+            geometry.read_obj(file)
+            self.accept()
+        except err:
+            self.reject(err.code)
+
+    fn http_text(mut self, source: str, listener: stream, port: int, request: bool):
+        text = self.mutate(source)
+        client = net.connect("127.0.0.1", port, 1000)
+        server = net.accept(listener)
+        try:
+            io.write(client, text)
+            net.shutdown_write(client)
+            limits = http.Limits(16384, 65536, 1000)
+            if request:
+                http.read_request(server, limits)
+            else:
+                http.read_response(server, "GET", limits)
+            self.accept()
+        except err:
+            self.reject(err.code)
+        io.close(client)
+        io.close(server)
+
+fn nested(open: str, close: str, count: int) -> str:
+    return join([open for i in range(count)], "") + join([close for i in range(count)], "")
+
+fn main():
+    arguments = args()
+    if len(arguments) != 3:
+        print("usage: parsers.wd SEED ITERATIONS DIRECTORY")
+        exit(2)
+    fuzz = Fuzz(int(arguments[0]), 0, 0, {})
+    iterations = int(arguments[1])
+    json_seed = "{\"a\":[1,2.5,-3e2,true,false,null,\"\\u00e9\\n\"],\"b\":{\"c\":\"d\"},\"e\":[[],{}]}"
+    csv_seed = "name,age\n\"quoted, \"\"name\"\"\",30\nsecond,\n"
+    utf8_seed = "plain é 日本語 🌳 end"
+    number_seeds = ["123", "-9223372036854775808", "1.5e10", "0x10", " 7 ", "1_000"]
+    obj_seed = "v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2//1 3//1\nf -3 -2 -1\n# comment\n"
+    request_seed = "POST /path?q=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nX-A: b\r\n\r\nhello"
+    response_seed = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+    for deep in [nested("[", "]", 100000), nested("{\"a\":", "}", 1000)]:
+        try:
+            json_parse(deep)
+        except err:
+            fuzz.reject(err.code)
+    file = path.combine(arguments[2], "input.obj")
+    listener = net.listen("127.0.0.1", 0, 1000)
+    port = net.port(listener)
+    for i in range(iterations):
+        fuzz.json_text(json_seed)
+        fuzz.csv_text(csv_seed)
+        fuzz.utf8_text(utf8_seed)
+        fuzz.numbers(number_seeds[i % len(number_seeds)])
+        fuzz.obj(obj_seed, file)
+        if i % 8 == 0:
+            fuzz.http_text(request_seed, listener, port, true)
+            fuzz.http_text(response_seed, listener, port, false)
+    io.close(listener)
+    print("fuzz parsers ok:", iterations, "iterations,", fuzz.accepted, "accepted,", fuzz.rejected, "rejected")
+    for code in fuzz.codes:
+        print(" ", code, fuzz.codes[code])
+
+main()

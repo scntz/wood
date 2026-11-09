@@ -1,0 +1,30 @@
+{
+  "owner": "wood",
+  "name": "cli",
+  "package": "wood_cli",
+  "tier": "official",
+  "description": "Typed command-line argument parsing and help text.",
+  "readme": "# wood_cli 0.1.0\n\nPure Wood argument parsing and help formatting. No execution, downloads, global\nstate, terminal dependency or native adapter is involved. Licensed under the\nrepository's MIT OR Apache-2.0 terms.\n\nDeclare a local dependency alias in the application's `wood.json`, for example\n`\"cli\":{\"path\":\"../../packages/wood_cli\",\"version\":\"0.1.0\"}`, then import\n`cli.args`. Review the package and run the existing `wood lock`, `deps --locked`,\n`inspect --locked`, `test --locked` and `build --locked` workflows. These are local\nexact-version dependencies, not registry coordinates or automatic installation.\n\n## Public API\n\n- `flag(name: str, short: str = \"\", description: str = \"\") -> Option`\n- `value(name: str, short: str = \"\", repeat: bool = false, description: str = \"\") -> Option`\n- `parse(arguments: list[str], options: list[Option]) -> Arguments`\n- `help(program: str, options: list[Option]) -> str`\n- `Option` fields: `name`, `short`, `description` (str), `takes_value`, `repeat` (bool).\n- `Arguments` fields: `options: dict[str,list[str]]`, `positionals: list[str]`.\n  Methods: `has(name)->bool`, `optional(name)->str|None`,\n  `one(name,fallback=\"\")->str`, `many(name)->list[str]`.\n\nNames/short aliases are case-sensitive ASCII; long names start with a letter and\nthen accept letters/digits/hyphens. Short aliases are one letter. Duplicate\ndefinitions fail before parsing. Parsing accepts `--key=value`, `--key value`,\nboolean bundles (`-vq`), attached short values (`-ofile`), repeatable values and\n`--` terminators. A value-taking option consumes its next argument even if it\nstarts with `-`. Negative numbers, a lone `-` and empty strings remain positionals.\nUnknown options, missing values, duplicate nonrepeatable options and malformed\ndefinitions raise R4010. There are no implicit abbreviations, environment reads,\nresponse files, automatic type coercions or subcommand inference.\n\nLimits: 256 option definitions, 4,096 arguments, 16 MiB total argument bytes.\nValues and results retain normal COW/value semantics. `many` and `positionals`\ncan be copied and mutated independently. Inputs are already-tokenized byte strings;\nthe parser never reconstructs a shell command. It does not validate value UTF-8\nor interpret option values as filenames. Help returns LF-separated text and does\nnot print or exit. User-provided help text is not terminal-escaped automatically.\n\nRun the package's actual tests with `wood test packages/wood_cli --report=json`.\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_cli/README.md",
+  "categories": [
+    "cli"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import cli.args as args\n",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "published": "2026-11-01",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_cli-0.1.0.woodpkg",
+        "sha256": "b43816e4b7c39a667f534303167aedf1641b1c3f573ab69188329fc6071362fc"
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+import process as process
+import std.path as path
+
+fn write_helper() -> str:
+    return "git"
+
+result = process.run(["git", "--version"])
+assert(result.status == 0)
+assert(starts_with(result.output, "git version"))
+# Arguments are passed exactly, with no shell to interpret them.
+same = process.run(["git", "--version", "; echo injected"])
+assert(not ("injected\n" in same.output and same.status == 0 and starts_with(same.output, "injected")))
+failed = process.run(["git", "no-such-command-xyz"])
+assert(failed.status != 0)
+raised = false
+try:
+    process.checked(["git", "no-such-command-xyz"])
+except err:
+    raised = true
+assert(raised)
+missing = false
+try:
+    process.run(["wood-no-such-program-xyz"])
+except err:
+    missing = true
+assert(missing)
+empty = false
+try:
+    process.run([])
+except err:
+    empty = true
+assert(empty)
+assert(path.is_absolute(process.executable()))
+assert(path_exists(process.executable()))
+assert(path.parent(process.resource("a/b.txt")) == path.combine(path.parent(process.executable()), "a"))
+for bad in ["../secret", "a/../../secret", "a\\..\\secret"]:
+    rejected = false
+    try:
+        process.resource(bad)
+    except err:
+        rejected = true
+    assert(rejected)

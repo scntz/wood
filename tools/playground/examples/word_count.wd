@@ -1,0 +1,9 @@
+text = "the wood is the wood and the trees are the wood"
+counts: dict[str,int] = {}
+for word in split(text, " "):
+    if word not in counts:
+        counts[word] = 0
+    counts[word] = counts[word] + 1
+
+for word in counts:
+    print(word, counts[word])

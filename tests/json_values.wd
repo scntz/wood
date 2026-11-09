@@ -1,0 +1,72 @@
+record Document:
+    title: str
+    data: dict[str, list[int]]
+    extra: json
+
+record Recursive:
+    children: list[Recursive]
+
+node = json_parse('{"title":"wood","items":[1,true,null,1.0,"text"]}')
+fields = json_dict(node)
+assert(json_str(fields["title"]) == "wood")
+items = json_list(fields["items"])
+assert(json_int(items[0]) == 1)
+assert(json_bool(items[1]))
+assert(json_kind(items[2]) == "null")
+assert(json_kind(items[3]) == "float")
+assert(json_float(items[0]) == 1.0)
+assert(json_str(items[4]) == "text")
+assert(json_dump(json(1.0)) == "1.0")
+assert(json_parse(json_dump(node)) == node)
+assert(json(1) != json(1.0))
+assert(str(json_null()) == "null")
+assert(json_kind(json([])) == "list")
+document = Document("wood", {"measurements": [1, 2]}, json_null())
+encoded = json(document)
+decoded = json_dict(json_parse(json_dump(encoded)))
+assert(json_str(decoded["title"]) == "wood")
+assert(json_int(json_list(json_dict(decoded["data"])["measurements"])[1]) == 2)
+snapshot = fields
+fields["title"] = json("changed")
+assert(json_str(snapshot["title"]) == "wood")
+assert(json_str(json_dict(node)["title"]) == "wood")
+assert(json_parse('"\\u00e1\\ud83d\\ude00"') == json("á😀"))
+
+failures = 0
+for invalid in ['{"x":1,"x":2}', '[1,]', '01', 'true false', '"\\ud800"', '1e400']:
+    try:
+        json_parse(invalid)
+        assert(false)
+    except err:
+        assert(err.code == "R4012")
+        failures = failures + 1
+try:
+    json_int(json(1.0))
+    assert(false)
+except err:
+    assert(err.code == "R4012")
+    failures = failures + 1
+try:
+    json_dump(1.0e308 * 2.0)
+    assert(false)
+except err:
+    assert(err.code == "R4012")
+    failures = failures + 1
+# Each byte of a multibyte character is not valid UTF-8 by itself.
+try:
+    json_dump("á"[0])
+    assert(false)
+except err:
+    assert(err.code == "R4012")
+    failures = failures + 1
+deep = Recursive([])
+for i in range(40):
+    deep = Recursive([deep])
+try:
+    json_dump(deep)
+    assert(false)
+except err:
+    assert(err.code == "R4012")
+    failures = failures + 1
+assert(failures == 10)
+print("json values ok")

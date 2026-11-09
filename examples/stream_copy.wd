@@ -1,0 +1,16 @@
+# Bounded-memory copy that refuses to overwrite an existing destination.
+import std.io as io
+
+arguments = args()
+if len(arguments) != 3:
+    eprint("usage: stream_copy source destination max_bytes")
+    exit(1)
+limit = int(arguments[2])
+if limit < 0:
+    raise "max_bytes must be nonnegative"
+count = 0
+with io.open(arguments[0], "r") as source:
+    with io.open(arguments[1], "x") as destination:
+        count = io.copy(source, destination, limit)
+        io.flush(destination)
+print(json_dump({"copied_bytes": count}))

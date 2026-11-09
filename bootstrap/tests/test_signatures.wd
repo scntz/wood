@@ -1,0 +1,126 @@
+import parser as parser
+import modules as mod
+import bindings as bind
+import signatures as sig
+import type_system as ts
+import declaration_checks as checks
+import signature_wire as wire
+import sources as src
+
+fn resolve(text: str, budget: int = 1048576) -> sig.Result:
+    parsed = parser.parse(text)
+    assert(parsed.code == "",parsed.message)
+    graph = mod.Compilation([mod.Unit("unit.wd",text,0,parsed.tree,[])],0)
+    return sig.resolve(graph,bind.bind(graph),budget)
+
+fn diagnostic(text: str) -> str:
+    return checks.check(resolve(text)).code
+
+fn projection(text: str, member: str) -> sig.Result:
+    parsed = parser.parse(text)
+    assert(parsed.code == "")
+    graph = mod.Compilation([mod.Unit("projection.wd",text,0,parsed.tree,[])],0)
+    bound = bind.bind(graph)
+    result = sig.resolve(graph,bound)
+    assert(result.diagnostic.code == "")
+    indices: dict[int,int] = {}
+    symbols: dict[int,int] = {}
+    for index in range(len(result.declarations)):
+        declaration = result.declarations[index]
+        indices[declaration.statement] = index
+        if declaration.symbol > 0:
+            symbols[declaration.symbol] = index
+    index = len(bound.symbols)-1
+    declaration = result.declarations[index]
+    token = graph.modules[0].tree.statements[declaration.statement].token
+    resolver = sig.Resolver(result.compilation,bound,result.pool,result.declarations,[indices],symbols,None,0,token)
+    target = resolver.pool.intern("Projection",member,declaration.parameters[0].type)
+    resolver.declarations[index].result = target
+    try:
+        resolver.signature(index,{})
+        return sig.Result(resolver.compilation,resolver.pool,resolver.declarations,src.success())
+    except err:
+        if resolver.problem is not None:
+            return sig.rejected(unwrap(resolver.problem))
+        raise err
+
+pool = ts.pool()
+integer = pool.intern("Int")
+floating = pool.intern("Float")
+none = pool.intern("None")
+assert(integer == pool.intern("Int"))
+assert(integer != floating and pool.assignable(floating,integer) and not pool.assignable(integer,floating))
+optional = pool.intern("Optional",element=integer)
+assert(pool.intern("Optional",element=optional) == optional)
+assert(pool.intern("Optional",element=none) == none)
+assert(pool.assignable(optional,integer) and pool.assignable(optional,none))
+assert(not pool.assignable(integer,optional))
+pointer = pool.intern("Function",element=integer,parameters=[integer])
+callable = pool.intern("Callable",element=integer,parameters=[integer])
+assert(pool.assignable(callable,pointer) and not pool.assignable(pointer,callable))
+parameter = pool.intern("Parameter","T")
+generic = pool.intern("Tuple",parameters=[parameter,pool.intern("List",element=parameter)])
+assert(pool.abstract(generic))
+concrete = pool.substitute(generic,{"T":integer})
+assert(not pool.abstract(concrete) and pool.display(concrete) == "tuple[int, list[int]]")
+assert(pool.substitute(concrete,{"T":floating}) == concrete)
+assert(pool.intern("Record","A",declaration=1) != pool.intern("Record","A",declaration=2))
+snapshot = pool
+before = len(pool.types)
+pool.intern("Record","B",declaration=3)
+assert(len(snapshot.types) == before and len(pool.types) == before+1)
+deep = integer
+for level in range(64):
+    deep = pool.intern("List",element=deep)
+assert(pool.depth_valid(deep))
+deep = pool.intern("List",element=deep)
+assert(not pool.depth_valid(deep))
+
+result = resolve("record Box[T]:\n  value:T\n  fn get(self)->T:\n    return self.value\n  fn set[U](mut self,value:U):\n    pass\nfn wrap(x:Box[int])->Box[int]:\n  return x\n")
+assert(result.diagnostic.code == "")
+assert(len(result.declarations) == 4)
+assert(result.pool.display(result.declarations[0].parameters[0].type) == "T")
+assert(result.declarations[0].parameters[0].field == 0)
+assert(result.declarations[1].result == result.declarations[1].parameters[0].type)
+assert(result.pool.display(result.declarations[2].parameters[0].type) == "Box[T]")
+assert(result.pool.display(result.declarations[2].result) == "T")
+assert(result.declarations[2].parent == 0 and result.declarations[2].symbol == 0)
+assert(checks.check(result).code == "")
+assert(diagnostic("record A:\n  next:A | None\n") == "E3021")
+assert(diagnostic("record A:\n  next:list[A]\n") == "")
+assert(diagnostic("fn f[T](x:dict[T,int])->T:\n  pass\n") == "")
+assert(diagnostic("fn f[T](x:T[int]):\n  pass\n") == "E3024")
+assert(diagnostic("fn f(x:F(int)):\n  pass\n") == "E3028")
+assert(diagnostic("record A:\n  x:int\nfn f(x:dict[A,int]):\n  pass\n") == "E3020")
+assert(diagnostic("fn f(x:Unknown):\n  pass\n") == "E2003")
+assert(diagnostic("fn f(x:int=1+2):\n  pass\n") == "E3026")
+assert(diagnostic("extern fn bad(x:bool)\n") == "E3023")
+assert(diagnostic("extern fn good(mut x:array[float],f:fn(float)->void)\n") == "")
+assert(diagnostic("fn f(x:int):\n  return missing(x)\n") == "")
+assert(resolve("",1).diagnostic.code == "B3201")
+assert(resolve("fn f(x:int):\n  pass\n",2).diagnostic.code == "B3202")
+
+text = "fn f(x:int | None=None,y:bool=True,z:bool=not False):\n  pass\n"
+parsed = parser.parse(text)
+graph = mod.Compilation([mod.Unit("defaults.wd",text,0,parsed.tree,[])],0)
+saved = graph
+resolved = sig.resolve(graph,bind.bind(graph))
+assert(resolved.diagnostic.code == "")
+stmt = parsed.tree.statements[parsed.tree.roots[0]]
+first = stmt.parameters[0].default_value
+assert(graph.modules[0].tree.expressions[first].kind == "Name")
+assert(saved.modules[0].tree.expressions[first].token.text == "None")
+assert(resolved.compilation.modules[0].tree.expressions[first].kind == "None")
+second = stmt.parameters[1].default_value
+assert(resolved.compilation.modules[0].tree.expressions[second].token.text == "true")
+copy = resolved
+resolved.declarations[0].parameters[0].name = "changed"
+assert(copy.declarations[0].parameters[0].name == "x")
+if len(args()) == 0:
+    print("bootstrap signature unit checks passed")
+else:
+    cases = json_list(json_parse(read_text(args()[0])))
+    for case in cases:
+        fields = json_dict(case)
+        result = projection(json_str(fields["source"]),json_str(fields["member"]))
+        print(json_dump(wire.summarize(result)))

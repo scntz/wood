@@ -1,0 +1,16 @@
+import notes.store as notes
+
+fn history(connection: database) -> str:
+    # Valid persisted data can exceed the control's text budget. Bound the view,
+    # not the stored notes, and make the omission visible instead of failing open.
+    lines: list[str] = []
+    size = 0
+    for note in notes.recent(connection):
+        line = "#" + str(json_int(note["id"])) + "  " + json_str(note["created"]) + "\r\n" + json_str(note["body"])
+        needed = len(line) + (4 if len(lines) > 0 else 0)
+        if needed > 524288 - size:
+            append(lines, "Earlier notes omitted from this bounded view.")
+            break
+        append(lines, line)
+        size += needed
+    return join(lines, "\r\n\r\n")

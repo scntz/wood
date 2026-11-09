@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "distribution": "1.1.0",
+  "language": "0.4.0",
+  "runtime_abi": 4,
+  "seed_version": "1.1.0",
+  "seed_release": "https://github.com/scntz/wood/releases/tag/v1.1.0",
+  "seed_windows_name": "wood-core-windows-x86_64.tar.gz",
+  "seed_windows_sha256": "733782daf224fa081fd9b63da0787fb87da353b97d80ad4f30dce0b617f8a5cf",
+  "seed_linux_name": "wood-core-linux-x86_64.tar.gz",
+  "seed_linux_sha256": "688971dfe2e18b0633bb984fc5dcfc752c766fd824869e15357bc5751e12a075",
+  "llvm_windows": "tools/installer/llvm-tools.json",
+  "llvm_linux": "LLVM 19 opt and llc, and GNU ld, for example from the Debian 13 llvm-19 and binutils packages",
+  "clang_linux": "Clang 19 for the freestanding runtime object, for example from the Debian 13 clang-19 package"
+}

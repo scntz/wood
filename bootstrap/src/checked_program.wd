@@ -1,0 +1,53 @@
+# Owned typed program shared by the integrated semantic analyzer and emitter.
+import signatures as sig
+import sources as src
+
+record Reference:
+    module: int
+    expression: int
+
+record Call:
+    kind: str
+    target: int
+    name: str
+    arguments: list[Reference]
+    order: list[int]
+
+record Iteration:
+    type: int
+    symbol: int
+
+record Protocol:
+    make: int
+    next: int
+
+record Capture:
+    name: str
+    type: int
+    symbol: int
+    mutable: bool
+
+record Closure:
+    captures: list[Capture]
+    depth: int
+
+record Facts:
+    types: list[int]
+    symbols: list[int]
+    annotations: list[int]
+    statements: list[int]
+    declares: list[bool]
+    calls: dict[int,Call]
+    parameters: dict[int,list[int]]
+    iterations: dict[int,list[Iteration]]
+    protocols: dict[int,Protocol]
+
+record Result:
+    signatures: sig.Result
+    facts: list[Facts]
+    diagnostic: src.Diagnostic
+    record_types: dict[int,int]
+    closures: dict[int,Closure]
+
+fn rejected(diagnostic: src.Diagnostic) -> Result:
+    return Result(sig.rejected(diagnostic),[],diagnostic,{},{})

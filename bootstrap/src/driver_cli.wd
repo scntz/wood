@@ -1,0 +1,200 @@
+import std.path as path
+import std.fs as fs
+
+fn _archive(file: str) -> bool:
+    suffix = ""
+    for byte in file[-4:]:
+        code = byte_value(byte)
+        if code >= 65 and code <= 90:
+            code += 32
+        suffix += byte_string(code)
+    return ends_with(suffix,".a") or ends_with(suffix,".lib")
+
+record Options:
+    command: str
+    input: str
+    output: str
+    cxx: str
+    program_args: list[str]
+    libraries: list[str]
+    json: bool
+    optimize: bool
+    locked: bool
+    report_json: bool
+    sanitize: bool
+    timeout: int
+    limit: int
+    backend: str
+    llvm_dir: str
+    linker: str
+    llvm_wsl: str
+    native_home: str
+    library: bool
+    bundle_python: bool
+
+fn defaults() -> Options:
+    return Options("run","","","",[],[],false,true,false,false,false,0,16777216,"","","","","",false,false)
+
+fn number(text: str, option: str) -> int:
+    maximum = 86400000 if option == "--timeout-ms" else 16777216
+    if len(text) == 0:
+        raise "invalid value for '"+option+"'"
+    value = 0
+    for byte in text:
+        if byte < "0" or byte > "9":
+            raise "invalid value for '"+option+"'"
+        digit = byte_value(byte)-48
+        if value > (maximum-digit)//10:
+            raise "invalid value for '"+option+"'"
+        value = value*10+digit
+    if option == "--max-output-bytes" and value == 0:
+        raise "invalid value for '"+option+"'"
+    return value
+
+fn known_commands() -> list[str]:
+    return ["run","check","build","emit-cpp","emit-llvm","init","lock","deps","inspect","test","add","install","remove","update","list","info","package","explain","lsp","fmt"]
+
+fn one_edit(left: str, right: str) -> bool:
+    # One typo: a changed, missing, extra or swapped letter.
+    if left == right or len(left)-len(right) > 1 or len(right)-len(left) > 1:
+        return false
+    first = 0
+    while first < len(left) and first < len(right) and left[first] == right[first]:
+        first += 1
+    if left[first+1:] == right[first+1:] or left[first:] == right[first+1:] or left[first+1:] == right[first:]:
+        return true
+    return first+1 < len(left) and first+1 < len(right) and left[first] == right[first+1] and left[first+1] == right[first] and left[first+2:] == right[first+2:]
+
+fn unknown_command(name: str):
+    # Only something that cannot be a file gets here as a command mistake.
+    if ends_with(name,".wd") or "/" in name or "\\" in name or path_exists(name):
+        return
+    for command in known_commands():
+        if one_edit(name,command):
+            raise "unknown command '"+name+"'; did you mean 'wood "+command+"'?"
+    raise "unknown command '"+name+"'; see 'wood --help'"
+
+fn parse(arguments: list[str]) -> Options:
+    result = defaults()
+    i = 0
+    if len(arguments) > 0 and arguments[0] in ["run","check","build","emit-cpp","emit-llvm","init","lock","deps","inspect","test"]:
+        result.command = arguments[0]
+        i = 1
+    while i < len(arguments):
+        arg = arguments[i]
+        if arg == "--":
+            if result.command != "run":
+                raise "program arguments are only valid with run"
+            result.program_args = arguments[i+1:]
+            break
+        if arg in ["--backend","--llvm-dir","--linker","--llvm-wsl","--native-home"] or starts_with(arg,"--backend="):
+            value = ""
+            if starts_with(arg,"--backend="):
+                value = arg[len("--backend="):]
+                arg = "--backend"
+            else:
+                i += 1
+                if i == len(arguments):
+                    raise "missing value for '"+arg+"'"
+                value = arguments[i]
+            if value == "":
+                raise "empty value for '"+arg+"'"
+            if arg == "--backend":
+                result.backend = value
+            elif arg == "--llvm-dir":
+                result.llvm_dir = value
+            elif arg == "--linker":
+                result.linker = value
+            elif arg == "--llvm-wsl":
+                result.llvm_wsl = value
+            else:
+                result.native_home = value
+        elif arg in ["--timeout-ms","--max-output-bytes","--link-library","-o","--cxx"]:
+            i += 1
+            if i == len(arguments):
+                raise "missing value for '"+arg+"'"
+            value = arguments[i]
+            if arg == "--timeout-ms":
+                result.timeout = number(value,arg)
+            elif arg == "--max-output-bytes":
+                result.limit = number(value,arg)
+            elif arg == "--link-library":
+                file = path.resolve(value)
+                if fs.kind(file) != "file" or not _archive(file):
+                    raise "--link-library requires an existing .a or .lib static library"
+                append(result.libraries,file)
+            elif arg == "-o":
+                result.output = value
+            else:
+                result.cxx = value
+        elif arg == "--diagnostics=json":
+            result.json = true
+        elif arg == "--locked":
+            result.locked = true
+        elif arg == "--report=json":
+            result.report_json = true
+        elif arg == "--lib":
+            if result.command != "init":
+                raise "--lib is only valid with init"
+            result.library = true
+        elif arg == "--bundle-python":
+            if result.command != "build":
+                raise "--bundle-python is only valid with build"
+            result.bundle_python = true
+        elif arg == "--sanitize=address":
+            result.sanitize = true
+        elif arg == "-O0":
+            result.optimize = false
+        elif arg == "-O2":
+            result.optimize = true
+        elif starts_with(arg,"-"):
+            raise "unknown option '"+arg+"'; see 'wood --help'"
+        elif arg == "" and result.command == "init":
+            raise "init directory must not be empty; use '.' for the current directory"
+        elif result.input != "":
+            if result.command == "run" and arguments[0] == result.input:
+                unknown_command(result.input)
+            raise "init accepts at most one directory" if result.command == "init" else "expected exactly one source file"
+        else:
+            result.input = arg
+        i += 1
+    if result.report_json and result.command != "test":
+        raise "--report=json is only valid with test"
+    if len(result.libraries) > 0 and result.command not in ["run","build","test"]:
+        raise "--link-library is only valid with run, build, or test"
+    if result.command == "run" and result.input != "" and len(arguments) > 0 and arguments[0] == result.input:
+        unknown_command(result.input)
+    if result.output != "" and result.command not in ["build","emit-cpp","emit-llvm"]:
+        raise "-o is only valid with build, emit-cpp or emit-llvm"
+    if result.backend not in ["","cpp","llvm"]:
+        raise "--backend must be cpp or llvm"
+    if (result.command == "emit-cpp" and result.backend == "llvm") or (result.command == "emit-llvm" and result.backend == "cpp"):
+        raise "emission command conflicts with selected backend"
+    return result
+
+fn json_requested(arguments: list[str]) -> bool:
+    for argument in arguments:
+        if argument == "--":
+            break
+        if argument == "--diagnostics=json":
+            return true
+    return false
+
+fn diagnostic_text(text: str) -> str:
+    # OS exception messages can contain legacy-encoded bytes on Windows.
+    # Preserve valid UTF-8; expose invalid byte sequences losslessly as hex.
+    try:
+        json_dump(text)
+        return text
+    except err:
+        if err.code != "R4012":
+            raise err
+    hex = "0123456789abcdef"
+    pieces: list[str] = []
+    for byte in text:
+        value = byte_value(byte)
+        append(pieces,byte if value < 128 else "\\x"+hex[value//16]+hex[value%16])
+    return join(pieces,"")
+
+fn help_text() -> str:
+    return "wood - self-hosted native compiler\n\nUsage: wood [run|check|build|emit-cpp|emit-llvm] script.wd [options] [-- arguments...]\n       wood script.wd\n\n  init [PATH]        Create a project in an absent or empty directory (--lib for a library)\n  add SOURCE         Add owner@package, python@name or github@owner/repo[#ref]\n  install            Restore external packages from wood.lock (--offline)\n  install dependency SOURCE  Same as add\n  remove NAME        Remove an external dependency\n  update [NAME]      Move external dependencies to their latest version\n  list               List external dependencies\n  info owner@package Print a catalog entry\n  package validate|api|pack|prepare|listing  Author and publish a library\n  lock [PROJECT]     Refresh exact local dependency content\n  deps [PROJECT]     Print dependency inventory JSON\n  inspect [INPUT]    Print typed modules and public signatures JSON\n  test [PROJECT]     Build and run test_*.wd scripts\n  explain CODE       Explain an error code\n  lsp                Start the language server for editors\n  fmt [PATH...]      Format .wd files in place (--check lists files that would change)\n  --locked           Require and verify wood.lock\n  --report=json      Structured test summary\n  --diagnostics=json JSON Lines errors\n  --backend cpp|llvm Select a backend; native installations default to LLVM\n  --llvm-dir PATH    LLVM opt/llc directory\n  --linker PATH      Native platform linker\n  --native-home PATH Native asset directory override\n  --llvm-wsl NAME    Explicit Windows WSL LLVM tool adapter\n  --cxx PATH         Select a C++23 compiler (or WOOD_CXX)\n  --link-library PATH  Link an existing .a/.lib; repeatable\n  --timeout-ms N     Per-child deadline; 0 disables it\n  --max-output-bytes N  Captured child output limit\n  --sanitize=address Instrument generated native programs\n  -o PATH            Output path for build/emission\n  --bundle-python    With build: make a self-contained directory including CPython\n  -O0, -O2           Optimization (default -O2)\n  --version          Print version\n  --language-info    Print production language metadata\n  --help             Show this help\n\nC++ builds require GCC, Clang or MSVC. LLVM requires opt/llc, a linker and ABI-4 assets.\nWith the Windows SDK use a developer shell. No backend fallback occurs.\n"

@@ -1,0 +1,403 @@
+# A bounded, connection-close HTTP/1.x endpoint profile. Framing follows RFC 9112.
+# TLS, proxies, upgrades, compression, nonempty trailers and connection reuse are
+# deliberately unsupported. Header names are normalized; duplicates are retained.
+import std.io as io
+import std.net as net
+import std.time as time
+
+record Header:
+    name: str
+    value: str
+
+record Limits:
+    header_bytes: int
+    body_bytes: int
+    timeout_ms: int
+
+record Request:
+    method: str
+    target: str
+    headers: list[Header]
+    body: str
+
+record Response:
+    status: int
+    reason: str
+    headers: list[Header]
+    body: str
+
+record _Head:
+    first: str
+    headers: list[Header]
+
+fn _validate_limits(limits: Limits):
+    if limits.header_bytes < 4 or limits.header_bytes > 1048576:
+        raise "HTTP: header byte limit must be in 4..1048576"
+    if limits.body_bytes < 0 or limits.body_bytes > 16777216:
+        raise "HTTP: body byte limit must be in 0..16777216"
+    if limits.timeout_ms < 1 or limits.timeout_ms > 86400000:
+        raise "HTTP: timeout must be in 1..86400000 milliseconds"
+
+fn _deadline(limits: Limits) -> int:
+    _validate_limits(limits)
+    return time.monotonic_ns() + limits.timeout_ms * 1000000
+
+fn _remaining(connection: stream, deadline: int):
+    left = deadline - time.monotonic_ns()
+    if left <= 0:
+        raise "HTTP: message deadline exceeded"
+    net.set_timeout(connection, (left + 999999) // 1000000)
+
+fn _lower(value: str) -> str:
+    parts: list[str] = []
+    for c in value:
+        byte = byte_value(c)
+        if byte >= 65 and byte <= 90:
+            c = byte_string(byte + 32)
+        append(parts, c)
+    return join(parts, "")
+
+fn _token(value: str) -> bool:
+    if len(value) == 0:
+        return false
+    for c in value:
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c in "!#$%&'*+-.^_`|~"):
+            return false
+    return true
+
+fn _field_value(value: str):
+    for c in value:
+        byte = byte_value(c)
+        if (byte < 32 and c != "\t") or byte == 127:
+            raise "HTTP: invalid field value"
+
+fn _ows(value: str) -> str:
+    start = 0
+    stop = len(value)
+    while start < stop and value[start] in " \t":
+        start = start + 1
+    while stop > start and value[stop - 1] in " \t":
+        stop = stop - 1
+    return slice(value, start, stop)
+
+fn _header(line: str) -> Header:
+    colon = find(line, ":")
+    name = slice(line, 0, colon)
+    if colon <= 0 or not _token(name):
+        raise "HTTP: invalid header name or whitespace before colon"
+    value = _ows(slice(line, colon + 1, len(line)))
+    _field_value(value)
+    return Header(_lower(name), value)
+
+fn header_values(headers: list[Header], name: str) -> list[str]:
+    result: list[str] = []
+    for header in headers:
+        if _lower(header.name) == _lower(name):
+            append(result, header.value)
+    return result
+
+fn _unique(headers: list[Header], name: str) -> str:
+    found = header_values(headers, name)
+    if len(found) > 1:
+        raise "HTTP: duplicate framing or routing header: " + name
+    if len(found) == 0:
+        return ""
+    return found[0]
+
+fn _number(value: str, base: int, limit: int) -> int:
+    if len(value) == 0:
+        raise "HTTP: empty length"
+    result = 0
+    for c in _lower(value):
+        digit = find("0123456789abcdef", c)
+        if digit < 0 or digit >= base:
+            raise "HTTP: invalid length"
+        if digit > limit or result > (limit - digit) // base:
+            raise "HTTP: length exceeds byte limit"
+        result = result * base + digit
+    return result
+
+fn _line(connection: stream, limit: int, deadline: int) -> str:
+    if limit < 2:
+        raise "HTTP: headers exceed byte limit"
+    _remaining(connection, deadline)
+    line = io.line(connection, limit)
+    if not ends_with(line, "\r\n"):
+        raise "HTTP: expected complete CRLF line"
+    return slice(line, 0, len(line) - 2)
+
+fn _head(connection: stream, limits: Limits, deadline: int) -> _Head:
+    first = _line(connection, limits.header_bytes, deadline)
+    remaining = limits.header_bytes - len(first) - 2
+    headers: list[Header] = []
+    while true:
+        line = _line(connection, remaining, deadline)
+        remaining = remaining - len(line) - 2
+        if line == "":
+            return _Head(first, headers)
+        if len(headers) == 128:
+            raise "HTTP: more than 128 headers"
+        append(headers, _header(line))
+    return _Head(first, headers)
+
+fn _framing(headers: list[Header]):
+    lengths = header_values(headers, "content-length")
+    encodings = header_values(headers, "transfer-encoding")
+    _unique(headers, "host")
+    _unique(headers, "content-length")
+    _unique(headers, "transfer-encoding")
+    if len(lengths) > 0 and len(encodings) > 0:
+        raise "HTTP: ambiguous transfer-encoding and content-length"
+    if len(lengths) > 0:
+        _number(lengths[0], 10, 9223372036854775807)
+    if len(encodings) > 0 and _lower(encodings[0]) != "chunked":
+        raise "HTTP: unsupported transfer encoding"
+
+fn _exact(connection: stream, count: int, deadline: int) -> str:
+    parts: list[str] = []
+    remaining = count
+    while remaining > 0:
+        size = remaining
+        if size > 65536:
+            size = 65536
+        _remaining(connection, deadline)
+        part = io.read(connection, size)
+        if len(part) == 0:
+            raise "HTTP: truncated message body"
+        append(parts, part)
+        remaining = remaining - len(part)
+    return join(parts, "")
+
+# Parse and ignore syntactically valid chunk extensions, including quoted values.
+fn _chunk_size(line: str, remaining: int) -> int:
+    semi = find(line, ";")
+    if semi < 0:
+        return _number(line, 16, remaining)
+    size = _number(_ows(slice(line, 0, semi)), 16, remaining)
+    index = semi
+    while index < len(line):
+        if line[index] != ";":
+            raise "HTTP: invalid chunk extension"
+        index = index + 1
+        while index < len(line) and line[index] in " \t":
+            index = index + 1
+        start = index
+        while index < len(line) and _token(line[index]):
+            index = index + 1
+        if start == index:
+            raise "HTTP: empty chunk extension name"
+        while index < len(line) and line[index] in " \t":
+            index = index + 1
+        if index < len(line) and line[index] == "=":
+            index = index + 1
+            while index < len(line) and line[index] in " \t":
+                index = index + 1
+            if index < len(line) and line[index] == '"':
+                index = index + 1
+                closed = false
+                while index < len(line):
+                    c = line[index]
+                    index = index + 1
+                    if c == '"':
+                        closed = true
+                        break
+                    if c == "\\":
+                        if index == len(line):
+                            raise "HTTP: incomplete quoted chunk extension"
+                        c = line[index]
+                        index = index + 1
+                    _field_value(c)
+                if not closed:
+                    raise "HTTP: unclosed chunk extension"
+            else:
+                start = index
+                while index < len(line) and _token(line[index]):
+                    index = index + 1
+                if start == index:
+                    raise "HTTP: empty chunk extension value"
+        while index < len(line) and line[index] in " \t":
+            index = index + 1
+    return size
+
+fn _body(connection: stream, headers: list[Header], limits: Limits, deadline: int, is_request: bool) -> str:
+    if len(header_values(headers, "transfer-encoding")) > 0:
+        parts: list[str] = []
+        remaining = limits.body_bytes
+        overhead = limits.header_bytes
+        while true:
+            line = _line(connection, overhead, deadline)
+            overhead = overhead - len(line) - 2
+            size = _chunk_size(line, remaining)
+            if size == 0:
+                if _line(connection, overhead, deadline) != "":
+                    raise "HTTP: nonempty trailers are unsupported"
+                return join(parts, "")
+            append(parts, _exact(connection, size, deadline))
+            if _exact(connection, 2, deadline) != "\r\n":
+                raise "HTTP: invalid chunk terminator"
+            remaining = remaining - size
+            overhead = overhead - 2
+        return ""
+    if len(header_values(headers, "content-length")) > 0:
+        return _exact(connection, _number(_unique(headers, "content-length"), 10, limits.body_bytes), deadline)
+    if is_request:
+        return ""
+    parts: list[str] = []
+    remaining = limits.body_bytes
+    while true:
+        size = 65536
+        if remaining < size:
+            size = remaining + 1
+        _remaining(connection, deadline)
+        part = io.read(connection, size)
+        if len(part) == 0:
+            return join(parts, "")
+        if len(part) > remaining:
+            raise "HTTP: body exceeds byte limit"
+        append(parts, part)
+        remaining = remaining - len(part)
+    return ""
+
+fn _authority(value: str):
+    if len(value) == 0:
+        raise "HTTP: empty host"
+    for c in value:
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c in ".-:[]"):
+            raise "HTTP: invalid host authority"
+    colon = find(value, ":")
+    if starts_with(value, "["):
+        close = find(value, "]")
+        if close < 2 or colon < 0 or colon > close:
+            raise "HTTP: invalid bracketed host"
+        if close == len(value) - 1:
+            return
+        if value[close + 1] != ":":
+            raise "HTTP: invalid host port"
+        colon = close + 1
+    else:
+        if "[" in value or "]" in value or colon == 0:
+            raise "HTTP: invalid host"
+    if colon >= 0:
+        if _number(slice(value, colon + 1, len(value)), 10, 65535) == 0:
+            raise "HTTP: invalid host port"
+
+fn _target(value: str):
+    if not starts_with(value, "/"):
+        raise "HTTP: only origin-form request targets are supported"
+    index = 0
+    while index < len(value):
+        c = value[index]
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c in "-._~!$&'()*+,;=:@/?%"):
+            raise "HTTP: request target must be escaped ASCII without a fragment"
+        if c == "%":
+            if index + 2 >= len(value) or not (_lower(value[index + 1]) in "0123456789abcdef" and _lower(value[index + 2]) in "0123456789abcdef"):
+                raise "HTTP: invalid percent escape in target"
+            index = index + 2
+        index = index + 1
+
+fn read_request(connection: stream, limits: Limits) -> Request:
+    deadline = _deadline(limits)
+    head = _head(connection, limits, deadline)
+    words = split(head.first, " ")
+    if len(words) != 3 or not _token(words[0]) or words[2] != "HTTP/1.1":
+        raise "HTTP: expected HTTP/1.1 request line"
+    if words[0] == "CONNECT":
+        raise "HTTP: CONNECT is unsupported"
+    _target(words[1])
+    _authority(_unique(head.headers, "host"))
+    _framing(head.headers)
+    if len(header_values(head.headers, "expect")) > 0 or len(header_values(head.headers, "upgrade")) > 0:
+        raise "HTTP: expectations and protocol upgrades are unsupported"
+    return Request(words[0], words[1], head.headers, _body(connection, head.headers, limits, deadline, true))
+
+fn read_response(connection: stream, method: str, limits: Limits) -> Response:
+    if not _token(method) or method == "CONNECT":
+        raise "HTTP: invalid or unsupported request method"
+    deadline = _deadline(limits)
+    for attempt in range(9):
+        head = _head(connection, limits, deadline)
+        if len(head.first) < 13 or not (starts_with(head.first, "HTTP/1.1 ") or starts_with(head.first, "HTTP/1.0 ")) or head.first[12] != " ":
+            raise "HTTP: invalid response status line"
+        status = _number(slice(head.first, 9, 12), 10, 599)
+        if status < 100:
+            raise "HTTP: invalid response status"
+        reason = slice(head.first, 13, len(head.first))
+        _field_value(reason)
+        _framing(head.headers)
+        if status == 101:
+            raise "HTTP: protocol upgrades are unsupported"
+        if status < 200:
+            if len(header_values(head.headers, "content-length")) > 0 or len(header_values(head.headers, "transfer-encoding")) > 0:
+                raise "HTTP: framing forbidden on informational response"
+            continue
+        if method == "HEAD" or status == 204 or status == 304:
+            if status == 204 and (len(header_values(head.headers, "content-length")) > 0 or len(header_values(head.headers, "transfer-encoding")) > 0):
+                raise "HTTP: framing forbidden on 204 response"
+            return Response(status, reason, head.headers, "")
+        return Response(status, reason, head.headers, _body(connection, head.headers, limits, deadline, false))
+    raise "HTTP: too many informational responses"
+
+fn _headers(headers: list[Header]) -> str:
+    lines: list[str] = []
+    for header in headers:
+        if not _token(header.name):
+            raise "HTTP: invalid outgoing header name"
+        _field_value(header.value)
+        name = _lower(header.name)
+        if name in ["host", "content-length", "transfer-encoding", "connection", "trailer", "expect", "upgrade"]:
+            raise "HTTP: outgoing framing/routing header is managed by the library"
+        append(lines, header.name + ": " + header.value + "\r\n")
+    if len(headers) > 125:
+        raise "HTTP: too many outgoing headers"
+    return join(lines, "")
+
+fn request_head(host: str, port: int, message: Request, limits: Limits) -> str:
+    _validate_limits(limits)
+    if not _token(message.method) or message.method == "CONNECT":
+        raise "HTTP: invalid or unsupported request method"
+    _target(message.target)
+    authority = host
+    if ":" in host:
+        authority = "[" + host + "]"
+    authority = authority + ":" + str(port)
+    _authority(authority)
+    head = message.method + " " + message.target + " HTTP/1.1\r\nHost: " + authority + "\r\n" + _headers(message.headers) + "Content-Length: " + str(len(message.body)) + "\r\nConnection: close\r\n\r\n"
+    if len(head) > limits.header_bytes or len(message.body) > limits.body_bytes:
+        raise "HTTP: outgoing message exceeds byte limits"
+    return head
+
+fn send_request(connection: stream, host: str, port: int, message: Request, limits: Limits) -> Response:
+    head = request_head(host, port, message, limits)
+    deadline = _deadline(limits)
+    _remaining(connection, deadline)
+    io.write(connection, head)
+    _remaining(connection, deadline)
+    io.write(connection, message.body)
+    return read_response(connection, message.method, limits)
+
+fn request(host: str, port: int, message: Request, limits: Limits) -> Response:
+    request_head(host, port, message, limits)
+    with net.connect(host, port, limits.timeout_ms) as connection:
+        return send_request(connection, host, port, message, limits)
+
+fn get(host: str, port: int, target: str, limits: Limits) -> Response:
+    return request(host, port, Request("GET", target, [], ""), limits)
+
+fn write_response(connection: stream, message: Response, head_only: bool, limits: Limits):
+    deadline = _deadline(limits)
+    if message.status < 200 or message.status > 599 or message.status == 304:
+        raise "HTTP: write_response supports final 200..599 responses except 304"
+    _field_value(message.reason)
+    if message.status == 204 and len(message.body) != 0:
+        raise "HTTP: 204 response cannot have a body"
+    framing = ""
+    if message.status != 204:
+        framing = "Content-Length: " + str(len(message.body)) + "\r\n"
+    head = "HTTP/1.1 " + str(message.status) + " " + message.reason + "\r\n" + _headers(message.headers) + framing + "Connection: close\r\n\r\n"
+    if len(head) > limits.header_bytes or len(message.body) > limits.body_bytes:
+        raise "HTTP: outgoing response exceeds byte limits"
+    _remaining(connection, deadline)
+    io.write(connection, head)
+    if not head_only and message.status != 204:
+        _remaining(connection, deadline)
+        io.write(connection, message.body)

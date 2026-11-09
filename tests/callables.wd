@@ -1,0 +1,115 @@
+record Action:
+    run: fn(int) -> int
+
+fn add_one(value: int) -> int:
+    return value + 1
+
+fn times_two(value: int) -> int:
+    return value * 2
+
+fn select(which: bool) -> fn(int) -> int:
+    if which:
+        return add_one
+    return times_two
+
+fn apply(transform: fn(int) -> int, values: list[int]) -> list[int]:
+    result: list[int] = []
+    for value in values:
+        append(result, transform(value))
+    return result
+
+fn widen(value: float) -> float:
+    return value + 0.5
+
+fn empty() -> list[int]:
+    return []
+
+fn notify(message: str):
+    assert(message == "hello")
+
+fn identity(action: Action) -> Action:
+    return action
+
+f = add_one
+assert(f(3) == 4)
+f = times_two
+assert(f(3) == 6)
+assert(select(true)(9) == 10)
+assert((select(false))(9) == 18)
+assert(apply(add_one, [1, 2, 3]) == [2, 3, 4])
+actions = [add_one, times_two]
+snapshot = actions
+actions[0] = times_two
+assert(actions[0](5) == 10)
+assert(snapshot[0](5) == 6)
+mapping = {"run": add_one}
+assert(mapping["run"](5) == 6)
+action = Action(times_two)
+assert(action.run(7) == 14)
+assert(identity(action).run(3) == 6)
+action.run = add_one
+assert(action.run(7) == 8)
+assert(action == Action(add_one))
+assert(add_one == snapshot[0])
+assert(add_one != times_two)
+assert(add_one in snapshot)
+assert(str(add_one) == "<function>")
+assert(str(snapshot) == "[<function>, <function>]")
+g = widen
+assert(g(1) == 1.5)
+make_empty = empty
+assert(make_empty() == [])
+emit = notify
+emit("hello")
+from std.math import gcd
+import std.math as math
+h = math.gcd
+assert(h(24, 18) == 6)
+assert(h == gcd)
+
+fn supply(transform: fn(int) -> int) -> fn(int) -> int:
+    return transform
+
+fn failing(value: int) -> int:
+    raise "callback failed"
+
+assert(supply(times_two)(5) == 10)
+copy = action
+action.run = times_two
+assert(copy.run(5) == 6)
+failed_callback = failing
+caught = false
+try:
+    failed_callback(1)
+except err:
+    assert(err.code == "R4010")
+    caught = true
+assert(caught)
+
+# Observable OS effects test target-before-arguments order without references.
+fn traced_target(path: str) -> fn(int) -> int:
+    write_text(path, read_text(path) + "target\n")
+    return add_one
+
+fn traced_argument(path: str) -> int:
+    write_text(path, read_text(path) + "argument\n")
+    return 7
+
+trace_path = "callback-order.txt"
+write_text(trace_path, "")
+assert(traced_target(trace_path)(traced_argument(trace_path)) == 8)
+assert(read_text(trace_path) == "target\nargument\n")
+assert(fs_remove(trace_path))
+
+fn historical_shadow() -> int:
+    byte_value = 17
+    assert(byte_value == 17)
+    return byte_value("A")
+
+fn callable_shadow() -> int:
+    byte_value = times_two
+    return byte_value(7)
+
+assert(historical_shadow() == 65)
+assert(callable_shadow() == 14)
+print("callbacks passed")

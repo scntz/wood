@@ -1,0 +1,93 @@
+# Run only in a fresh test directory containing input.wd.
+import std.io as io
+import sources as src
+import parser as parser
+
+fn returning(handle: stream) -> str:
+    with handle as local:
+        return "returned-"+str(7)
+
+fn failing(handle: stream):
+    with handle as local:
+        raise "primary-"+str(9)
+
+fn parse_file(path: str):
+    text = src.read(path,1048576)
+    result = parser.parse(text)
+    assert(result.code == "",result.message)
+    assert(len(result.tree.roots) == 2)
+    with io.open("parsed.txt","x") as output:
+        io.write(output,str(len(result.tree.roots))+"\n")
+    return len(result.tree.roots)
+
+writer = io.open("binary.bin","x")
+with writer as output:
+    io.write(output,"a\0b\n")
+    io.flush(output)
+    assert(io.tell(output) == 4)
+    io.seek(output,1)
+    io.write(output,"Z")
+assert(io.closed(writer))
+reader = io.open("binary.bin","r")
+alias = reader
+with reader as input:
+    assert(io.read(input,3) == "aZb")
+    assert(io.tell(input) == 3)
+    assert(io.read_all(input,1) == "\n")
+    io.seek(input,0)
+    assert(io.read_exact(input,4) == "aZb\n")
+    assert(io.read(input,0) == "")
+    try:
+        io.read(input,-1)
+        assert(false)
+    except err:
+        assert(err.code == "R4016" and err.message == "stream byte count must be in 0..16777216")
+assert(io.closed(alias))
+original = io.open("original.bin","x")
+replacement = io.open("replacement.bin","x")
+with original as local:
+    local = replacement
+assert(io.closed(original) and not io.closed(replacement))
+io.close(replacement)
+assert(io.closed(replacement))
+returned = io.open("return.bin","x")
+assert(returning(returned) == "returned-7" and io.closed(returned))
+failed = io.open("failure.bin","x")
+try:
+    failing(failed)
+except err:
+    assert(err.message == "primary-9" and io.closed(failed))
+loop = original
+for i in range(4):
+    loop = io.open("binary.bin","r")
+    with loop as local:
+        if i == 0:
+            continue
+        break
+assert(io.closed(loop))
+try:
+    with original as closed:
+        assert(false)
+except err:
+    assert(err.code == "R4016" and err.message == "stream is closed")
+try:
+    io.open("binary.bin","x")
+    assert(false)
+except err:
+    assert(err.code == "R4016" and err.message == "cannot open file stream (OS error 17)")
+try:
+    with io.open("input.wd","r") as input:
+        io.read_all(input,3)
+        assert(false)
+except err:
+    assert(err.message == "stream exceeds byte limit")
+with io.open("utf8-ñ.bin","x") as output:
+    io.write(output,"utf8")
+with io.open("utf8-ñ.bin","r") as input:
+    assert(io.read_all(input,4) == "utf8")
+with io.open("binary.bin","a") as output:
+    io.write(output,"!")
+with io.open("binary.bin","r") as input:
+    assert(io.read_all(input,5) == "aZb\n!")
+assert(parse_file("input.wd") == 2)
+print("native file frontend passed")

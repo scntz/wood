@@ -1,0 +1,10 @@
+from codec import pack_text, unpack_data
+
+assert(unpack_data(pack_text("1\n-2\n9223372036854775807\n-9223372036854775808\n")) == [1, -2, 9223372036854775807, -9223372036854775808])
+assert(unpack_data(pack_text("")) == [])
+for invalid in ["", "WDAT", "WRONG DATA", pack_text("1") + "x", slice(pack_text("1"), 0, -1)]:
+    try:
+        unpack_data(invalid)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")

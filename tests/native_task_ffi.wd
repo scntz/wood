@@ -1,0 +1,25 @@
+import std.task as tasks
+extern fn wood_task_gate(participants: int, value: int, callback: fn(int) -> int) -> int
+fn add(value: int) -> int:
+    return value+1000
+fn subtract(value: int) -> int:
+    return value-1000
+fn failed(value: int) -> int:
+    raise "callback failure "+str(value)
+fn worker(message: json) -> json:
+    number = json_int(message)
+    for iteration in range(40):
+        actual = wood_task_gate(8,number,add if number%2 == 0 else subtract)
+        assert(actual == (number+1000 if number%2 == 0 else number-1000))
+    try:
+        wood_task_gate(8,number,failed)
+        assert(false)
+    except err:
+        assert(err.code == "R4010" and err.message == "callback failure "+str(number))
+    assert(wood_task_gate(8,number,add) == number+1000)
+    return message
+jobs = [tasks.spawn(worker,json(i)) for i in range(8)]
+for index in range(8):
+    assert(tasks.wait(jobs[index],30000) == json(index))
+    tasks.close(jobs[index])
+print("native concurrent callback isolation passed")

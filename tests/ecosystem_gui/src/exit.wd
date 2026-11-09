@@ -1,0 +1,4 @@
+import gui.widgets as gui
+import checks as checks
+gui.run("Deferred exit", 320, 200, "", checks.deferred_exit)
+raise "GUI swallowed deferred exit"

@@ -1,0 +1,101 @@
+{
+  "format": 1,
+  "stage": "self-hosted-production-driver-candidate",
+  "entry": "src/driver_main.wd",
+  "cmake_target": "wood_selfhost",
+  "executable": "wood-selfhost",
+  "production_replacement": false,
+  "cpp_toolchain_required": true,
+  "profile": "Established hosted C++ driver; see native_driver for the separate experimental LLVM installation",
+  "native_driver": {
+    "guide": "../docs/native-cli.md",
+    "contract": "native-backend-contract.json",
+    "installer": "../tools/install-native.cmake",
+    "default_backend": "llvm",
+    "cpp_toolchain_required_for_native_builds": false,
+    "cpp_runtime_linked": false,
+    "production_replacement": false,
+    "full_language_compatibility": false,
+    "runtime_abi": 4
+  },
+  "cpp_frontend_linked": false,
+  "python_required": false,
+  "commands": [
+    "run (including default script/project invocation)",
+    "check",
+    "build",
+    "emit-cpp",
+    "emit-llvm (new driver builds; requires native assets)",
+    "init",
+    "lock",
+    "deps",
+    "inspect",
+    "test",
+    "explain",
+    "--version",
+    "--language-info",
+    "--help"
+  ],
+  "flags": [
+    "--locked",
+    "--diagnostics=json",
+    "--report=json (test only)",
+    "--cxx",
+    "--backend cpp|llvm or --backend=llvm",
+    "--native-home",
+    "--llvm-dir",
+    "--linker",
+    "--llvm-wsl (Windows only)",
+    "--link-library",
+    "--timeout-ms",
+    "--max-output-bytes",
+    "--sanitize=address",
+    "-O0",
+    "-O2",
+    "-o",
+    "-- (run arguments only)"
+  ],
+  "native_bridge": "Private sequential C ABI for embedded assets, argv-based child processes, environment lookup, owned temporary directories, atomic file publication, copying and rename. No frontend stages are native.",
+  "assets": "Embedded standard-library sources, runtime prelude, language metadata and explanation data. No source checkout or external bundle paths are needed at runtime.",
+  "distribution": {
+    "component": "SelfHosted",
+    "default_install_unchanged": true,
+    "executable": "bin/wood-selfhost[.exe]",
+    "bootstrap_library": "lib/wood_driver_host.lib or lib/libwood_driver_host.a",
+    "sources": "share/wood/bootstrap",
+    "platform_specific": true
+  },
+  "limits": {
+    "child_timeout_ms": [
+      0,
+      86400000
+    ],
+    "captured_output_bytes": [
+      1,
+      16777216
+    ],
+    "host_request_bytes": 67108864,
+    "host_response_bytes": 65536
+  },
+  "diagnostics": {
+    "schema": "production six-field JSON Lines",
+    "exit_codes": {
+      "success": 0,
+      "frontend_or_test_failure": 1,
+      "driver_failure": 2,
+      "runtime_failure": 70
+    }
+  },
+  "remaining_gate": "Scoped RC correctness qualification passed. Before unconditional default promotion, qualify real optional Windows HTTPS, clean-host distribution and controlled primary use; preserve the production reference. Other targets/configurations and universal compatibility are not established.",
+  "qualification": {
+    "release_candidate": "RC1",
+    "full_language_compatibility_proven": false,
+    "default_compiler_changed": false,
+    "release_candidate_ready": true,
+    "platforms": [
+      "Windows x86-64/MSVC Release",
+      "Debian 13.5 x86-64/GCC Release"
+    ],
+    "sanitizers": "Debian/Clang O0 ASan+UBSan"
+  }
+}

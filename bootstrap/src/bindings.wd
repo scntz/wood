@@ -1,0 +1,92 @@
+# Complete module declaration/import binding. This is not body/type checking.
+import modules as mod
+import sources as src
+import lexer as lx
+
+record Symbol:
+    module: int
+    statement: int
+    name: str
+    kind: str
+
+record Environment:
+    names: dict[str,int]
+    namespaces: list[str]
+
+record Result:
+    symbols: list[Symbol]
+    environments: list[Environment]
+    next_symbol: int
+    diagnostic: src.Diagnostic
+
+fn reserved(name: str) -> bool:
+    return name in ["print","eprint","exit","len","str","int","float","assert","append","pop","range","split","join","strip","find","replace","starts_with","ends_with","read_text","write_text","path_exists","args","read_line","eof","list","bool","void","error"]
+
+record Binder:
+    compilation: mod.Compilation
+    symbols: list[Symbol]
+    declarations: list[dict[int,int]]
+    environments: list[Environment]
+    problem: src.Diagnostic | None
+
+    fn fail(mut self, code: str, message: str, module: int, token: lx.Token):
+        self.problem = src.located(code,message,self.compilation.modules[module].file,module,token)
+        raise "bootstrap module binding rejection"
+
+    fn run(mut self) -> Result:
+        for module in range(len(self.compilation.modules)):
+            declarations: dict[int,int] = {}
+            for statement in self.compilation.modules[module].tree.roots:
+                stmt = self.compilation.modules[module].tree.statements[statement]
+                if stmt.kind in ["Function","Record"]:
+                    declarations[statement] = len(self.symbols)+1
+                    append(self.symbols,Symbol(module,statement,stmt.name,stmt.kind))
+            append(self.declarations,declarations)
+        try:
+            for module in range(len(self.compilation.modules)):
+                unit = self.compilation.modules[module]
+                names: dict[str,int] = {}
+                namespaces: list[str] = []
+                import_paths: list[str] = []
+                for statement in unit.tree.roots:
+                    stmt = unit.tree.statements[statement]
+                    if stmt.kind in ["Function","Record"]:
+                        if stmt.name in names:
+                            self.fail("E3001","duplicate function '"+stmt.name+"'",module,stmt.token)
+                        names[stmt.name] = self.declarations[module][statement]
+                for edge in unit.imports:
+                    stmt = unit.tree.statements[edge.statement]
+                    target = self.compilation.modules[edge.target]
+                    exports: dict[str,int] = {}
+                    for statement in target.tree.roots:
+                        declaration = target.tree.statements[statement]
+                        if declaration.kind in ["Function","Record"] and not starts_with(declaration.name,"_") and declaration.name not in exports:
+                            exports[declaration.name] = self.declarations[edge.target][statement]
+                    if len(stmt.imports) == 0:
+                        root = split(stmt.name,".")[0]
+                        if reserved(root) or root in names or stmt.name in import_paths:
+                            self.fail("E3105","duplicate or reserved module binding '"+stmt.name+"'",module,stmt.token)
+                        append(import_paths,stmt.name)
+                        append(namespaces,root)
+                        for name in exports:
+                            full = stmt.name+"."+name
+                            if full in names:
+                                self.fail("E3105","duplicate imported function binding",module,stmt.token)
+                            names[full] = exports[name]
+                    else:
+                        for item in stmt.imports:
+                            if item.name not in exports:
+                                self.fail("E3104","module does not export function '"+item.name+"'",module,item.token)
+                            if reserved(item.alias) or item.alias in names or item.alias in namespaces:
+                                self.fail("E3105","duplicate or reserved import binding '"+item.alias+"'",module,item.token)
+                            names[item.alias] = exports[item.name]
+                append(self.environments,Environment(names,namespaces))
+            return Result(self.symbols,self.environments,len(self.symbols)+1,src.success())
+        except err:
+            if self.problem is None:
+                raise err
+            return Result([],[],1,unwrap(self.problem))
+
+fn bind(compilation: mod.Compilation) -> Result:
+    binder = Binder(compilation,[],[],[],None)
+    return binder.run()

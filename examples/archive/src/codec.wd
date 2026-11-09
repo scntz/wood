@@ -1,0 +1,27 @@
+import std.binary as binary
+
+fn pack_text(text: str) -> str:
+    numbers: list[int] = []
+    for line in split(text, "\n"):
+        line = strip(line)
+        if line != "":
+            append(numbers, int(line))
+            if len(numbers) > 1000000:
+                raise "archive exceeds one million integers"
+    chunks = ["WDAT", binary.pack_uint(1, 2, "big"), binary.pack_uint(len(numbers), 4, "big")]
+    for number in numbers:
+        append(chunks, binary.pack_int(number, 8, "little"))
+    return join(chunks, "")
+
+fn unpack_data(data: str) -> list[int]:
+    if len(data) < 10 or slice(data, 0, 4) != "WDAT":
+        raise "invalid archive header"
+    if binary.unpack_uint(slice(data, 4, 6), "big") != 1:
+        raise "unsupported archive version"
+    count = binary.unpack_uint(slice(data, 6, 10), "big")
+    if count > 1000000 or len(data) != 10 + count * 8:
+        raise "invalid archive length"
+    numbers: list[int] = []
+    for i in range(count):
+        append(numbers, binary.unpack_int(slice(data, 10 + i * 8, 18 + i * 8), "little"))
+    return numbers

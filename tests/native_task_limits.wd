@@ -1,0 +1,23 @@
+import std.task as tasks
+import std.time as time
+fn blocked(message: json) -> json:
+    while not tasks.cancelled():
+        time.sleep(0.02)
+    return message
+jobs: list[task] = []
+for i in range(256):
+    append(jobs,tasks.spawn(blocked,json(i)))
+try:
+    tasks.spawn(blocked,json_null())
+    assert(false)
+except err:
+    assert(err.code == "R4022" and err.message == "at most 256 native tasks may run at once")
+for job in jobs:
+    tasks.cancel(job)
+for i in range(256):
+    assert(tasks.wait(jobs[i],30000) == json(i))
+    tasks.close(jobs[i])
+with tasks.spawn(blocked,json(1)) as recovered:
+    tasks.cancel(recovered)
+    assert(tasks.wait(recovered,30000) == json(1))
+print("native task limit and recovery passed")

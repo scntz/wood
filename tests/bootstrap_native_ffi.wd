@@ -1,0 +1,106 @@
+# Compiled by the staged Wood compiler and linked to the real C ABI fixture.
+import std.num as num
+extern fn wood_saturating_add(left: int, right: int = 1) -> int
+extern fn wood_native_lerp(left: float, right: float, weight: float) -> float
+extern fn wood_native_accept(value: int, weight: float)
+extern fn wood_bytes_sum(value: str) -> int
+extern fn wood_native_fold(count: int, step: fn(int,int) -> int) -> int
+extern fn wood_native_map(value: float, operation: fn(float) -> float) -> float
+extern fn wood_native_visit(value: int, visitor: fn(int) -> void)
+extern fn wood_native_pair(first: fn(int) -> int, second: fn(int) -> int) -> int
+extern fn wood_array_sum(values: array[float]) -> float
+extern fn wood_array_scale(mut values: array[float], factor: float)
+extern fn wood_array_copy(mut output: array[float], input: array[float])
+
+fn add(left: int, right: int) -> int:
+    return left + right
+fn twice(value: float) -> float:
+    return value * 2.0
+fn visit(value: int):
+    assert(value == 7)
+fn nested(value: int) -> int:
+    return wood_native_fold(value,add)
+fn identity(value: int) -> int:
+    return value
+fn fail(value: int) -> int:
+    raise "callback failure"
+fn failing_add(left: int, right: int) -> int:
+    assert(right < 2,"callback stopped")
+    return left + right
+fn failing_visit(value: int):
+    raise "void callback failure"
+
+assert(wood_saturating_add(right=2,left=40) == 42)
+assert(wood_saturating_add(41) == 42)
+assert(wood_saturating_add(9223372036854775807) == 9223372036854775807)
+assert(wood_native_lerp(2,6,0.25) == 3.0)
+wood_native_accept(1,2)
+assert(wood_bytes_sum("A\0B") == 131)
+assert(wood_bytes_sum("") == 0)
+assert(wood_native_fold(5,add) == 10)
+assert(wood_native_map(1.5,twice) == 3.0)
+wood_native_visit(7,visit)
+assert(wood_native_pair(identity,nested) == 5)
+native_value: fn(int,int) -> int = wood_saturating_add
+assert(native_value(20,22) == 42)
+for scenario in range(3):
+    try:
+        if scenario == 0:
+            wood_native_pair(identity,fail)
+        elif scenario == 1:
+            wood_native_fold(5,failing_add)
+        else:
+            wood_native_visit(7,failing_visit)
+        assert(false)
+    except err:
+        assert(err.code == ("R4004" if scenario == 1 else "R4010"))
+assert(wood_native_fold(5,add) == 10)
+assert(wood_native_pair(identity,identity) == 5)
+
+values = num.from_list([1.0,2.0,3.0])
+snapshot = values
+wood_array_scale(values,2)
+assert(num.to_list(values) == [2.0,4.0,6.0])
+assert(wood_array_sum(snapshot) == 6.0)
+wood_array_copy(values,snapshot)
+wood_array_copy(values,values)
+assert(values == snapshot)
+empty = num.zeros(0)
+wood_array_scale(empty,2.0)
+assert(wood_array_sum(empty) == 0.0)
+view = values[::-1]
+try:
+    wood_array_scale(view,2.0)
+    assert(false)
+except err:
+    assert(err.code == "R4026")
+assert(num.to_list(view) == [3.0,2.0,1.0])
+try:
+    wood_array_sum(view)
+    assert(false)
+except err:
+    assert(err.code == "R4026")
+materialized = num.copy(view)
+wood_array_scale(materialized,2.0)
+assert(num.to_list(materialized) == [6.0,4.0,2.0])
+
+record Pool:
+    buffers: list[array[float]]
+    fn replace(mut self):
+        self.buffers = [num.full(3,7.0)]
+        return num.full(3,2.0)
+    fn clear(mut self):
+        self.buffers = []
+        return 2.0
+pool = Pool([num.ones(3)])
+alias = pool
+wood_array_copy(pool.buffers[0],pool.replace())
+assert(num.to_list(pool.buffers[0]) == [2.0,2.0,2.0])
+assert(num.to_list(alias.buffers[0]) == [1.0,1.0,1.0])
+try:
+    wood_array_scale(pool.buffers[0],pool.clear())
+    assert(false)
+except err:
+    assert(err.code == "R4006")
+assert(len(pool.buffers) == 0)
+print("native hosted numerical FFI passed")

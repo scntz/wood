@@ -1,0 +1,52 @@
+name: windows
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    env:
+      WOOD_REQUIRE_TLS_TESTS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - name: Optional test libraries
+        shell: pwsh
+        run: ./.github/setup-native-dependencies.ps1
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DWOOD_PYTHON_TESTS=OFF -DWOOD_RELEASE_BUILD=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      - run: cmake --build build --config Release --parallel 2
+      - run: ctest --test-dir build -C Release --output-on-failure --output-junit "${{ github.workspace }}/build/results.xml"
+      - run: cmake --install build --config Release --prefix install
+      - name: Verify Core archive and extracted files
+        run: cmake -DPREFIX=${{ github.workspace }}/install -DOUTPUT=${{ github.workspace }}/build/wood-windows-x86_64.zip -P tools/package-release.cmake
+      - name: Installed project
+        run: install/bin/wood.exe test install/share/doc/wood/examples/archive --locked --report=json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-release-validation
+          path: |
+            build/results.xml
+            build/wood-windows-x86_64.zip
+            build/wood-windows-x86_64.zip.sha256
+          if-no-files-found: warn
+  sanitizers:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - run: cmake -S . -B build -A x64 -DWOOD_PYTHON_TESTS=OFF -DWOOD_SANITIZERS=ON
+      - run: cmake --build build --config Debug --parallel 2
+      - name: Selected ASan correctness suites
+        run: ctest --test-dir build -C Debug --output-on-failure -R "^(embedded_text|embedded_assets|compiler|runtime|arrays_runtime|streams_runtime|support|explain_unit|project_unit)$"

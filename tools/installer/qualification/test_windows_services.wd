@@ -1,0 +1,70 @@
+import windows_services as services
+import installer._native as native
+import installer.bundle as bundle
+import installer.manifest as schema
+import std.path as path
+
+arguments = args()
+assert(len(arguments) == 3 and len(arguments[0]) == 32)
+space = arguments[0]
+root = path.absolute(arguments[1])
+payload = bundle.load(arguments[2])
+native.check(services.wood_setup_registry_scope(space, payload.app.id), "select disposable registry namespace")
+native.check(services.wood_setup_settings_lock(1), "lock test settings")
+assert(json_int(schema.object(services.read_setting(0, "Path"))["type"]) == 0)
+assert(services.wood_setup_setting_write(0, "Path", 0, "", 1, "x" * 32767) < 0)
+assert(json_int(schema.object(services.read_setting(0, "Path"))["type"]) == 0)
+assert(services.wood_setup_setting_write(1, "DisplayName", 0, "", 1, "x" * 32768) < 0)
+assert(json_int(schema.object(services.read_setting(1, "DisplayName"))["type"]) == 0)
+original = "%TEMP%\\existing;C:\\Unrelated"
+native.check(services.wood_setup_setting_write(0, "Path", 0, "", 2, original), "seed disposable PATH")
+empty: dict[str,json] = {}
+plan = services.prepare(payload.app, root, json({"receipt": json(empty), "generation": json("versions/" + payload.digest)}), true, space)
+services.apply(plan, root, space, payload.app.id)
+assert(json_str(schema.object(services.read_setting(1, "DisplayName"))["text"]) == payload.app.name)
+assert(services.contains_component(json_str(schema.object(services.read_setting(0, "Path"))["text"]), json_str(schema.object(plan)["bin"])))
+services.apply(plan, root, space, payload.app.id, true)
+assert(json_str(schema.object(services.read_setting(0, "Path"))["text"]) == original)
+assert(json_int(schema.object(services.read_setting(1, "DisplayName"))["type"]) == 0)
+# A partial publication rolls back without assuming that every field was written.
+first = schema.object(json_list(schema.object(plan)["values"])[0])
+after = schema.object(first["after"])
+native.check(services.wood_setup_setting_write(0, "Path", 2, original, json_int(after["type"]), json_str(after["text"])), "simulate partial publication")
+services.apply(plan, root, space, payload.app.id, true)
+assert(json_str(schema.object(services.read_setting(0, "Path"))["text"]) == original)
+services.apply(plan, root, space, payload.app.id)
+receipt = json({"integration": plan})
+upgrade = services.prepare(payload.app, root, json({"receipt": receipt, "generation": json("versions/" + "2" * 64)}), true, space)
+services.apply(upgrade, root, space, payload.app.id)
+assert(not services.contains_component(json_str(schema.object(services.read_setting(0, "Path"))["text"]), json_str(schema.object(plan)["bin"])))
+# An unrelated component added after installation survives uninstall.
+current = schema.object(services.read_setting(0, "Path"))
+native.check(services.wood_setup_setting_write(0, "Path", json_int(current["type"]), json_str(current["text"]), 2, json_str(current["text"]) + ";C:\\Later"), "simulate user PATH addition")
+remove = services.uninstall_plan(json({"integration": upgrade}), root, space, payload.app.id)
+services.apply(remove, root, space, payload.app.id)
+assert(json_str(schema.object(services.read_setting(0, "Path"))["text"]) == original + ";C:\\Later")
+assert(json_int(schema.object(services.read_setting(1, "UninstallString"))["type"]) == 0)
+# A setting that changes during a prepared transaction is preserved, not clobbered.
+native.check(services.wood_setup_setting_write(0, "Path", 2, original + ";C:\\Later", 0, ""), "reset disposable PATH")
+fresh = services.prepare(payload.app, root, json({"receipt": json(empty), "generation": json("versions/" + payload.digest)}), true, space)
+native.check(services.wood_setup_setting_write(0, "Path", 0, "", 1, "user update"), "simulate concurrent user edit")
+caught = false
+try:
+    services.apply(fresh, root, space, payload.app.id)
+except err:
+    caught = "concurrent setting change" in err.message
+assert(caught)
+assert(json_str(schema.object(services.read_setting(0, "Path"))["text"]) == "user update")
+native.check(services.wood_setup_setting_write(0, "Path", 1, "user update", 0, ""), "reset disposable PATH")
+services.apply(fresh, root, space, payload.app.id)
+services.apply(services.uninstall_plan(json({"integration": fresh}), root, space, payload.app.id), root, space, payload.app.id)
+assert(json_int(schema.object(services.read_setting(0, "Path"))["type"]) == 0)
+caught = false
+try:
+    services.apply(fresh, root, "0" * 32, payload.app.id)
+except err:
+    caught = "namespace mismatch" in err.message
+assert(caught)
+assert(services.wood_setup_setting_write(0, "not-Path", 0, "", 1, "forbidden") < 0)
+services.wood_setup_settings_lock(0)
+print("Windows installer integration contracts passed")

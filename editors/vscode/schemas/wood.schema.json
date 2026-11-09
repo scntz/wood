@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "wood project manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "name", "version"],
+  "properties": {
+    "format": { "const": 1, "description": "The manifest format. Always 1." },
+    "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "The package name." },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "An exact MAJOR.MINOR.PATCH version." },
+    "source": { "type": "string", "description": "The directory holding modules, relative to this file." },
+    "entry": { "type": "string", "description": "The file that `wood run` starts, relative to source. Libraries have none." },
+    "tests": { "type": "string", "description": "The directory holding test_*.wd files." },
+    "dependencies": {
+      "type": "object",
+      "description": "Wood packages, by import alias.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "version"],
+        "properties": {
+          "path": { "type": "string", "description": "Where the package is, relative to this file." },
+          "version": { "type": "string", "description": "The exact version this project needs." },
+          "source": { "type": "string", "description": "Where wood add found it, such as wood@audio." }
+        }
+      }
+    },
+    "python": {
+      "type": "object",
+      "description": "Exact versions of python@ packages. Managed by wood add python@NAME.",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

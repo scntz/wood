@@ -1,0 +1,45 @@
+import gui.widgets as gui
+import cli.args as cli
+import notes.store as notes
+import std.sqlite as sql
+import presentation as presentation
+
+fn application(token: int) -> int:
+    window = gui.Window(token)
+    settings = json_dict(json_parse(window.context()))
+    with sql.open(json_str(settings["database"]), 5000) as connection:
+        notes.initialize(connection)
+        column = gui.Column(16, 16, 592, 8)
+        column.label(window, 1, "Write a note")
+        column.entry(window, 2, "")
+        column.button(window, 3, "Save note")
+        column.label(window, 4, "Ready — saved notes stay in your SQLite database")
+        window.textarea(5, presentation.history(connection), 16, 176, 592, 300, true)
+        window.show()
+        while true:
+            event = window.wait()
+            if event.kind == "close":
+                break
+            elif event.kind == "resize":
+                if event.x >= 360 and event.y >= 280:
+                    window.move(2, 16, 48, event.x-32, 28)
+                    window.move(5, 16, 176, event.x-32, event.y-192)
+            elif event.kind == "click" and event.control == 3:
+                try:
+                    id = notes.add(connection, window.text(2))
+                    window.set_text(2, "")
+                    window.set_text(4, "Saved note #" + str(id))
+                    window.set_text(5, presentation.history(connection))
+                except err:
+                    window.set_text(4, err.code + ": " + err.message)
+    return 0
+
+options = [cli.flag("help", "h", "Show help"), cli.value("database", "d", description="SQLite file (default: wood-notes.db)")]
+arguments = cli.parse(args(), options)
+if arguments.has("help"):
+    print(cli.help("desktop_notes", options))
+else:
+    if len(arguments.positionals) != 0:
+        raise "desktop_notes accepts options only"
+    settings = json_dump({"database":json(arguments.one("database", "wood-notes.db"))})
+    exit(gui.run("Wood Notes", 640, 520, settings, application))

@@ -1,0 +1,52 @@
+# Builds deliberately hostile or valid ustar archives for package-manager tests.
+fn field(text: str, width: int) -> str:
+    return text+join(["\0" for i in range(width-len(text))],"")
+
+fn octal(value: int, width: int) -> str:
+    digits = ""
+    remaining = value
+    for i in range(width-1):
+        digits = str(remaining%8)+digits
+        remaining = remaining//8
+    return digits+"\0"
+
+fn header(name: str, size: int, kind: str, link: str = "") -> str:
+    head = field(name,100)+octal(420,8)+octal(0,8)+octal(0,8)+octal(size,12)+octal(0,12)
+    tail = kind+field(link,100)+"ustar\0"+"00"+field("",32)+field("",32)+octal(0,8)+octal(0,8)+field("",155)+field("",12)
+    total = 256
+    for byte in head+tail:
+        total += byte_value(byte)
+    return head+octal(total,7)+" "+tail
+
+fn entry(name: str, content: str) -> str:
+    return header(name,len(content),"0")+content+field("",(512-len(content)%512)%512)
+
+manifest = "{\"format\":1,\"name\":\"hostile\",\"version\":\"1.0.0\",\"source\":\"src\"}\n"
+module = "fn value() -> int:\n    return 7\n"
+base = entry("hostile-1.0.0/wood.json",manifest)+entry("hostile-1.0.0/src/hostile.wd",module)
+end = field("",1024)
+kind = args()[1]
+archive = ""
+if kind == "valid":
+    archive = base+end
+elif kind == "traversal":
+    archive = base+entry("hostile-1.0.0/../../escaped.txt","owned")+end
+elif kind == "absolute":
+    archive = base+entry("/tmp/escaped.txt","owned")+end
+elif kind == "symlink":
+    archive = base+header("hostile-1.0.0/link",0,"2","/etc/passwd")+end
+elif kind == "hardlink":
+    archive = base+header("hostile-1.0.0/link",0,"1","hostile-1.0.0/wood.json")+end
+elif kind == "duplicate":
+    archive = base+entry("hostile-1.0.0/src/hostile.wd",module)+end
+elif kind == "two-roots":
+    archive = base+entry("other/file.txt","x")+end
+elif kind == "reserved":
+    archive = base+entry("hostile-1.0.0/wood-source.json","{}")+end
+elif kind == "truncated":
+    archive = base[:700]
+elif kind == "checksum":
+    archive = "X"+base[1:]+end
+else:
+    raise "unknown archive kind"
+write_text(args()[0],archive)

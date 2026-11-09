@@ -1,0 +1,36 @@
+record State:
+    values: list[int]
+
+    fn change(mut self, value: int) -> int:
+        append(self.values,value)
+        return value
+
+fn pair(left: str, right: list[str]) -> str:
+    return left+join(right,",")
+
+fn fail(value: int) -> str:
+    if value == 2:
+        raise "comprehension-"+str(value)
+    return str(value)
+
+assert([x*x for x in range(8) if x%2 == 0] == [0,4,16,36])
+assert([x for x in range(5,0,-2)] == [5,3,1])
+assert([x for x in range(9223372036854775806,9223372036854775807,2)] == [9223372036854775806])
+assert([a+b for a in ["a","b"] for b in ["1","2"] if b != "2"] == ["a1","b1"])
+assert([join([str(y) for y in range(x)],"") for x in range(4)] == ["","0","01","012"])
+assert(pair("owned-"+str(5),[str(x) for x in range(3)]) == "owned-50,1,2")
+assert({str(x%2):str(x) for x in range(4)} == {"0":"2","1":"3"})
+assert([key for key in {"b":1,"a":2}] == ["b","a"])
+assert([c+c for c in "abc"] == ["aa","bb","cc"])
+state = State([1,2,3])
+assert([state.change(x+10) for x in state.values] == [11,12,13])
+assert(state.values == [1,2,3,11,12,13])
+empty: list[str] = [str(x) for x in range(3) if false]
+assert(len(empty) == 0)
+for i in range(50):
+    try:
+        values = [fail(x) for x in range(5)]
+        assert(false)
+    except err:
+        assert(err.message == "comprehension-2")
+print("native comprehensions passed")

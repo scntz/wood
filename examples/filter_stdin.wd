@@ -1,0 +1,6 @@
+# Filter comments/empty lines from stdin; use `while not eof()` to avoid losing
+# a final line that has no terminating newline.
+while not eof():
+    line = strip(read_line())
+    if line != "" and not starts_with(line, "#"):
+        print(line)

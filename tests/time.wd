@@ -1,0 +1,49 @@
+import std.time as time
+
+# Counter families share a clock and epoch, including across named imports.
+from std.time import perf_counter_ns as counter
+previous = time.monotonic_ns()
+for i in range(1000):
+    current = counter()
+    assert(current >= previous)
+    previous = current
+
+before = time.monotonic_ns()
+seconds = time.monotonic()
+after = time.perf_counter_ns()
+assert(float(before) / 1000000000.0 <= seconds)
+assert(seconds <= float(after) / 1000000000.0)
+before_seconds = time.monotonic()
+assert(time.perf_counter() >= before_seconds)
+
+time.sleep(0)
+time.sleep(-0.0)
+started = time.perf_counter_ns()
+time.sleep(0.02)
+elapsed = time.perf_counter_ns() - started
+assert(elapsed >= 20000000, "sleep returned before its requested duration")
+# No tight upper deadline: a loaded CI machine may oversleep substantially.
+time.sleep(0.0000000001)
+
+caught = 0
+for duration in [-1.0, 86400.0001, 1.0e308 * 2.0]:
+    try:
+        time.sleep(duration)
+    except err:
+        assert(err.code == "R4015")
+        caught = caught + 1
+infinity = 1.0e308 * 2.0
+nan = infinity - infinity
+try:
+    time.sleep(nan)
+except err:
+    assert(err.code == "R4015")
+    caught = caught + 1
+assert(caught == 4)
+
+# Module wrappers are ordinary native function values.
+pause: fn(float) -> void = time.sleep
+clock: fn() -> int = counter
+pause(0)
+assert(clock() >= previous)
+print("native time passed")

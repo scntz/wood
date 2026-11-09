@@ -1,0 +1,80 @@
+import modules as mod
+import bindings as bind
+import project as project
+import sources as src
+import syntax_wire as wire
+import frontend as frontend
+
+record Import:
+    root: int
+    target: int
+
+record Unit:
+    file: str
+    package: int
+    source_hex: str
+    imports: list[Import]
+    bindings: dict[str,int]
+    namespaces: list[str]
+
+record Symbol:
+    module: int
+    root: int
+    name: str
+    kind: str
+    offset: int
+    line: int
+    column: int
+
+record Diagnostic:
+    code: str
+    message_hex: str
+    file: str
+    source: int
+    offset: int
+    line: int
+    column: int
+
+record Reply:
+    format: int
+    stage: str
+    types_checked: bool
+    lock_verified: bool
+    diagnostic: Diagnostic
+    entry: int
+    packages: list[project.Package]
+    modules: list[Unit]
+    symbols: list[Symbol]
+    next_symbol: int
+
+fn diagnostic(value: src.Diagnostic) -> Diagnostic:
+    return Diagnostic(value.code,wire.hex_text(value.message),value.file,value.source,value.offset,value.line,value.column)
+
+fn rejected(value: src.Diagnostic) -> Reply:
+    return Reply(1,"module-bindings",false,false,diagnostic(value),0,[],[],[],1)
+
+fn summarize(packages: list[project.Package], compilation: mod.Compilation, bound: bind.Result) -> Reply:
+    units: list[Unit] = []
+    root_indices: list[dict[int,int]] = []
+    for index in range(len(compilation.modules)):
+        unit = compilation.modules[index]
+        roots: dict[int,int] = {}
+        for root in range(len(unit.tree.roots)):
+            roots[unit.tree.roots[root]] = root
+        append(root_indices,roots)
+        imports: list[Import] = []
+        for edge in unit.imports:
+            append(imports,Import(roots[edge.statement],edge.target))
+        env = bound.environments[index]
+        append(units,Unit(unit.file,unit.package,wire.hex_text(unit.source),imports,env.names,env.namespaces))
+    symbols: list[Symbol] = []
+    for symbol in bound.symbols:
+        token = compilation.modules[symbol.module].tree.statements[symbol.statement].token
+        append(symbols,Symbol(symbol.module,root_indices[symbol.module][symbol.statement],symbol.name,symbol.kind,token.offset,token.line,token.column))
+    return Reply(1,"module-bindings",false,false,diagnostic(src.success()),compilation.entry,packages,units,symbols,bound.next_symbol)
+
+fn inspect(input: str, standards: dict[str,str]) -> Reply:
+    result = frontend.load(input,standards)
+    if result.diagnostic.code != "":
+        return rejected(result.diagnostic)
+    return summarize(result.packages,result.compilation,result.bindings)

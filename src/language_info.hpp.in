@@ -1,0 +1,6 @@
+#pragma once
+#include <string_view>
+namespace wood {
+inline constexpr char language_info_data[] = @WOOD_LANGUAGE_LITERAL@;
+inline constexpr std::string_view language_info{language_info_data, sizeof(language_info_data)-1};
+}

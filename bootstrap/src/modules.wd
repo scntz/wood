@@ -1,0 +1,260 @@
+# Hosted module graph policy is Wood. Only filesystem/stream primitives are native.
+import parser as parser
+import parser_recovery as recovery
+import syntax as ast
+import lexer as lx
+import sources as src
+import project as project
+import std.path as path
+import std.fs as fs
+
+record Edge:
+    statement: int
+    target: int
+
+record Unit:
+    file: str
+    source: str
+    package: int
+    tree: ast.Tree
+    imports: list[Edge]
+
+record Compilation:
+    modules: list[Unit]
+    entry: int
+
+# What a language server supplies. Compilation never uses this.
+record Parsed:
+    text: str
+    tree: ast.Tree
+    recovered: str
+    problems: list[src.Diagnostic]
+    names: list[str]
+
+record Editor:
+    overlays: dict[str,str]
+    cache: dict[str,Parsed]
+    diagnostics: list[src.Diagnostic]
+    poisoned: list[str]
+
+record Limits:
+    modules: int
+    depth: int
+    bytes: int
+    nodes: int
+
+record Result:
+    compilation: Compilation
+    diagnostic: src.Diagnostic
+
+fn defaults() -> Limits:
+    return Limits(1024,128,134217728,262144)
+
+record Loader:
+    packages: list[project.Package]
+    standards: dict[str,str]
+    compilation: Compilation
+    known: dict[str,int]
+    active: list[int]
+    chain: list[str]
+    bytes: int
+    limits: Limits
+    problem: src.Diagnostic | None
+    editor: Editor | None
+
+    fn overlay(self, file: str) -> str | None:
+        if self.editor is None:
+            return None
+        overlays = unwrap(self.editor).overlays
+        return overlays[file] if file in overlays else None
+
+    fn parse(mut self, key: str, file: str, text: str, index: int) -> ast.Tree:
+        if self.editor is None:
+            parsed = parser.parse(text,self.limits.nodes)
+            if parsed.code != "":
+                self.fail(parsed.code,parsed.message,index,lx.Token("","",parsed.offset,parsed.line,parsed.column))
+            return parsed.tree
+        editor = unwrap(self.editor)
+        entry = Parsed("",ast.empty(),"",[],[])
+        if key in editor.cache and editor.cache[key].text == text:
+            entry = editor.cache[key]
+        else:
+            recovered = recovery.recover(text,self.limits.nodes)
+            problems: list[src.Diagnostic] = []
+            for item in recovered.problems:
+                append(problems,src.Diagnostic(item.code,item.message,file,index,item.offset,item.line,item.column))
+            entry = Parsed(text,recovered.tree,recovered.text,problems,recovered.names)
+            editor.cache[key] = entry
+        for item in entry.problems:
+            item.source = index
+            append(editor.diagnostics,item)
+        for name in entry.names:
+            append(editor.poisoned,name)
+        self.compilation.modules[index].source = entry.recovered
+        self.editor = editor
+        return entry.tree
+
+    fn tolerate(mut self, stmt: ast.Stmt, depth: int, active: int) -> bool:
+        # An import that cannot load becomes a diagnostic, and names from it stop being reported.
+        if self.editor is None or self.problem is None:
+            return false
+        editor = unwrap(self.editor)
+        append(editor.diagnostics,unwrap(self.problem))
+        if len(stmt.imports) == 0:
+            append(editor.poisoned,split(stmt.name,".")[0])
+        for item in stmt.imports:
+            append(editor.poisoned,item.alias)
+        self.editor = editor
+        self.problem = None
+        while len(self.chain) > depth:
+            pop(self.chain)
+        while len(self.active) > active:
+            pop(self.active)
+        return true
+
+    fn fail(mut self, code: str, message: str, source: int, token: lx.Token):
+        file = ""
+        if source < len(self.compilation.modules):
+            file = self.compilation.modules[source].file
+        self.problem = src.located(code,message,file,source,token)
+        raise "bootstrap module rejection"
+
+    fn load(mut self, file: str, package: int, standard: str, source: int, token: lx.Token) -> int:
+        key = ""
+        text = ""
+        if standard != "":
+            key = "@"+standard
+            file = "<"+standard+">"
+            if starts_with(standard,"python@"):
+                module = standard[7:]
+                # Pure declarations preserve normal namespace/import binding.
+                # Module loading remains lazy; checking never executes Python.
+                text = "import std.python as py\nfn module() -> py_object:\n    return py.import_module(\""+module+"\")\nfn attr(name: str) -> py_object:\n    return py.attr(module(),name)\nfn call(name: str, arguments: list[py_object] = [], keywords: dict[str,py_object] = {}) -> py_object:\n    return py.call(attr(name),arguments,keywords)\n"
+            if standard in self.standards:
+                text = self.standards[standard]
+            if text == "":
+                self.fail("E3101","unknown standard module '"+standard+"'",source,token)
+        else:
+            if self.overlay(file) is None:
+                try:
+                    file = path.resolve(file)
+                except err:
+                    if len(self.chain) == 0:
+                        self.fail("E3101","cannot resolve module: "+err.message,source,token)
+                    self.fail("E3101","cannot find module '"+token_module(self,source,token)+"': "+err.message,source,token)
+            if self.overlay(file) is None and fs.kind(file) != "file":
+                self.fail("E3101","module file is not regular",source,token)
+            roots = self.packages[package]
+            test_root = ""
+            if package == 0:
+                test_root = roots.test_root
+            # A document the editor holds may not exist on disk, so disk checks cannot apply.
+            supplied = self.overlay(file)
+            if supplied is None and not path.within(file,roots.source_root) and (test_root == "" or not path.within(file,test_root)):
+                if len(self.chain) == 0:
+                    # The file the user named, not an import.
+                    self.fail("E3106","'"+path.name(file)+"' is outside this project's source directory. Move it there, or run it from a folder that has no wood.json",source,token)
+                self.fail("E3106","module escapes its declared source root",source,token)
+            key = str(package)+":"+(file if supplied is not None else path.identity(file))
+        if key in self.known:
+            existing = self.known[key]
+            if existing in self.active:
+                self.fail("E3102","cyclic import: "+join(self.chain," -> ")+" -> "+file,source,token)
+            return existing
+        if len(self.compilation.modules) >= self.limits.modules or len(self.chain) >= self.limits.depth:
+            self.fail("E3106","module graph exceeds "+str(self.limits.modules)+" modules or "+str(self.limits.depth)+" import levels",source,token)
+        if standard == "":
+            contents = self.overlay(file)
+            text = unwrap(contents) if contents is not None else src.read(file,16777216)
+        self.bytes += len(text)
+        if self.bytes > self.limits.bytes:
+            message = "module sources exceed 128 MiB"
+            if self.limits.bytes != 134217728:
+                message = "module sources exceed "+str(self.limits.bytes)+" bytes"
+            self.fail("E3106",message,source,token)
+        index = len(self.compilation.modules)
+        self.known[key] = index
+        append(self.compilation.modules,Unit(file,text,package,ast.empty(),[]))
+        tree = self.parse(key,file,text,index)
+        self.compilation.modules[index].tree = tree
+        append(self.active,index)
+        append(self.chain,file)
+        for statement in tree.roots:
+            stmt = tree.statements[statement]
+            if stmt.kind != "Import":
+                if index != 0 and stmt.kind not in ["Function","Record"]:
+                    if self.editor is None:
+                        self.fail("E3103","imported modules may contain only functions and imports",index,stmt.token)
+            else:
+              depth = len(self.chain)
+              active = len(self.active)
+              try:
+                target = -1
+                if (starts_with(stmt.module,"std.") or starts_with(stmt.module,"python@")) and stmt.relative == 0:
+                    target = self.load("",package,stmt.module,index,stmt.token)
+                else:
+                    if standard != "":
+                        self.fail("E3106","standard modules can only import explicit std modules",index,stmt.token)
+                    target_package = package
+                    module = stmt.module
+                    base = ""
+                    if stmt.relative > 0:
+                        base = path.parent(file)
+                        for level in range(1,stmt.relative):
+                            base = path.parent(base)
+                    else:
+                        first = split(module,".")[0]
+                        if first in self.packages[package].dependencies:
+                            if module == first:
+                                self.fail("E3101","import a module inside dependency '"+first+"'",index,stmt.token)
+                            target_package = self.packages[package].dependencies[first]
+                            module = module[len(first)+1:]
+                        base = self.packages[target_package].source_root
+                    target = self.load(path.combine(base,replace(module,".","/")+".wd"),target_package,"",index,stmt.token)
+                append(self.compilation.modules[index].imports,Edge(statement,target))
+              except err:
+                if not self.tolerate(stmt,depth,active):
+                    raise err
+        pop(self.chain)
+        pop(self.active)
+        return index
+
+fn token_module(loader: Loader, source: int, token: lx.Token) -> str:
+    if source >= len(loader.compilation.modules):
+        return ""
+    unit = loader.compilation.modules[source]
+    for statement in unit.tree.statements:
+        if statement.kind == "Import" and statement.token.offset == token.offset:
+            return statement.module
+    return ""
+
+fn load_for_editor(entry: str, packages: list[project.Package], standards: dict[str,str], editor: Editor) -> tuple[Result,Editor]:
+    loader = Loader(packages,standards,Compilation([],0),{},[],[],0,defaults(),None,editor)
+    try:
+        loader.compilation.entry = loader.load(entry,0,"",0,src.origin())
+        return (Result(loader.compilation,src.success()),unwrap(loader.editor))
+    except err:
+        if loader.problem is None:
+            raise err
+        return (Result(Compilation([],0),unwrap(loader.problem)),unwrap(loader.editor))
+
+fn load(entry: str, packages: list[project.Package], standards: dict[str,str], limits: Limits | None = None) -> Result:
+    budget = defaults()
+    if limits is not None:
+        budget = unwrap(limits)
+    if len(packages) == 0:
+        return Result(Compilation([],0),src.Diagnostic("B3101","at least one package root is required","",0,0,0,0))
+    if budget.modules < 1 or budget.modules > 1024 or budget.depth < 1 or budget.depth > 128 or budget.bytes < 0 or budget.bytes > 134217728 or budget.nodes < 2 or budget.nodes > 1048576:
+        return Result(Compilation([],0),src.Diagnostic("B3101","invalid module graph limits","",0,0,0,0))
+    for package in packages:
+        for alias in package.dependencies:
+            if package.dependencies[alias] < 0 or package.dependencies[alias] >= len(packages):
+                return Result(Compilation([],0),src.Diagnostic("B3101","dependency package index out of range","",0,0,0,0))
+    loader = Loader(packages,standards,Compilation([],0),{},[],[],0,budget,None,None)
+    try:
+        loader.compilation.entry = loader.load(entry,0,"",0,src.origin())
+        return Result(loader.compilation,src.success())
+    except err:
+        if loader.problem is None:
+            raise err
+        return Result(Compilation([],0),unwrap(loader.problem))

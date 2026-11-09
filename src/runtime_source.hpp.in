@@ -1,0 +1,6 @@
+#pragma once
+#include <string_view>
+namespace wood {
+inline constexpr char runtime_source_data[] = @WOOD_RUNTIME_LITERAL@;
+inline constexpr std::string_view runtime_source{runtime_source_data, sizeof(runtime_source_data)-1};
+}

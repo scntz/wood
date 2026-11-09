@@ -1,0 +1,164 @@
+import std.task as tasks
+import std.time as time
+import std.num as num
+
+fn identity(message: json) -> json:
+    return message
+
+fn cooperative(message: json) -> json:
+    while not tasks.cancelled():
+        time.sleep(0.002)
+    return message
+
+fn failure(message: json) -> json:
+    with tasks.spawn(cooperative,message) as child:
+        raise "worker failure "+json_str(message)
+
+fn compute(message: json) -> json:
+    started = time.monotonic_ns()
+    source = json_list(message)
+    saved = source
+    # Extracted containers may share immutable children, never mutable storage.
+    append(source,json(999))
+    assert(len(saved)+1 == len(source))
+    numbers = [json_int(value) for value in saved]
+    snapshot = numbers
+    for i in range(len(numbers)):
+        numbers[i] += 1
+    assert(json(snapshot) == message)
+    native = num.from_list(snapshot)
+    native_snapshot = native
+    native[0] += 10
+    assert(native_snapshot[0] == snapshot[0])
+    assert(time.monotonic_ns() >= started)
+    total = 0
+    for value in numbers:
+        total += value
+    return json(total)
+
+fn nested(message: json) -> json:
+    with tasks.spawn(compute,message) as child:
+        result = tasks.wait(child,10000)
+        assert(not tasks.cancelled())
+        return result
+
+fn scoped_return() -> int:
+    with tasks.spawn(cooperative,json_null()) as child:
+        return 7
+
+assert(not tasks.cancelled())
+message = json([i for i in range(128)])
+jobs = [tasks.spawn(compute,message) for i in range(16)]
+expected = 128*129//2
+for job in jobs:
+    result = tasks.wait(job,10000)
+    assert(json_int(result) == expected)
+    assert(tasks.wait(job,10000) == result and tasks.done(job))
+    assert(str(job) == "<task:open>" and str([job]) == "[<task:open>]")
+    alias = job
+    assert(alias == job)
+    tasks.close(job)
+    tasks.close(alias)
+    assert(str(alias) == "<task:closed>")
+    for action in range(3):
+        try:
+            if action == 0:
+                tasks.wait(alias,1)
+            elif action == 1:
+                tasks.done(alias)
+            else:
+                tasks.cancel(alias)
+            assert(false)
+        except err:
+            assert(err.code == "R4022" and err.message == "task is closed")
+assert(message == json([i for i in range(128)]))
+with tasks.spawn(nested,message) as parent:
+    assert(json_int(tasks.wait(parent,10000)) == expected)
+with tasks.spawn(cooperative,json("cancelled")) as job:
+    assert(not tasks.done(job))
+    for timeout in [0,-1,86400001]:
+        try:
+            tasks.wait(job,timeout)
+            assert(false)
+        except err:
+            assert(err.code == "R4022" and err.message == "task timeout must be in 1..86400000 milliseconds")
+    started = time.monotonic_ns()
+    try:
+        tasks.wait(job,2)
+        assert(false)
+    except err:
+        assert(err.code == "R4022" and err.message == "task wait timed out; task is still running")
+    assert(time.monotonic_ns()-started >= 2000000)
+    assert(not tasks.done(job))
+    tasks.cancel(job)
+    tasks.cancel(job)
+    assert(json_str(tasks.wait(job,10000)) == "cancelled")
+    assert(tasks.wait(job,10000) == json("cancelled"))
+assert(scoped_return() == 7)
+escaped: list[task] = []
+for action in range(2):
+    for i in range(3):
+        with tasks.spawn(cooperative,json_null()) as child:
+            append(escaped,child)
+            if action == 0:
+                break
+            continue
+    assert(str(escaped[-1]) == "<task:closed>")
+try:
+    with tasks.spawn(cooperative,json_null()) as child:
+        append(escaped,child)
+        raise "leave scope"
+except err:
+    assert(err.message == "leave scope")
+assert(str(escaped[-1]) == "<task:closed>")
+retained: list[task] = []
+with tasks.spawn(cooperative,json_null()) as binding:
+    append(retained,binding)
+    replacement = tasks.spawn(identity,json(17))
+    append(retained,replacement)
+    binding = replacement
+replacement = retained[1]
+assert(str(retained[0]) == "<task:closed>" and str(replacement) == "<task:open>")
+assert(tasks.wait(replacement,10000) == json(17))
+tasks.close(replacement)
+try:
+    with replacement as invalid:
+        assert(false)
+except err:
+    assert(err.code == "R4022" and err.message == "task is closed")
+with tasks.spawn(failure,json("original")) as job:
+    saved_message = ""
+    saved_file = ""
+    saved_line = 0
+    saved_column = 0
+    for attempt in range(3):
+        try:
+            tasks.wait(job,10000)
+            assert(false)
+        except err:
+            assert(err.code == "R4010" and err.message == "worker failure original")
+            if attempt == 0:
+                saved_message = err.message
+                saved_file = err.file
+                saved_line = err.line
+                saved_column = err.column
+            assert(err.message == saved_message and err.file == saved_file and err.line == saved_line and err.column == saved_column)
+    assert(tasks.done(job))
+assert(not tasks.cancelled())
+# Deterministic randomized scheduling/ownership stress; bounded active batches.
+seed = 1729
+for batch in range(24):
+    pending: list[task] = []
+    expected_results: list[json] = []
+    for index in range(8):
+        seed = (seed*48271)%2147483647
+        value = json([seed%1000,index,batch])
+        append(pending,tasks.spawn(identity,value))
+        append(expected_results,value)
+    for index in range(7,-1,-1):
+        assert(tasks.wait(pending[index],10000) == expected_results[index])
+        if index%2 == 0:
+            tasks.close(pending[index])
+    # Odd handles join by final release; replacing the list drops its owners.
+    pending = []
+print("native task lifecycle passed")

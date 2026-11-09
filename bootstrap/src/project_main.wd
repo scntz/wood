@@ -1,0 +1,25 @@
+# Read-only deps-compatible inventory/verification tool; production writes locks.
+import project as project
+import project_trust as trust
+import sources as src
+
+arguments = args()
+if len(arguments) < 2 or len(arguments) > 3:
+    eprint("usage: wood-bootstrap-project STDLIB.json INPUT [--locked]")
+    exit(2)
+required = len(arguments) == 3
+if required and arguments[2] != "--locked":
+    eprint("unknown option: "+arguments[2])
+    exit(2)
+try:
+    standards: dict[str,str] = {}
+    bundle = project.object(json_parse(src.read(arguments[0],16777216)))
+    for name in bundle:
+        standards[name] = project.string(bundle[name])
+    snapshot = project.snapshot(arguments[1],false)
+    if required:
+        trust.prepare(snapshot,standards,true)
+    print(json_dump(trust.inventory(snapshot,standards)))
+except err:
+    eprint(json_dump(src.Diagnostic("D5001",err.message,arguments[1],0,0,0,0)))
+    exit(2)

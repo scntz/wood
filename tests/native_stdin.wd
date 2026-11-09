@@ -1,0 +1,31 @@
+arguments = args()
+if len(arguments) == 2 and arguments[0] == "generate":
+    root = arguments[1]
+    write_text(root+"/empty","")
+    write_text(root+"/lines","first\n\nlast")
+    write_text(root+"/crlf","one\r\ntwo\r\r\nthree\rfour\r")
+    write_text(root+"/binary","a\0b\n"+byte_string(255)+"x\n")
+    write_text(root+"/ctrl-z","before\nleft"+byte_string(26)+"right\nafter\n")
+    write_text(root+"/boundary","x"*8191+"\r\n"+"y"*20000+"\nunterminated")
+    exit(0)
+if len(arguments) > 0 and arguments[0] == "failure":
+    for i in range(2):
+        try:
+            eof()
+            assert(false)
+        except failure:
+            assert(failure.code == "R4008" and failure.message == "cannot read standard input")
+        try:
+            read_line()
+            assert(false)
+        except failure:
+            assert(failure.code == "R4008" and failure.message == "cannot read standard input")
+    print("stdin failure passed")
+    exit(0)
+lines: list[list[int]] = []
+assert(eof() == eof())
+while not eof():
+    assert(not eof())
+    append(lines,[byte_value(byte) for byte in read_line()])
+assert(eof() and read_line() == "" and eof())
+print(json_dump(lines))

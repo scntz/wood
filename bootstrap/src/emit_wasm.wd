@@ -1,0 +1,1657 @@
+# Lowers the LLVM IR of emit_llvm to one WebAssembly module, for the browser playground.
+# Pointers stay 64-bit values, so every layout matches the qualified native runtime, and
+# only a memory access narrows its address. Everything the IR's runtime text defines, and
+# everything it declares, is imported from the primitive runtime's own module.
+import sources as src
+
+record Layout:
+    kind: str
+    bits: int
+    fields: list[int]
+    offsets: list[int]
+    element: int
+    count: int
+    size: int
+    align: int
+
+record Leaf:
+    offset: int
+    valtype: int
+    load: int
+    store: int
+    bits: int
+
+record Part:
+    number: int
+    raw: str
+
+record Function:
+    name: str
+    result: int
+    params: list[int]
+    names: list[str]
+    lines: list[str]
+    imported: bool
+
+record Phi:
+    type: int
+    local: int
+    incoming: dict[str,list[str]]
+
+record Result:
+    bytes: str
+    data_end: int
+    table_end: int
+    diagnostic: src.Diagnostic
+
+fn uleb(value: int) -> str:
+    pieces: list[str] = []
+    while value > 127:
+        append(pieces,byte_string((value & 127) | 128))
+        value = value >> 7
+    append(pieces,byte_string(value))
+    return join(pieces,"")
+
+fn sleb(value: int) -> str:
+    pieces: list[str] = []
+    low = value & 127
+    value = value >> 7
+    while not ((value == 0 and low & 64 == 0) or (value == -1 and low & 64 != 0)):
+        append(pieces,byte_string(low | 128))
+        low = value & 127
+        value = value >> 7
+    append(pieces,byte_string(low))
+    return join(pieces,"")
+
+fn name_bytes(text: str) -> str:
+    return uleb(len(text))+text
+
+fn section(id: int, body: str) -> str:
+    return byte_string(id)+uleb(len(body))+body
+
+fn zeros(count: int) -> str:
+    chunk = byte_string(0)
+    pieces: list[str] = []
+    while count > 0:
+        if count & 1 == 1:
+            append(pieces,chunk)
+        count = count >> 1
+        if count > 0:
+            chunk = chunk+chunk
+    return join(pieces,"")
+
+fn little(value: int, width: int) -> str:
+    pieces: list[str] = []
+    for i in range(width):
+        append(pieces,byte_string(value & 255))
+        value = value >> 8
+    return join(pieces,"")
+
+fn hex_digit(text: str) -> int:
+    position = find("0123456789ABCDEF",text)
+    if position < 0:
+        position = find("0123456789abcdef",text)
+    if position < 0:
+        raise "invalid hexadecimal digit in native IR"
+    return position
+
+# LLVM spells a double as its sixteen hexadecimal bits, most significant first.
+fn hex_double(text: str) -> str:
+    pieces: list[str] = []
+    place = len(text)-2
+    while place >= 2:
+        append(pieces,byte_string(hex_digit(text[place])*16+hex_digit(text[place+1])))
+        place = place-2
+    return join(pieces,"")
+
+# Doubling and halving are exact until the subnormal range, which is finished by rounding once.
+fn double_bytes(text: str) -> str:
+    value = float(text)
+    sign = 0
+    if text[0] == "-":
+        sign = 1
+        value = -value
+    if value == 0.0:
+        return zeros(7)+byte_string(sign*128)
+    exponent = 0
+    while value >= 2.0:
+        value = value/2.0
+        exponent = exponent+1
+    while value < 1.0 and exponent > -1022:
+        value = value*2.0
+        exponent = exponent-1
+    fraction = 0.0
+    biased = 0
+    if value >= 1.0:
+        fraction = value-1.0
+        biased = exponent+1023
+    else:
+        fraction = value
+    bits = int(fraction*4503599627370496.0)
+    low = little(bits,6)
+    top = (bits >> 48) & 15
+    return low+byte_string(((biased & 15) << 4) | top)+byte_string((sign*128) | (biased >> 4))
+
+fn tokenize(line: str) -> list[str]:
+    tokens: list[str] = []
+    size = len(line)
+    delimiters = " \t\r,{}[]()=*;"
+    at = 0
+    while at < size:
+        c = line[at]
+        if c == " " or c == "\t" or c == "\r":
+            at = at+1
+        elif c == ";":
+            return tokens
+        elif find("{}[](),=*",c) >= 0:
+            append(tokens,c)
+            at = at+1
+        else:
+            start = at
+            if c == "c" and at+1 < size and line[at+1] == "\"":
+                at = at+1
+            if line[at] == "\"":
+                at = at+1
+                while at < size and line[at] != "\"":
+                    at = at+1
+                at = at+1
+            else:
+                while at < size and find(delimiters,line[at]) < 0:
+                    at = at+1
+            append(tokens,line[start:at])
+    return tokens
+
+fn narrow_mask(bits: int) -> int:
+    return (1 << bits)-1
+
+record Lowering:
+    bytes: list[str]
+    named: dict[str,str]
+    types: list[Layout]
+    type_ids: dict[str,int]
+    leaf_cache: dict[int,list[Leaf]]
+    functions: dict[str,Function]
+    global_lines: dict[str,str]
+    global_addresses: dict[str,int]
+    global_order: list[str]
+    function_indices: dict[str,int]
+    imports: list[str]
+    defined: list[str]
+    table_base: int
+    memory_base: int
+    table_slots: dict[str,int]
+    table_order: list[str]
+    signatures: dict[str,int]
+    signature_list: list[str]
+    tokens: list[str]
+    at: int
+    code: list[str]
+    values: dict[str,int]
+    local_types: list[int]
+    frame: int
+    frame_local: int
+    saved_local: int
+    sret_local: int
+    current_result: int
+    labels: dict[str,int]
+    phis: dict[str,list[Phi]]
+    block: int
+    block_count: int
+    depth: int
+    sp_global: int
+    stack_limit: int
+    current: str
+
+    fn fail(self, detail: str):
+        raise "WebAssembly lowering does not support "+detail+" in "+self.current
+
+    fn peek(self) -> str:
+        if self.at >= len(self.tokens):
+            return ""
+        return self.tokens[self.at]
+
+    fn next(mut self) -> str:
+        if self.at >= len(self.tokens):
+            self.fail("a truncated instruction")
+        value = self.tokens[self.at]
+        self.at = self.at+1
+        return value
+
+    fn accept(mut self, text: str) -> bool:
+        if self.at < len(self.tokens) and self.tokens[self.at] == text:
+            self.at = self.at+1
+            return true
+        return false
+
+    fn expect(mut self, text: str):
+        got = self.next()
+        if got != text:
+            self.fail("'"+got+"' where '"+text+"' belongs")
+
+    # Types
+
+    fn intern(mut self, key: str, layout: Layout) -> int:
+        if key in self.type_ids:
+            return self.type_ids[key]
+        index = len(self.types)
+        append(self.types,layout)
+        self.type_ids[key] = index
+        return index
+
+    fn scalar(mut self, name: str) -> int:
+        none: list[int] = []
+        if name == "void":
+            return self.intern(name,Layout("void",0,none,none,0,0,0,1))
+        if name == "ptr":
+            return self.intern(name,Layout("ptr",64,none,none,0,0,8,8))
+        if name == "double":
+            return self.intern(name,Layout("float",64,none,none,0,0,8,8))
+        if name == "float":
+            return self.intern(name,Layout("float",32,none,none,0,0,4,4))
+        if len(name) > 1 and name[0] == "i":
+            bits = int(name[1:])
+            size = 1 if bits <= 8 else 2 if bits <= 16 else 4 if bits <= 32 else 8
+            if bits == 128:
+                return self.intern(name,Layout("int",bits,none,none,0,0,16,16))
+            return self.intern(name,Layout("int",bits,none,none,0,0,size,size))
+        self.fail("the type '"+name+"'")
+        return 0
+
+    fn structure(mut self, fields: list[int]) -> int:
+        key = "{"
+        offsets: list[int] = []
+        size = 0
+        align = 1
+        for field in fields:
+            key = key+str(field)+","
+            layout = self.types[field]
+            size = (size+layout.align-1)//layout.align*layout.align
+            append(offsets,size)
+            size = size+layout.size
+            if layout.align > align:
+                align = layout.align
+        size = (size+align-1)//align*align
+        return self.intern(key,Layout("struct",0,fields,offsets,0,len(fields),size,align))
+
+    fn array(mut self, count: int, element: int) -> int:
+        none: list[int] = []
+        inner = self.types[element]
+        return self.intern("["+str(count)+"x"+str(element),Layout("array",0,none,none,element,count,inner.size*count,inner.align))
+
+    fn parse_type(mut self) -> int:
+        token = self.next()
+        if token == "{":
+            fields: list[int] = []
+            if not self.accept("}"):
+                while true:
+                    append(fields,self.parse_type())
+                    if self.accept("}"):
+                        break
+                    self.expect(",")
+            return self.structure(fields)
+        if token == "[":
+            count = int(self.next())
+            self.expect("x")
+            element = self.parse_type()
+            self.expect("]")
+            return self.array(count,element)
+        if token[0] == "%":
+            if token in self.type_ids:
+                return self.type_ids[token]
+            if token not in self.named:
+                self.fail("the unknown type "+token)
+            saved_tokens = self.tokens
+            saved_at = self.at
+            self.tokens = tokenize(self.named[token])
+            self.at = 0
+            resolved = self.parse_type()
+            self.tokens = saved_tokens
+            self.at = saved_at
+            self.type_ids[token] = resolved
+            return resolved
+        return self.scalar(token)
+
+    fn leaves(mut self, type: int) -> list[Leaf]:
+        if type in self.leaf_cache:
+            return self.leaf_cache[type]
+        layout = self.types[type]
+        result: list[Leaf] = []
+        if layout.kind == "int":
+            if layout.bits <= 8:
+                append(result,Leaf(0,127,45,58,layout.bits))
+            elif layout.bits <= 16:
+                append(result,Leaf(0,127,47,59,layout.bits))
+            elif layout.bits <= 32:
+                append(result,Leaf(0,127,40,54,layout.bits))
+            elif layout.bits == 128:
+                append(result,Leaf(0,126,41,55,64))
+                append(result,Leaf(8,126,41,55,64))
+            else:
+                append(result,Leaf(0,126,41,55,64))
+        elif layout.kind == "ptr":
+            append(result,Leaf(0,126,41,55,64))
+        elif layout.kind == "float":
+            if layout.bits == 64:
+                append(result,Leaf(0,124,43,57,64))
+            else:
+                append(result,Leaf(0,125,42,56,32))
+        elif layout.kind == "struct":
+            for i in range(len(layout.fields)):
+                for leaf in self.leaves(layout.fields[i]):
+                    append(result,Leaf(leaf.offset+layout.offsets[i],leaf.valtype,leaf.load,leaf.store,leaf.bits))
+        elif layout.kind == "array":
+            inner = self.leaves(layout.element)
+            stride = self.types[layout.element].size
+            for i in range(layout.count):
+                for leaf in inner:
+                    append(result,Leaf(leaf.offset+i*stride,leaf.valtype,leaf.load,leaf.store,leaf.bits))
+        self.leaf_cache[type] = result
+        return result
+
+    # Index of the first leaf at an aggregate path, and the type found there.
+    fn path_start(mut self, type: int, index: int) -> int:
+        layout = self.types[type]
+        start = 0
+        if layout.kind == "struct":
+            for i in range(index):
+                start = start+len(self.leaves(layout.fields[i]))
+        else:
+            start = index*len(self.leaves(layout.element))
+        return start
+
+    fn path_type(self, type: int, index: int) -> int:
+        layout = self.types[type]
+        return layout.fields[index] if layout.kind == "struct" else layout.element
+
+    # Constants
+
+    fn function_address(mut self, name: str) -> int:
+        if name not in self.table_slots:
+            self.table_slots[name] = len(self.table_order)
+            append(self.table_order,name)
+        return self.table_base+self.table_slots[name]
+
+    fn symbol(mut self, name: str) -> int:
+        if name in self.global_addresses:
+            return self.global_addresses[name]
+        if name in self.functions:
+            return self.function_address(name)
+        self.fail("the unknown symbol "+name)
+        return 0
+
+    fn zero_parts(mut self, type: int) -> list[Part]:
+        result: list[Part] = []
+        for leaf in self.leaves(type):
+            append(result,Part(0,""))
+        return result
+
+    # The offset of a getelementptr past a constant base, with every index constant.
+    fn constant_offset(mut self, base_type: int) -> int:
+        first = true
+        current = base_type
+        offset = 0
+        while self.accept(","):
+            self.parse_type()
+            value = self.constant_integer()
+            if first:
+                offset = offset+value*self.types[current].size
+                first = false
+            else:
+                layout = self.types[current]
+                if layout.kind == "struct":
+                    offset = offset+layout.offsets[value]
+                    current = layout.fields[value]
+                else:
+                    offset = offset+value*self.types[layout.element].size
+                    current = layout.element
+        return offset
+
+    fn constant_integer(mut self) -> int:
+        token = self.next()
+        if token == "true":
+            return 1
+        if token == "false" or token == "null" or token == "zeroinitializer" or token == "undef" or token == "poison":
+            return 0
+        if token == "ptrtoint" or token == "inttoptr" or token == "bitcast":
+            self.expect("(")
+            self.parse_type()
+            value = self.constant_integer()
+            self.expect("to")
+            self.parse_type()
+            self.expect(")")
+            return value
+        if token == "getelementptr":
+            self.accept("inbounds")
+            self.expect("(")
+            base_type = self.parse_type()
+            self.expect(",")
+            self.parse_type()
+            base = self.constant_integer()
+            offset = self.constant_offset(base_type)
+            self.expect(")")
+            return base+offset
+        if token[0] == "@":
+            return self.symbol(token)
+        return int(token)
+
+    fn constant(mut self, type: int) -> list[Part]:
+        layout = self.types[type]
+        token = self.peek()
+        if token == "zeroinitializer" or token == "undef" or token == "poison":
+            self.at = self.at+1
+            return self.zero_parts(type)
+        if layout.kind == "struct":
+            result: list[Part] = []
+            self.expect("{")
+            for field in layout.fields:
+                self.parse_type()
+                for part in self.constant(field):
+                    append(result,part)
+                self.accept(",")
+            self.expect("}")
+            return result
+        if layout.kind == "array":
+            result: list[Part] = []
+            self.expect("[")
+            for i in range(layout.count):
+                self.parse_type()
+                for part in self.constant(layout.element):
+                    append(result,part)
+                self.accept(",")
+            self.expect("]")
+            return result
+        if layout.kind == "float":
+            self.at = self.at+1
+            if len(token) > 2 and token[:2] == "0x":
+                return [Part(0,hex_double(token))]
+            return [Part(0,double_bytes(token))]
+        value = self.constant_integer()
+        if layout.kind == "int" and layout.bits < 64:
+            value = value & narrow_mask(layout.bits)
+        return [Part(value,"")]
+
+    # Output
+
+    fn emit(mut self, op: int):
+        append(self.code,self.bytes[op])
+
+    fn text(mut self, value: str):
+        append(self.code,value)
+
+    fn local(mut self, valtype: int) -> int:
+        index = len(self.local_types)
+        append(self.local_types,valtype)
+        return index
+
+    fn local_get(mut self, index: int):
+        self.emit(32)
+        self.text(uleb(index))
+
+    fn local_set(mut self, index: int):
+        self.emit(33)
+        self.text(uleb(index))
+
+    fn value_local(mut self, name: str, type: int) -> int:
+        if name in self.values:
+            return self.values[name]
+        leaves = self.leaves(type)
+        start = len(self.local_types)
+        for leaf in leaves:
+            append(self.local_types,leaf.valtype)
+        self.values[name] = start
+        return start
+
+    fn push_part(mut self, part: Part, leaf: Leaf):
+        if leaf.valtype == 127:
+            value = part.number
+            if value >= 2147483648:
+                value = value-4294967296
+            self.emit(65)
+            self.text(sleb(value))
+        elif leaf.valtype == 126:
+            self.emit(66)
+            self.text(sleb(part.number))
+        elif leaf.valtype == 124:
+            self.emit(68)
+            self.text(part.raw if part.raw != "" else zeros(8))
+        else:
+            self.emit(67)
+            self.text(zeros(4))
+
+    # A value in operand position, pushed onto the WebAssembly stack, leaf by leaf.
+    fn push_value(mut self, type: int):
+        token = self.peek()
+        leaves = self.leaves(type)
+        if token[0] == "%":
+            self.at = self.at+1
+            start = self.value_local(token,type)
+            for i in range(len(leaves)):
+                self.local_get(start+i)
+            return
+        parts = self.constant(type)
+        for i in range(len(leaves)):
+            self.push_part(parts[i],leaves[i])
+
+    # A value held in locals, for instructions that need its leaves more than once.
+    fn value_in_locals(mut self, type: int) -> int:
+        token = self.peek()
+        if token[0] == "%":
+            self.at = self.at+1
+            return self.value_local(token,type)
+        leaves = self.leaves(type)
+        parts = self.constant(type)
+        start = len(self.local_types)
+        for leaf in leaves:
+            append(self.local_types,leaf.valtype)
+        for i in range(len(leaves)):
+            self.push_part(parts[i],leaves[i])
+            self.local_set(start+i)
+        return start
+
+    fn pop_into(mut self, start: int, type: int):
+        count = len(self.leaves(type))
+        for i in range(count-1,-1,-1):
+            self.local_set(start+i)
+
+    fn address(mut self, pointer: int, offset: int):
+        self.local_get(pointer)
+        self.emit(167)
+
+    fn memarg(mut self, offset: int):
+        self.emit(0)
+        self.text(uleb(offset))
+
+    fn load_into(mut self, pointer: int, start: int, type: int):
+        leaves = self.leaves(type)
+        for i in range(len(leaves)):
+            self.address(pointer,0)
+            self.emit(leaves[i].load)
+            self.memarg(leaves[i].offset)
+            self.local_set(start+i)
+
+    fn store_from(mut self, pointer: int, start: int, type: int):
+        leaves = self.leaves(type)
+        for i in range(len(leaves)):
+            self.address(pointer,0)
+            self.local_get(start+i)
+            self.emit(leaves[i].store)
+            self.memarg(leaves[i].offset)
+
+    fn mask(mut self, bits: int):
+        if bits < 32:
+            self.emit(65)
+            self.text(sleb(narrow_mask(bits)))
+            self.emit(113)
+
+    fn sign_extend(mut self, bits: int):
+        if bits == 8:
+            self.emit(192)
+        elif bits == 16:
+            self.emit(193)
+        elif bits < 32:
+            self.emit(65)
+            self.text(sleb(32-bits))
+            self.emit(116)
+            self.emit(65)
+            self.text(sleb(32-bits))
+            self.emit(117)
+
+    # Signatures. LLVM's WebAssembly rule without multivalue: a result of several
+    # leaves is returned through a pointer in the first parameter.
+    fn results_indirectly(mut self, result: int) -> bool:
+        return len(self.leaves(result)) > 1
+
+    fn signature(mut self, result: int, params: list[int]) -> int:
+        parameter_types: list[str] = []
+        if self.results_indirectly(result):
+            append(parameter_types,self.bytes[126])
+        for parameter in params:
+            for leaf in self.leaves(parameter):
+                append(parameter_types,self.bytes[leaf.valtype])
+        results = ""
+        leaves = self.leaves(result)
+        if len(leaves) == 1:
+            results = uleb(1)+self.bytes[leaves[0].valtype]
+        else:
+            results = uleb(0)
+        key = self.bytes[96]+uleb(len(parameter_types))+join(parameter_types,"")+results
+        if key in self.signatures:
+            return self.signatures[key]
+        index = len(self.signature_list)
+        self.signatures[key] = index
+        append(self.signature_list,key)
+        return index
+
+    # Control flow
+
+    fn branch(mut self, target: str):
+        index = self.labels[target]
+        if index > self.block:
+            self.emit(12)
+            self.text(uleb(index-self.block-1+self.depth))
+        else:
+            self.emit(65)
+            self.text(sleb(index))
+            self.local_set(self.frame_local+2)
+            self.emit(12)
+            self.text(uleb(self.block_count-1-self.block+self.depth))
+
+    fn edge(mut self, source: str, target: str):
+        if target in self.phis:
+            saved_tokens = self.tokens
+            saved_at = self.at
+            incoming = self.phis[target]
+            for phi in incoming:
+                if source not in phi.incoming:
+                    self.fail("a phi without a value from "+source)
+                self.tokens = phi.incoming[source]
+                self.at = 0
+                self.push_value(phi.type)
+            for i in range(len(incoming)-1,-1,-1):
+                self.pop_into(incoming[i].local,incoming[i].type)
+            self.tokens = saved_tokens
+            self.at = saved_at
+        self.branch(target)
+
+    fn restore_stack(mut self):
+        self.local_get(self.saved_local)
+        self.emit(36)
+        self.text(uleb(self.sp_global))
+
+    fn frame_slot(mut self, type: int) -> int:
+        layout = self.types[type]
+        align = layout.align if layout.align > 0 else 1
+        self.frame = (self.frame+align-1)//align*align
+        slot = self.frame
+        self.frame = self.frame+layout.size
+        return slot
+
+    # Instructions
+
+    fn define_scalar(mut self, name: str, type: int):
+        self.local_set(self.value_local(name,type))
+
+    # The checked shift is the only use of i128: two leaves and a count below 128.
+    fn shift_wide(mut self, name: str, type: int):
+        value = self.value_in_locals(type)
+        self.expect(",")
+        count = self.value_in_locals(type)
+        target = self.value_local(name,type)
+        self.local_get(value)
+        self.local_get(count)
+        self.emit(134)
+        self.emit(66)
+        self.emit(0)
+        self.local_get(count)
+        self.emit(66)
+        self.text(sleb(64))
+        self.emit(84)
+        self.emit(27)
+        self.local_set(target)
+        self.local_get(value+1)
+        self.local_get(value+1)
+        self.local_get(count)
+        self.emit(134)
+        self.local_get(value)
+        self.emit(66)
+        self.text(sleb(64))
+        self.local_get(count)
+        self.emit(125)
+        self.emit(136)
+        self.emit(132)
+        self.local_get(count)
+        self.emit(80)
+        self.emit(27)
+        self.local_get(value)
+        self.local_get(count)
+        self.emit(66)
+        self.text(sleb(64))
+        self.emit(125)
+        self.emit(134)
+        self.local_get(count)
+        self.emit(66)
+        self.text(sleb(64))
+        self.emit(84)
+        self.emit(27)
+        self.local_set(target+1)
+
+    fn binary(mut self, name: str, op: str):
+        while self.peek() in ["nsw","nuw","exact","fast","nnan"]:
+            self.at = self.at+1
+        type = self.parse_type()
+        layout = self.types[type]
+        if layout.bits == 128:
+            if op != "shl":
+                self.fail(op+" on i128")
+            self.shift_wide(name,type)
+            return
+        wide = layout.kind == "ptr" or layout.bits > 32
+        signed = op in ["sdiv","srem","ashr"]
+        self.push_value(type)
+        if signed and not wide:
+            self.sign_extend(layout.bits)
+        self.expect(",")
+        self.push_value(type)
+        if signed and not wide:
+            self.sign_extend(layout.bits)
+        if layout.kind == "float":
+            codes = {"fadd":160,"fsub":161,"fmul":162,"fdiv":163}
+            if op not in codes or layout.bits != 64:
+                self.fail(op+" on this type")
+            self.emit(codes[op])
+        else:
+            narrow = {"add":106,"sub":107,"mul":108,"sdiv":109,"udiv":110,"srem":111,"urem":112,"and":113,"or":114,"xor":115,"shl":116,"ashr":117,"lshr":118}
+            base = narrow[op]
+            self.emit(base+18 if wide else base)
+            if not wide:
+                self.mask(layout.bits)
+        self.define_scalar(name,type)
+
+    fn compare_integer(mut self, name: str):
+        condition = self.next()
+        type = self.parse_type()
+        layout = self.types[type]
+        if layout.bits == 128:
+            left = self.value_in_locals(type)
+            self.expect(",")
+            right = self.value_in_locals(type)
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(133)
+            self.local_get(left+1)
+            self.local_get(right+1)
+            self.emit(133)
+            self.emit(132)
+            self.emit(66)
+            self.emit(0)
+            self.emit(81 if condition == "eq" else 82)
+            self.define_scalar(name,self.scalar("i1"))
+            return
+        wide = layout.kind == "ptr" or layout.bits > 32
+        signed = condition in ["slt","sle","sgt","sge"]
+        self.push_value(type)
+        if signed and not wide:
+            self.sign_extend(layout.bits)
+        self.expect(",")
+        self.push_value(type)
+        if signed and not wide:
+            self.sign_extend(layout.bits)
+        codes = {"eq":0,"ne":1,"slt":2,"ult":3,"sgt":4,"ugt":5,"sle":6,"ule":7,"sge":8,"uge":9}
+        self.emit((81 if wide else 70)+codes[condition])
+        self.define_scalar(name,self.scalar("i1"))
+
+    fn compare_float(mut self, name: str):
+        condition = self.next()
+        type = self.parse_type()
+        if self.types[type].bits != 64:
+            self.fail("fcmp on float")
+        left = self.value_in_locals(type)
+        self.expect(",")
+        right = self.value_in_locals(type)
+        codes = {"oeq":97,"olt":99,"ogt":100,"ole":101,"oge":102}
+        inverted = {"une":97,"uge":99,"ule":100,"ugt":101,"ult":102}
+        if condition in codes:
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(codes[condition])
+        elif condition in inverted:
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(inverted[condition])
+            self.emit(69)
+        elif condition == "ord" or condition == "uno":
+            self.local_get(left)
+            self.local_get(left)
+            self.emit(97)
+            self.local_get(right)
+            self.local_get(right)
+            self.emit(97)
+            self.emit(113)
+            if condition == "uno":
+                self.emit(69)
+        elif condition == "one" or condition == "ueq":
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(99)
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(100)
+            self.emit(114)
+            if condition == "ueq":
+                self.emit(69)
+        else:
+            self.fail("fcmp "+condition)
+        self.define_scalar(name,self.scalar("i1"))
+
+    fn convert(mut self, name: str, op: str):
+        source = self.parse_type()
+        if self.types[source].bits == 128:
+            start = self.value_in_locals(source)
+            self.expect("to")
+            target = self.parse_type()
+            self.local_get(start)
+            self.define_scalar(name,target)
+            return
+        self.push_value(source)
+        self.expect("to")
+        target = self.parse_type()
+        if self.types[target].bits == 128:
+            low = self.local(126)
+            self.local_set(low)
+            high = self.value_local(name,target)
+            self.local_get(low)
+            self.local_set(high)
+            if op == "sext":
+                self.local_get(low)
+                self.emit(66)
+                self.text(sleb(63))
+                self.emit(135)
+            else:
+                self.emit(66)
+                self.emit(0)
+            self.local_set(high+1)
+            return
+        from_layout = self.types[source]
+        to_layout = self.types[target]
+        from_wide = from_layout.kind == "ptr" or from_layout.bits > 32
+        to_wide = to_layout.kind == "ptr" or to_layout.bits > 32
+        if op == "zext" or op == "sext":
+            if op == "sext":
+                self.sign_extend(from_layout.bits)
+            if to_wide and not from_wide:
+                self.emit(173 if op == "zext" else 172)
+            elif not to_wide and op == "sext":
+                self.mask(to_layout.bits)
+        elif op == "trunc":
+            if from_wide and not to_wide:
+                self.emit(167)
+            if not to_wide:
+                self.mask(to_layout.bits)
+        elif op == "ptrtoint" or op == "inttoptr":
+            if from_wide and not to_wide:
+                self.emit(167)
+                self.mask(to_layout.bits)
+            elif to_wide and not from_wide:
+                self.emit(173)
+        elif op == "sitofp" or op == "uitofp":
+            if from_wide:
+                self.emit(185 if op == "sitofp" else 186)
+            else:
+                if op == "sitofp":
+                    self.sign_extend(from_layout.bits)
+                self.emit(183 if op == "sitofp" else 184)
+        elif op == "fptosi" or op == "fptoui":
+            self.emit(252)
+            if to_wide:
+                self.emit(6 if op == "fptosi" else 7)
+            else:
+                self.emit(2 if op == "fptosi" else 3)
+                self.mask(to_layout.bits)
+        elif op == "bitcast":
+            if from_layout.kind == "float" and to_layout.kind != "float":
+                self.emit(189)
+            elif to_layout.kind == "float" and from_layout.kind != "float":
+                self.emit(191)
+        else:
+            self.fail(op)
+        self.define_scalar(name,target)
+
+    fn pointer_offset(mut self, name: str):
+        self.accept("inbounds")
+        base_type = self.parse_type()
+        self.expect(",")
+        pointer_type = self.parse_type()
+        self.push_value(pointer_type)
+        first = true
+        current = base_type
+        offset = 0
+        while self.accept(","):
+            index_type = self.parse_type()
+            token = self.peek()
+            layout = self.types[current]
+            scale = layout.size
+            if not first:
+                if layout.kind == "array":
+                    scale = self.types[layout.element].size
+                elif token[0] == "%":
+                    self.fail("a variable structure index")
+            if token[0] == "%":
+                self.push_value(index_type)
+                if self.types[index_type].bits <= 32:
+                    self.sign_extend(self.types[index_type].bits)
+                    self.emit(172)
+                self.emit(66)
+                self.text(sleb(scale))
+                self.emit(126)
+                self.emit(124)
+                if not first:
+                    current = layout.element
+            else:
+                value = self.constant_integer()
+                if first:
+                    offset = offset+value*scale
+                elif layout.kind == "struct":
+                    offset = offset+layout.offsets[value]
+                    current = layout.fields[value]
+                else:
+                    offset = offset+value*scale
+                    current = layout.element
+            first = false
+        if offset != 0:
+            self.emit(66)
+            self.text(sleb(offset))
+            self.emit(124)
+        self.define_scalar(name,self.scalar("ptr"))
+
+    fn select(mut self, name: str):
+        condition_type = self.parse_type()
+        condition = self.value_in_locals(condition_type)
+        self.expect(",")
+        type = self.parse_type()
+        first = self.value_in_locals(type)
+        self.expect(",")
+        self.parse_type()
+        second = self.value_in_locals(type)
+        target = self.value_local(name,type)
+        count = len(self.leaves(type))
+        for i in range(count):
+            self.local_get(first+i)
+            self.local_get(second+i)
+            self.local_get(condition)
+            self.emit(27)
+            self.local_set(target+i)
+
+    fn extract(mut self, name: str):
+        type = self.parse_type()
+        source = self.value_in_locals(type)
+        current = type
+        start = source
+        while self.accept(","):
+            index = int(self.next())
+            start = start+self.path_start(current,index)
+            current = self.path_type(current,index)
+        target = self.value_local(name,current)
+        for i in range(len(self.leaves(current))):
+            self.local_get(start+i)
+            self.local_set(target+i)
+
+    fn insert(mut self, name: str):
+        type = self.parse_type()
+        source = self.value_in_locals(type)
+        self.expect(",")
+        element_type = self.parse_type()
+        element = self.value_in_locals(element_type)
+        current = type
+        start = 0
+        while self.accept(","):
+            index = int(self.next())
+            start = start+self.path_start(current,index)
+            current = self.path_type(current,index)
+        target = self.value_local(name,type)
+        total = len(self.leaves(type))
+        width = len(self.leaves(current))
+        for i in range(total):
+            if i >= start and i < start+width:
+                self.local_get(element+i-start)
+            else:
+                self.local_get(source+i)
+            self.local_set(target+i)
+
+    fn overflow(mut self, name: str, kind: str):
+        wide = self.scalar("i64")
+        parts = self.structure([wide,self.scalar("i1")])
+        target = self.value_local(name,parts)
+        self.expect("(")
+        self.parse_type()
+        left = self.value_in_locals(wide)
+        self.expect(",")
+        self.parse_type()
+        right = self.value_in_locals(wide)
+        self.expect(")")
+        self.local_get(left)
+        self.local_get(right)
+        self.emit(124 if kind == "add" else 125 if kind == "sub" else 126)
+        self.local_set(target)
+        if kind == "add":
+            self.local_get(left)
+            self.local_get(target)
+            self.emit(133)
+            self.local_get(right)
+            self.local_get(target)
+            self.emit(133)
+            self.emit(131)
+            self.emit(66)
+            self.emit(0)
+            self.emit(83)
+        elif kind == "sub":
+            self.local_get(left)
+            self.local_get(right)
+            self.emit(133)
+            self.local_get(left)
+            self.local_get(target)
+            self.emit(133)
+            self.emit(131)
+            self.emit(66)
+            self.emit(0)
+            self.emit(83)
+        else:
+            # a == 0 cannot overflow, a == -1 overflows only for the minimum, and otherwise
+            # the product divides back to b exactly when it fits.
+            self.local_get(left)
+            self.emit(69+11+0)
+            self.emit(4)
+            self.emit(127)
+            self.emit(65)
+            self.emit(0)
+            self.emit(5)
+            self.local_get(left)
+            self.emit(66)
+            self.text(sleb(-1))
+            self.emit(81)
+            self.emit(4)
+            self.emit(127)
+            self.local_get(right)
+            self.emit(66)
+            self.text(sleb(-9223372036854775807-1))
+            self.emit(81)
+            self.emit(5)
+            self.local_get(target)
+            self.local_get(left)
+            self.emit(127)
+            self.local_get(right)
+            self.emit(82)
+            self.emit(11)
+            self.emit(11)
+        self.local_set(target+1)
+
+    fn intrinsic(mut self, name: str, callee: str, result: int):
+        if callee == "@llvm.sadd.with.overflow.i64":
+            self.overflow(name,"add")
+        elif callee == "@llvm.ssub.with.overflow.i64":
+            self.overflow(name,"sub")
+        elif callee == "@llvm.smul.with.overflow.i64":
+            self.overflow(name,"mul")
+        else:
+            codes = {"@llvm.sqrt.f64":159,"@llvm.fabs.f64":153,"@llvm.floor.f64":156,"@llvm.ceil.f64":155,"@llvm.trunc.f64":157,"@llvm.nearbyint.f64":158,"@llvm.rint.f64":158}
+            if callee not in codes:
+                self.fail("the intrinsic "+callee)
+            self.expect("(")
+            type = self.parse_type()
+            self.push_value(type)
+            self.expect(")")
+            self.emit(codes[callee])
+            self.define_scalar(name,result)
+
+    fn call(mut self, name: str):
+        while self.peek() in ["tail","notail","musttail"]:
+            self.at = self.at+1
+        result = self.parse_type()
+        callee = self.next()
+        if len(callee) > 6 and callee[:6] == "@llvm.":
+            self.intrinsic(name,callee,result)
+            return
+        indirect_through = -1
+        if callee[0] == "%":
+            indirect_through = self.value_local(callee,self.scalar("ptr"))
+        elif callee not in self.functions:
+            self.fail("the unknown function "+callee)
+        result_leaves = self.leaves(result)
+        indirect_result = self.results_indirectly(result)
+        slot = 0
+        if indirect_result:
+            slot = self.frame_slot(result)
+            self.local_get(self.frame_local)
+            self.emit(66)
+            self.text(sleb(slot))
+            self.emit(124)
+        self.expect("(")
+        arguments: list[int] = []
+        if not self.accept(")"):
+            while true:
+                type = self.parse_type()
+                append(arguments,type)
+                self.push_value(type)
+                if self.accept(")"):
+                    break
+                self.expect(",")
+        narrow = false
+        if indirect_through >= 0:
+            self.local_get(indirect_through)
+            self.emit(167)
+            self.emit(17)
+            self.text(uleb(self.signature(result,arguments)))
+            self.emit(0)
+            narrow = true
+        else:
+            self.emit(16)
+            self.text(uleb(self.function_indices[callee]))
+            narrow = self.functions[callee].imported
+        if indirect_result:
+            temporary = self.local(126)
+            self.local_get(self.frame_local)
+            self.emit(66)
+            self.text(sleb(slot))
+            self.emit(124)
+            self.local_set(temporary)
+            if name != "":
+                self.load_into(temporary,self.value_local(name,result),result)
+        elif len(result_leaves) == 1:
+            if narrow and result_leaves[0].valtype == 127:
+                self.mask(result_leaves[0].bits)
+            if name != "":
+                self.local_set(self.value_local(name,result))
+            else:
+                self.emit(26)
+
+    fn return_value(mut self):
+        type = self.parse_type()
+        if self.types[type].kind == "void":
+            self.restore_stack()
+            self.emit(15)
+            return
+        if self.results_indirectly(type):
+            value = self.value_in_locals(type)
+            self.store_from(self.sret_local,value,type)
+            self.restore_stack()
+            self.emit(15)
+            return
+        self.push_value(type)
+        self.restore_stack()
+        self.emit(15)
+
+    fn terminate_branch(mut self, source: str):
+        if self.accept("label"):
+            self.edge(source,self.next()[1:])
+            return
+        type = self.parse_type()
+        condition = self.peek()
+        if condition == "true" or condition == "false":
+            self.at = self.at+1
+            self.expect(",")
+            self.expect("label")
+            first = self.next()[1:]
+            self.expect(",")
+            self.expect("label")
+            second = self.next()[1:]
+            self.edge(source,first if condition == "true" else second)
+            return
+        self.push_value(type)
+        self.expect(",")
+        self.expect("label")
+        first = self.next()[1:]
+        self.expect(",")
+        self.expect("label")
+        second = self.next()[1:]
+        self.emit(4)
+        self.emit(64)
+        self.depth = self.depth+1
+        self.edge(source,first)
+        self.emit(5)
+        self.edge(source,second)
+        self.emit(11)
+        self.depth = self.depth-1
+
+    fn switch_on(mut self, source: str):
+        type = self.parse_type()
+        value = self.value_in_locals(type)
+        self.expect(",")
+        self.expect("label")
+        fallback = self.next()[1:]
+        self.expect("[")
+        wide = self.types[type].bits > 32
+        while not self.accept("]"):
+            self.parse_type()
+            parts = self.constant(type)
+            self.expect(",")
+            self.expect("label")
+            target = self.next()[1:]
+            self.local_get(value)
+            self.push_part(parts[0],self.leaves(type)[0])
+            self.emit(81 if wide else 70)
+            self.emit(4)
+            self.emit(64)
+            self.depth = self.depth+1
+            self.edge(source,target)
+            self.emit(11)
+            self.depth = self.depth-1
+        self.edge(source,fallback)
+
+    fn instruction(mut self, line: str, source: str):
+        self.tokens = tokenize(line)
+        self.at = 0
+        if len(self.tokens) == 0:
+            return
+        name = ""
+        if self.tokens[0][0] == "%" and len(self.tokens) > 1 and self.tokens[1] == "=":
+            name = self.tokens[0]
+            self.at = 2
+        op = self.next()
+        if op == "phi":
+            return
+        if op in ["add","sub","mul","sdiv","udiv","srem","urem","and","or","xor","shl","ashr","lshr","fadd","fsub","fmul","fdiv"]:
+            self.binary(name,op)
+        elif op == "fneg":
+            type = self.parse_type()
+            self.push_value(type)
+            self.emit(154)
+            self.define_scalar(name,type)
+        elif op == "icmp":
+            self.compare_integer(name)
+        elif op == "fcmp":
+            self.compare_float(name)
+        elif op in ["zext","sext","trunc","ptrtoint","inttoptr","sitofp","uitofp","fptosi","fptoui","bitcast"]:
+            self.convert(name,op)
+        elif op == "getelementptr":
+            self.pointer_offset(name)
+        elif op == "alloca":
+            slot = self.frame_slot(self.parse_type())
+            self.local_get(self.frame_local)
+            self.emit(66)
+            self.text(sleb(slot))
+            self.emit(124)
+            self.define_scalar(name,self.scalar("ptr"))
+        elif op == "load":
+            self.accept("volatile")
+            type = self.parse_type()
+            self.expect(",")
+            pointer_type = self.parse_type()
+            pointer = self.value_in_locals(pointer_type)
+            self.load_into(pointer,self.value_local(name,type),type)
+        elif op == "store":
+            self.accept("volatile")
+            type = self.parse_type()
+            value = self.value_in_locals(type)
+            self.expect(",")
+            pointer_type = self.parse_type()
+            pointer = self.value_in_locals(pointer_type)
+            self.store_from(pointer,value,type)
+        elif op == "select":
+            self.select(name)
+        elif op == "extractvalue":
+            self.extract(name)
+        elif op == "insertvalue":
+            self.insert(name)
+        elif op == "call":
+            self.call(name)
+        elif op == "ret":
+            self.return_value()
+        elif op == "br":
+            self.terminate_branch(source)
+        elif op == "switch":
+            self.switch_on(source)
+        elif op == "unreachable":
+            self.emit(0)
+        else:
+            self.fail("the instruction '"+op+"'")
+
+    fn lower_function(mut self, function: Function) -> str:
+        self.current = function.name
+        self.code = []
+        self.values = {}
+        self.local_types = []
+        self.frame = 0
+        self.phis = {}
+        self.labels = {}
+        self.current_result = function.result
+        self.sret_local = -1
+        if self.results_indirectly(function.result):
+            self.sret_local = self.local(126)
+        for i in range(len(function.params)):
+            start = len(self.local_types)
+            for leaf in self.leaves(function.params[i]):
+                append(self.local_types,leaf.valtype)
+            self.values[function.names[i]] = start
+        parameter_count = len(self.local_types)
+        self.frame_local = self.local(126)
+        self.saved_local = self.local(126)
+        pc_local = self.local(127)
+        names: list[str] = []
+        blocks: list[list[str]] = []
+        pending = ""
+        for line in function.lines:
+            if pending != "":
+                line = pending+" "+line
+                pending = ""
+                if find(line,"]") < 0:
+                    pending = line
+                    continue
+            stripped = strip(line)
+            if stripped == "" or stripped[0] == ";":
+                continue
+            if line[0] != " " and stripped[len(stripped)-1] == ":":
+                append(names,stripped[:len(stripped)-1])
+                append(blocks,[])
+            else:
+                if starts_with(stripped,"switch") and find(line,"]") < 0:
+                    pending = line
+                    continue
+                if len(blocks) == 0:
+                    append(names,"0")
+                    append(blocks,[])
+                last = len(blocks)-1
+                lines = blocks[last]
+                append(lines,line)
+                blocks[last] = lines
+        for i in range(len(names)):
+            self.labels[names[i]] = i
+        for i in range(len(names)):
+            incoming: list[Phi] = []
+            for line in blocks[i]:
+                if find(line,"= phi ") < 0:
+                    continue
+                self.tokens = tokenize(line)
+                self.at = 0
+                target = self.next()
+                self.expect("=")
+                self.expect("phi")
+                type = self.parse_type()
+                sources: dict[str,list[str]] = {}
+                while self.accept("["):
+                    value: list[str] = []
+                    depth = 0
+                    while depth > 0 or self.peek() != ",":
+                        token = self.next()
+                        if token == "{" or token == "(" or token == "[":
+                            depth = depth+1
+                        elif token == "}" or token == ")" or token == "]":
+                            depth = depth-1
+                        append(value,token)
+                    self.expect(",")
+                    sources[self.next()[1:]] = value
+                    self.expect("]")
+                    self.accept(",")
+                append(incoming,Phi(type,self.value_local(target,type),sources))
+            if len(incoming) > 0:
+                self.phis[names[i]] = incoming
+        self.block_count = len(names)
+        self.depth = 0
+        self.block = 0
+        # Blocks nest so a forward branch can leave directly, and the outer loop returns.
+        many = self.block_count > 1
+        if many:
+            self.emit(3)
+            self.emit(64)
+            for i in range(self.block_count):
+                self.emit(2)
+                self.emit(64)
+            self.local_get(pc_local)
+            self.emit(14)
+            self.text(uleb(self.block_count-1))
+            for i in range(self.block_count):
+                self.text(uleb(i))
+            self.emit(0)
+        for i in range(self.block_count):
+            self.block = i
+            if many:
+                self.emit(11)
+            for line in blocks[i]:
+                self.instruction(line,names[i])
+        if many:
+            self.emit(11)
+        self.emit(0)
+        self.emit(11)
+        body = self.code
+        self.code = []
+        self.emit(35)
+        self.text(uleb(self.sp_global))
+        self.local_set(self.saved_local)
+        if self.frame > 0:
+            size = (self.frame+15)//16*16
+            self.emit(35)
+            self.text(uleb(self.sp_global))
+            self.emit(66)
+            self.text(sleb(size))
+            self.emit(125)
+            self.local_set(self.frame_local)
+            self.local_get(self.frame_local)
+            self.emit(66)
+            self.text(sleb(self.stack_limit))
+            self.emit(83)
+            self.emit(4)
+            self.emit(64)
+            self.emit(0)
+            self.emit(11)
+            self.local_get(self.frame_local)
+            self.emit(36)
+            self.text(uleb(self.sp_global))
+        prologue = join(self.code,"")
+        groups: list[str] = []
+        group_count = 0
+        at = parameter_count
+        while at < len(self.local_types):
+            kind = self.local_types[at]
+            run = 1
+            while at+run < len(self.local_types) and self.local_types[at+run] == kind:
+                run = run+1
+            append(groups,uleb(run)+self.bytes[kind])
+            group_count = group_count+1
+            at = at+run
+        content = uleb(group_count)+join(groups,"")+prologue+join(body,"")
+        return uleb(len(content))+content
+
+    fn parse_header(mut self, line: str, declared: bool, imported: bool, lines: list[str]) -> Function:
+        self.tokens = tokenize(line)
+        self.at = 1
+        while self.peek() in ["internal","private","dso_local","dllimport","extern_weak","noundef","zeroext","signext"]:
+            self.at = self.at+1
+        result = self.parse_type()
+        name = self.next()
+        self.expect("(")
+        params: list[int] = []
+        names: list[str] = []
+        if not self.accept(")"):
+            while true:
+                type = self.parse_type()
+                append(params,type)
+                if self.peek() != "," and self.peek() != ")":
+                    append(names,self.next())
+                else:
+                    append(names,"%"+str(len(names)))
+                if self.accept(")"):
+                    break
+                self.expect(",")
+        return Function(name,result,params,names,lines,imported)
+
+    fn build(mut self, text: str, runtime: str) -> Result:
+        for i in range(256):
+            append(self.bytes,byte_string(i))
+        from_runtime: dict[str,bool] = {}
+        for line in split(runtime,"\n"):
+            if starts_with(line,"define "):
+                header = tokenize(line)
+                for token in header:
+                    if token[0] == "@":
+                        from_runtime[token] = true
+                        break
+        all_lines = split(text,"\n")
+        at = 0
+        while at < len(all_lines):
+            line = all_lines[at]
+            at = at+1
+            if line == "" or line[0] == ";":
+                continue
+            if line[0] == "%":
+                mark = find(line," = type ")
+                if mark > 0:
+                    self.named[line[:mark]] = line[mark+8:]
+            elif line[0] == "@":
+                mark = find(line," ")
+                self.global_lines[line[:mark]] = line
+            elif starts_with(line,"define "):
+                lines: list[str] = []
+                while at < len(all_lines) and strip(all_lines[at]) != "}":
+                    append(lines,all_lines[at])
+                    at = at+1
+                at = at+1
+                function = self.parse_header(line,false,false,lines)
+                self.functions[function.name] = Function(function.name,function.result,function.params,function.names,lines,function.name in from_runtime)
+            elif starts_with(line,"declare "):
+                function = self.parse_header(line,true,true,[])
+                self.functions[function.name] = function
+        if "@wd_main" not in self.functions:
+            raise "the program has no entry function"
+        # Keep only what the entry reaches, so the runtime's own bodies stay in its module.
+        seen: dict[str,bool] = {"@wd_main":true}
+        queue = ["@wd_main"]
+        while len(queue) > 0:
+            name = queue[len(queue)-1]
+            pop(queue)
+            found: list[str] = []
+            if name in self.functions:
+                self.current = name
+                function = self.functions[name]
+                if function.imported:
+                    append(self.imports,name)
+                else:
+                    append(self.defined,name)
+                    for line in function.lines:
+                        found = scan_symbols(line,found)
+            elif name in self.global_lines:
+                append(self.global_order,name)
+                found = scan_symbols(self.global_lines[name][len(name):],found)
+            for symbol in found:
+                if symbol not in seen and not starts_with(symbol,"@llvm."):
+                    seen[symbol] = true
+                    append(queue,symbol)
+        next_index = 0
+        for name in self.imports:
+            self.function_indices[name] = next_index
+            next_index = next_index+1
+        for name in self.defined:
+            self.function_indices[name] = next_index
+            next_index = next_index+1
+        # Addresses first: a constant may name any global, in either direction.
+        address = self.memory_base
+        global_types: dict[str,int] = {}
+        global_inits: dict[str,int] = {}
+        for name in self.global_order:
+            self.current = name
+            self.tokens = tokenize(self.global_lines[name])
+            self.at = 1
+            self.expect("=")
+            while self.peek() != "constant" and self.peek() != "global":
+                self.at = self.at+1
+            self.at = self.at+1
+            type = self.parse_type()
+            layout = self.types[type]
+            align = layout.align if layout.align > 8 else 8
+            address = (address+align-1)//align*align
+            self.global_addresses[name] = address
+            global_types[name] = type
+            address = address+layout.size
+        data_end = (address+15)//16*16
+        stack_size = 4194304
+        self.stack_limit = data_end
+        stack_top = data_end+stack_size
+        self.sp_global = 0
+        # Bodies, which may allot table slots to functions used as values.
+        bodies: list[str] = []
+        for name in self.defined:
+            append(bodies,self.lower_function(self.functions[name]))
+        # Data, with the same freedom.
+        pieces: list[str] = []
+        place = self.memory_base
+        for name in self.global_order:
+            self.current = name
+            target = self.global_addresses[name]
+            append(pieces,zeros(target-place))
+            place = target
+            type = global_types[name]
+            line = self.global_lines[name]
+            self.tokens = tokenize(line)
+            self.at = 1
+            self.expect("=")
+            while self.peek() != "constant" and self.peek() != "global":
+                self.at = self.at+1
+            self.at = self.at+1
+            self.parse_type()
+            token = self.peek()
+            size = self.types[type].size
+            if len(token) > 1 and token[:2] == "c\"":
+                content: list[str] = []
+                i = 2
+                end = len(token)-1
+                while i < end:
+                    if token[i] == "\\":
+                        append(content,byte_string(hex_digit(token[i+1])*16+hex_digit(token[i+2])))
+                        i = i+3
+                    else:
+                        append(content,token[i])
+                        i = i+1
+                append(pieces,join(content,""))
+            else:
+                parts = self.constant(type)
+                leaves = self.leaves(type)
+                cursor = 0
+                for i in range(len(leaves)):
+                    leaf = leaves[i]
+                    if leaf.offset > cursor:
+                        append(pieces,zeros(leaf.offset-cursor))
+                        cursor = leaf.offset
+                    width = 8 if leaf.valtype != 127 and leaf.valtype != 125 else (1 if leaf.bits <= 8 else 2 if leaf.bits <= 16 else 4)
+                    if leaf.valtype == 125:
+                        width = 4
+                    if parts[i].raw != "":
+                        append(pieces,parts[i].raw)
+                    else:
+                        append(pieces,little(parts[i].number,width))
+                    cursor = cursor+width
+                if size > cursor:
+                    append(pieces,zeros(size-cursor))
+            place = place+size
+        data = join(pieces,"")
+        table_end = self.table_base+len(self.table_order)
+        # Signatures of everything, now that indirect calls have added theirs.
+        function_types: list[int] = []
+        for name in self.imports:
+            function = self.functions[name]
+            append(function_types,self.signature(function.result,function.params))
+        for name in self.defined:
+            function = self.functions[name]
+            append(function_types,self.signature(function.result,function.params))
+        output: list[str] = [byte_string(0)+"asm"+byte_string(1)+zeros(3)]
+        append(output,section(1,uleb(len(self.signature_list))+join(self.signature_list,"")))
+        pages = (stack_top+65535)//65536
+        entries: list[str] = []
+        append(entries,name_bytes("rt")+name_bytes("memory")+byte_string(2)+byte_string(0)+uleb(pages))
+        append(entries,name_bytes("rt")+name_bytes("table")+byte_string(1)+byte_string(112)+byte_string(0)+uleb(table_end))
+        for i in range(len(self.imports)):
+            name = self.imports[i]
+            append(entries,name_bytes("rt")+name_bytes(name[1:])+byte_string(0)+uleb(function_types[i]))
+        append(output,section(2,uleb(len(entries))+join(entries,"")))
+        declared: list[str] = []
+        for i in range(len(self.defined)):
+            append(declared,uleb(function_types[len(self.imports)+i]))
+        append(output,section(3,uleb(len(declared))+join(declared,"")))
+        stack_global = byte_string(126)+byte_string(1)+byte_string(66)+sleb(stack_top)+byte_string(11)
+        append(output,section(6,uleb(1)+stack_global))
+        append(output,section(7,uleb(1)+name_bytes("wd_main")+byte_string(0)+uleb(self.function_indices["@wd_main"])))
+        if len(self.table_order) > 0:
+            elements: list[str] = []
+            for name in self.table_order:
+                append(elements,uleb(self.function_indices[name]))
+            body = uleb(1)+uleb(0)+byte_string(65)+sleb(self.table_base)+byte_string(11)+uleb(len(elements))+join(elements,"")
+            append(output,section(9,body))
+        append(output,section(10,uleb(len(bodies))+join(bodies,"")))
+        if len(data) > 0:
+            body = uleb(1)+uleb(0)+byte_string(65)+sleb(self.memory_base)+byte_string(11)+uleb(len(data))+data
+            append(output,section(11,body))
+        layout_note = name_bytes("wood.layout")+little(stack_top,8)+little(table_end,8)
+        append(output,section(0,layout_note))
+        return Result(join(output,""),stack_top,table_end,src.success())
+
+fn scan_symbols(line: str, out: list[str]) -> list[str]:
+    at = find(line,"@")
+    size = len(line)
+    while at >= 0:
+        stop = at+1
+        while stop < size and find(" ,)(}{][\r\t",line[stop]) < 0:
+            stop = stop+1
+        append(out,line[at:stop])
+        rest = find(line[stop:],"@")
+        at = stop+rest if rest >= 0 else -1
+    return out
+
+fn lower(text: str, runtime: str, memory_base: int, table_base: int) -> Result:
+    state = Lowering([],{},[],{},{},{},{},{},[],{},[],[],table_base,memory_base,{},[],{},[],[],0,[],{},[],0,0,0,-1,0,{},{},0,0,0,0,0,"")
+    return state.build(text,runtime)

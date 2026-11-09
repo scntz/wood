@@ -1,0 +1,46 @@
+# Native JSON catalog pipeline using generic algorithms and optional fields.
+# Run: wood typed_catalog.wd input.json output.json
+import std.functional as functional
+
+record Product:
+    name: str
+    cents: int
+    category: str | None
+
+fn decode(value: json) -> Product:
+    fields = json_dict(value)
+    name = json_str(fields['name'])
+    cents = json_int(fields['cents'])
+    if name == '' or cents < 0:
+        raise 'product needs a nonempty name and nonnegative cents'
+    category: str | None = None
+    if 'category' in fields:
+        raw = fields['category']
+        if json_kind(raw) != 'null':
+            category = json_str(raw)
+    return Product(category=category, cents=cents, name=name)
+
+fn categorized(product: Product) -> bool:
+    return product.category is not None
+
+fn add_price(total: int, product: Product) -> int:
+    return total + product.cents
+
+fn main(input_path: str, output_path: str):
+    source = json_list(json_parse(read_text(input_path)))
+    products = functional.map(decode, source)
+    groups = functional.partition(categorized, products)
+    total = functional.fold(add_price, products, initial=0)
+    report: dict[str,json] = {
+        'products': json(functional.enumerate(products, start=1)),
+        'categorized': json(groups[0]),
+        'uncategorized': json(groups[1]),
+        'first': json(functional.first(products)),
+        'total_cents': json(total)
+    }
+    write_text(output_path, json_dump(report) + '\n')
+
+arguments = args()
+if len(arguments) != 2:
+    raise 'usage: typed_catalog input.json output.json'
+main(arguments[0], arguments[1])

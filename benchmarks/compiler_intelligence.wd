@@ -1,0 +1,63 @@
+import std.iter as it
+import std.time as time
+extern fn bench_alloc_reset()
+extern fn bench_alloc_stop() -> int
+
+fn pipeline(count: int, rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        scale = round % 7 + 1
+        values = it.take(it.map(it.filter(range(count), fn(x) => x % 3 == 0), fn(x) => x * scale + 1), count // 4)
+        checksum += it.fold(values, 0, fn(total,value) => total + value)
+    return checksum
+
+fn capture(count: int, rounds: int) -> int:
+    text = "native wood" * 128
+    callback = fn(x: int) => len(text) + x
+    checksum = 0
+    for round in range(rounds):
+        for item in range(count):
+            checksum += callback(item % 256)
+    return checksum
+
+fn payload(source: list[str], rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        checksum += it.fold(it.map(source, fn(value) => len(value)), 0, fn(total,value) => total + value)
+    return checksum
+
+# Exercise constructor cost as well as long-range advancement: many short,
+# overlapping windows with a runtime-varying positive stride.
+fn ranges(count: int, rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        for start in range(count):
+            for item in range(start, start + 8, start % 7 + 1):
+                checksum += item % 17
+    return checksum
+
+arguments = args()
+mode = arguments[0]
+count = int(arguments[1])
+rounds = int(arguments[2])
+if count < 4 or count > 10000000 or rounds < 1 or rounds > 100:
+    raise "unsupported benchmark size"
+source: list[str] = []
+if mode == "payload":
+    source = ["native payload " * 8 for item in range(count)]
+bench_alloc_reset()
+started = time.perf_counter_ns()
+checksum = 0
+if mode == "pipeline":
+    checksum = pipeline(count, rounds)
+elif mode == "capture":
+    checksum = capture(count, rounds)
+elif mode == "payload":
+    checksum = payload(source, rounds)
+elif mode == "ranges":
+    checksum = ranges(count, rounds)
+else:
+    raise "unknown benchmark mode"
+elapsed = time.perf_counter_ns() - started
+allocations = bench_alloc_stop()
+print(json_dump({"checksum": checksum, "elapsed_ns": elapsed, "allocations": allocations}))

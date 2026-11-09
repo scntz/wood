@@ -1,0 +1,963 @@
+# Transitional native backend written in Wood. It consumes checked facts only;
+# the existing C++ runtime is a bootstrap dependency, not a frontend oracle.
+import checked_program as ir
+import type_system as ts
+import native_calls as native
+import lexer as lx
+
+fn literal(text: str) -> str:
+    octal = "01234567"
+    pieces = ["\""]
+    for byte in text:
+        value = byte_value(byte)
+        append(pieces,"\\"+octal[value // 64]+octal[(value // 8) % 8]+octal[value % 8])
+    append(pieces,"\"")
+    return join(pieces,"")
+
+fn variable(symbol: int) -> str:
+    return "bs_v"+str(symbol)
+
+# A finally block around the statement being emitted. Return, break and continue that leave its try
+# block record how they left in flow (1, 2, 3), keep a returned value in value, and jump to label,
+# where the finally block runs and then leaves the same way. uses collects the ways seen.
+record Final:
+    label: str
+    flow: str
+    value: str
+    loops: int
+    uses: int
+
+record Generator:
+    program: ir.Result
+    lines: list[str]
+    temporary: int
+    natives: dict[str,native.Native]
+    emitted: dict[int,bool]
+    declarations: dict[int,int]
+    files: list[str]
+    moves: dict[int,bool]
+    written: dict[int,bool]
+    finals: list[Final]
+    loops: int
+    returning: int
+
+    fn line(mut self, text: str):
+        append(self.lines,text)
+
+    fn fresh(mut self) -> str:
+        self.temporary += 1
+        return "bs_t"+str(self.temporary)
+
+    fn type(self, value: int) -> str:
+        node = self.program.signatures.pool.types[value]
+        scalar = {"Int":"wd::Int","Float":"double","Bool":"bool","Str":"std::string","Void":"void","None":"wd::None","Error":"wd::Failure","Json":"wd::Json","Stream":"wd::Stream","Database":"wd::Database","Statement":"wd::Statement","Transaction":"wd::Transaction","TlsContext":"wd::TlsContext","Task":"wd::Task","Range":"wd::Range"}
+        if node.kind in scalar:
+            return scalar[node.kind]
+        if node.kind == "Record":
+            return "wd::bs_r"+str(node.declaration)
+        if node.kind == "Closure":
+            return "wd::bs_c"+str(node.declaration)
+        if node.kind in ["List","Array","Optional","Step","Cursor"]:
+            prefixes = {"List":"wd::List","Array":"wd::Array","Optional":"std::optional","Step":"wd::Step","Cursor":"wd::Cursor"}
+            prefix = prefixes[node.kind]
+            return prefix+"<"+self.type(node.element)+">"
+        if node.kind == "Dict":
+            return "wd::Dict<"+self.type(node.key)+","+self.type(node.element)+">"
+        if node.kind in ["Tuple","Function","Callable"]:
+            parts: list[str] = []
+            if node.kind in ["Function","Callable"]:
+                append(parts,self.type(node.element))
+            for parameter in node.parameters:
+                append(parts,self.type(parameter))
+            prefix = "std::tuple" if node.kind == "Tuple" else ("wd::Callable" if node.kind == "Callable" else "wd::Function")
+            return prefix+"<"+join(parts,",")+">"
+        raise "unsupported checked type in bootstrap emitter: "+node.kind
+
+    fn site(self, module: int, token: lx.Token) -> str:
+        return "wd::Site{"+self.files[module]+","+str(token.line)+","+str(token.column)+"}"
+
+    fn converted(mut self, module: int, value: int, target: int) -> str:
+        actual = self.program.facts[module].types[value]
+        result = self.expression(module,value)
+        node = self.program.signatures.pool.types[target]
+        if node.kind == "Callable" and actual != target:
+            return self.type(target)+"{"+result+"}"
+        if node.kind == "Optional" and actual != target:
+            if self.program.signatures.pool.types[actual].kind == "None":
+                return self.type(target)+"{std::nullopt}"
+            if self.program.signatures.pool.types[node.element].kind == "Float" and self.program.signatures.pool.types[actual].kind == "Int":
+                result = "static_cast<double>("+result+")"
+            return self.type(target)+"{"+result+"}"
+        if node.kind == "Float" and self.program.signatures.pool.types[actual].kind == "Int":
+            return "static_cast<double>("+result+")"
+        return result
+
+    fn operation(self, op: str, result: int, a: str, b: str, site: str) -> str:
+        kind = self.program.signatures.pool.types[result].kind
+        if kind == "Array" and op in ["+","-","*","/"]:
+            helpers = {"+":"array_add","-":"array_sub","*":"array_mul","/":"array_div"}
+            return "wd::"+helpers[op]+"(std::move("+a+"),std::move("+b+"),"+site+")"
+        if op in ["==","!=","is","is not"]:
+            return ("!" if op in ["!=","is not"] else "")+"wd::equal("+a+","+b+")"
+        if op in ["in","not in"]:
+            return ("!" if op == "not in" else "")+"wd::contains("+b+","+a+","+site+")"
+        if op == "+" and kind in ["Str","List"]:
+            return "wd::concat("+a+","+b+","+site+")"
+        if op == "*" and kind in ["Str","List"]:
+            return "wd::repeat("+a+","+b+","+site+")"
+        helpers = {"<<":"shift_left",">>":"shift_right","//":"floor_div","%":"mod"}
+        if op in helpers:
+            return "wd::"+helpers[op]+"("+a+","+b+","+site+")"
+        if op == "/":
+            return "wd::div(static_cast<double>("+a+"),static_cast<double>("+b+"),"+site+")"
+        if kind == "Int" and op in ["+","-","*"]:
+            helpers = {"+":"add","-":"sub","*":"mul"}
+            return "wd::"+helpers[op]+"("+a+","+b+","+site+")"
+        return "("+a+" "+op+" "+b+")"
+
+    fn path(mut self, module: int, value: int, prefix: list[str]) -> tuple[str,list[str]]:
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        if expr.kind == "Name":
+            return (variable(self.program.facts[module].symbols[value]),prefix)
+        parent = self.path(module,expr.children[0],prefix)
+        if expr.kind == "Member":
+            return (parent[0]+".bs_m"+str(self.program.facts[module].symbols[value]),parent[1])
+        index = self.fresh()
+        lines = parent[1]
+        append(lines,"auto "+index+" = "+self.expression(module,expr.children[1])+";")
+        return (parent[0]+".mut_at("+index+","+self.site(module,expr.token)+")",lines)
+
+    fn captured_path(mut self, module: int, value: int) -> tuple[str,str,list[str]]:
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        if expr.kind == "Name":
+            name = variable(self.program.facts[module].symbols[value])
+            return (name,name,[])
+        parent = self.captured_path(module,expr.children[0])
+        if expr.kind == "Member":
+            suffix = ".bs_m"+str(self.program.facts[module].symbols[value])
+            return (parent[0]+suffix,parent[1]+suffix,parent[2])
+        index = self.fresh()
+        read = self.fresh()
+        lines = parent[2]
+        append(lines,"auto "+index+" = "+self.expression(module,expr.children[1])+";")
+        append(lines,"auto "+read+" = wd::at("+parent[0]+","+index+","+self.site(module,expr.token)+");")
+        return (read,parent[1]+".mut_at("+index+","+self.site(module,expr.token)+")",lines)
+
+    fn stable_index(self, module: int, value: int) -> bool:
+        if value < 0:
+            return true
+        node = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        # Fail closed: calls/comprehensions can mutate a receiver or its parent.
+        # These checked expression families only calculate/read owned values.
+        if node.kind not in ["Integer","Float","String","Bool","None","Name","Member","Unary","Binary","CompareChain","Conditional","Index","Slice","List","Dict","Tuple"]:
+            return false
+        for child in node.children:
+            if not self.stable_index(module,child):
+                return false
+        return true
+
+    fn borrow_lifetime(self, module: int, value: int) -> bool:
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        # std::get returns a reference. Binding that reference (or one of its
+        # members) does not extend an owning temporary tuple's lifetime.
+        if expr.kind == "Index":
+            base = self.program.signatures.pool.types[self.program.facts[module].types[expr.children[0]]]
+            if base.kind == "Tuple":
+                return false
+        if expr.kind == "Member":
+            return self.borrow_lifetime(module,expr.children[0])
+        return true
+
+    fn call(mut self, module: int, value: int) -> str:
+        call = self.program.facts[module].calls[value]
+        if call.kind in ["indirect","closure"]:
+            return self.invocation(module,value)
+        if call.kind == "snapshot":
+            reference = call.arguments[0]
+            return "([&]() -> "+self.type(self.program.facts[module].types[value])+" { return "+self.expression(reference.module,reference.expression)+"; }())"
+        if call.kind == "builtin" and call.name == "finished":
+            return self.type(self.program.facts[module].types[value])+"{}"
+        if call.kind == "function":
+            return "(&bs_f"+str(self.program.signatures.declarations[call.target].symbol)+")"
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        type_id = self.program.facts[module].types[value]
+        prefix: list[str] = []
+        arguments: list[str] = []
+        paths: dict[int,str] = {}
+        if call.kind in ["declared","construct"]:
+            for parameter in self.program.signatures.declarations[call.target].parameters:
+                append(arguments,"")
+        for position in range(len(call.arguments)):
+            reference = call.arguments[position]
+            target = self.program.facts[reference.module].types[reference.expression]
+            borrowed = call.kind == "builtin" and call.name in ["append","pop","remove","next"] and position == 0
+            if call.kind == "builtin" and call.name == "yielded":
+                target = self.program.signatures.pool.types[type_id].element
+            if call.kind == "declared":
+                declaration = self.program.signatures.declarations[call.target]
+                stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                target = declaration.parameters[call.order[position]].type
+                borrowed = (stmt.method and stmt.mutating and call.order[position] == 0) or stmt.parameters[call.order[position]].mutable_borrow
+            if call.kind == "construct":
+                target = self.program.signatures.declarations[call.target].parameters[call.order[position]].type
+            if call.kind == "builtin" and ((call.name == "append" and position == 1) or (call.name == "get" and position == 2)):
+                source = call.arguments[0]
+                container = self.program.signatures.pool.types[self.program.facts[source.module].types[source.expression]]
+                target = container.element
+            argument = ""
+            if borrowed:
+                checked = call.kind == "builtin" and call.name == "next"
+                if call.kind == "declared":
+                    declaration = self.program.signatures.declarations[call.target]
+                    stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                    checked = stmt.parameters[call.order[position]].mutable_borrow
+                path = self.validated_path(reference.module,reference.expression,prefix) if checked else self.path(reference.module,reference.expression,prefix)
+                prefix = path[1]
+                if call.kind != "builtin" or call.name == "next":
+                    append(prefix,"static_cast<void>("+path[0]+");")
+                paths[position] = path[0]
+                argument = ""
+            else:
+                argument = self.fresh()
+                read = call.kind == "builtin" and call.name in ["len","slice"] and position == 0 and self.program.signatures.pool.types[target].kind == "Str"
+                if read:
+                    read = self.borrow_lifetime(reference.module,reference.expression)
+                if read:
+                    for later in call.arguments[1:]:
+                        if not self.stable_index(later.module,later.expression):
+                            read = false
+                append(prefix,("const auto& " if read else "auto ")+argument+" = "+self.converted(reference.module,reference.expression,target)+";")
+                # The temporary already owns the evaluated snapshot. Transfer it
+                # into a value parameter so unique resources finalize on time.
+                if not read:
+                    argument = "std::move("+argument+")"
+            if call.kind in ["declared","construct"]:
+                arguments[call.order[position]] = argument
+            else:
+                append(arguments,argument)
+        for position in paths:
+            name = self.fresh()
+            append(prefix,"auto& "+name+" = "+paths[position]+";")
+            if call.kind == "declared":
+                arguments[call.order[position]] = name
+            else:
+                arguments[position] = name
+        target_name = ""
+        if call.kind == "indirect":
+            target_name = arguments[0]
+            arguments = arguments[1:]
+        elif call.kind == "construct":
+            target_name = self.type(type_id)
+        elif call.kind == "declared":
+            target_name = "bs_f"+str(self.program.signatures.declarations[call.target].symbol)
+        else:
+            mappings = {"str":"to_str","int":"to_int","float":"to_float","assert":"assert_that","range":"make_range","json":"to_json"}
+            target_name = "wd::"+(mappings[call.name] if call.name in mappings else call.name)
+            site = call.name not in ["print","eprint","str","args","keys","values","iter","yielded","has_item","array_shape","array_rank","array_contiguous"]
+            if call.name in self.natives:
+                target_name = "wd::"+self.natives[call.name].native
+                site = self.natives[call.name].site
+            if site:
+                append(arguments,self.site(module,expr.token))
+            if call.name in ["print","eprint"]:
+                target_name += "_checked"
+                arguments = [self.site(module,expr.token)]+arguments
+        brackets = "{" if call.kind == "construct" else "("
+        closing = "}" if call.kind == "construct" else ")"
+        return "([&]() -> "+self.type(type_id)+" { "+join(prefix," ")+" return "+target_name+brackets+join(arguments,",")+closing+"; }())"
+
+    fn validated_path(mut self, module: int, value: int, prefix: list[str]) -> tuple[str,list[str]]:
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        if expr.kind == "Name":
+            return (variable(self.program.facts[module].symbols[value]),prefix)
+        parent = self.validated_path(module,expr.children[0],prefix)
+        if expr.kind == "Member":
+            return (parent[0]+".bs_m"+str(self.program.facts[module].symbols[value]),parent[1])
+        index = self.fresh()
+        lines = parent[1]
+        append(lines,"auto "+index+" = "+self.expression(module,expr.children[1])+";")
+        path = parent[0]+".mut_at("+index+","+self.site(module,expr.token)+")"
+        # Validate each level before evaluating deeper indices or arguments.
+        # Retain only index values, never an element reference or owner copy.
+        append(lines,"static_cast<void>("+path+");")
+        return (path,lines)
+
+    fn invocation(mut self, module: int, value: int) -> str:
+        call = self.program.facts[module].calls[value]
+        source = call.arguments[0]
+        type_id = self.program.facts[source.module].types[source.expression]
+        function = self.program.signatures.pool.types[type_id]
+        mutable = function.kind == "Callable"
+        if function.kind == "Closure":
+            declaration = self.program.signatures.declarations[self.declarations[function.declaration]]
+            mutable = len(self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement].mutable_captures) > 0
+        root = source.expression
+        tree = self.program.signatures.compilation.modules[source.module].tree
+        while tree.expressions[root].kind in ["Member","Index"]:
+            root = tree.expressions[root].children[0]
+        rooted = tree.expressions[root].kind == "Name" and root not in self.program.facts[source.module].calls
+        borrow = not mutable and rooted and function.kind == "Closure"
+        if borrow:
+            captures = self.program.closures[self.declarations[function.declaration]].captures
+            cheap = len(captures) <= 2
+            for capture in captures:
+                if self.program.signatures.pool.types[capture.type].kind not in ["Int","Float","Bool","None","Function"]:
+                    cheap = false
+            if cheap:
+                borrow = false
+            for argument in call.arguments[1:]:
+                if not self.stable_index(argument.module,argument.expression):
+                    borrow = false
+        prefix: list[str] = []
+        target = self.fresh()
+        path = ""
+        if mutable and rooted:
+            captured = self.validated_path(source.module,source.expression,prefix)
+            prefix = captured[1]
+            path = captured[0]
+            append(prefix,"static_cast<void>("+path+");")
+        else:
+            append(prefix,("const auto& " if borrow else "auto ")+target+" = "+self.expression(source.module,source.expression)+";")
+        arguments = ["" for ignored in function.parameters]
+        for position in range(1,len(call.arguments)):
+            reference = call.arguments[position]
+            parameter = call.order[position-1] if call.kind == "closure" else position-1
+            argument = self.fresh()
+            append(prefix,"auto "+argument+" = "+self.converted(reference.module,reference.expression,function.parameters[parameter])+";")
+            arguments[parameter] = "std::move("+argument+")"
+        if path != "":
+            append(prefix,"auto& "+target+" = "+path+";")
+        return "([&]() -> "+self.type(self.program.facts[module].types[value])+" { "+join(prefix," ")+" return "+target+"("+join(arguments,",")+"); }())"
+
+    fn comprehension(mut self, module: int, value: int) -> str:
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        type_id = self.program.facts[module].types[value]
+        node = self.program.signatures.pool.types[type_id]
+        dictionary = expr.kind == "DictComprehension"
+        head = 2 if dictionary else 1
+        result = self.fresh()
+        lines = [self.type(type_id)+" "+result+";"]
+        for position in range(len(expr.clauses)):
+            child = expr.children[head+position]
+            if expr.clauses[position].name == "":
+                append(lines,"if ("+self.expression(module,child)+") {")
+                continue
+            iteration = self.program.facts[module].iterations[value][position]
+            append(lines,self.iteration(module,child,iteration.type,iteration.symbol,expr.clauses[position].token))
+        if dictionary:
+            key = self.fresh()
+            item = self.fresh()
+            append(lines,"auto "+key+" = "+self.expression(module,expr.children[0])+";")
+            append(lines,"auto "+item+" = "+self.converted(module,expr.children[1],node.element)+";")
+            append(lines,result+".set(std::move("+key+"),std::move("+item+"),"+self.site(module,expr.token)+");")
+        else:
+            append(lines,result+".push("+self.converted(module,expr.children[0],node.element)+","+self.site(module,expr.token)+");")
+        for ignored in expr.clauses:
+            append(lines,"}")
+        append(lines,"return "+result+";")
+        return "([&]() -> "+self.type(type_id)+" { "+join(lines," ")+" }())"
+
+    fn iteration(mut self, module: int, value: int, element: int, symbol: int, token: lx.Token) -> str:
+        source = self.fresh()
+        source_type = self.program.signatures.pool.types[self.program.facts[module].types[value]]
+        iterable = self.expression(module,value)
+        make = -1
+        next = -1
+        if value in self.program.facts[module].protocols:
+            protocol = self.program.facts[module].protocols[value]
+            make = protocol.make
+            next = protocol.next
+            if make >= 0:
+                iterable = "bs_f"+str(self.program.signatures.declarations[make].symbol)+"("+iterable+")"
+        if source_type.kind == "Dict":
+            iterable = "wd::keys("+iterable+")"
+        prefix = "auto "+source+" = "+iterable+"; "
+        site = self.site(module,token)
+        if source_type.kind in ["Record","Cursor"]:
+            step = self.fresh()
+            advance = "bs_f"+str(self.program.signatures.declarations[next].symbol)+"("+source+")" if next >= 0 else "wd::next("+source+","+site+")"
+            return prefix+"while (true) { auto "+step+" = "+advance+"; if (!"+step+".value) break; "+self.type(element)+" "+variable(symbol)+" = std::move(*"+step+".value);"
+        if source_type.kind == "Range":
+            return prefix+"while ("+source+".has_next()) { wd::Int "+variable(symbol)+" = "+source+".next();"
+        index = self.fresh()
+        read = source_type.kind == "List" and self.program.signatures.pool.types[element].kind == "Str" and symbol not in self.written
+        item = source+".flat_checked("+index+"++,"+site+")" if source_type.kind == "Array" else "wd::at("+source+","+index+"++,"+site+")"
+        if read:
+            item = "wd_read_iteration("+source+","+index+"++,"+site+")"
+        return prefix+"wd::Int "+index+" = 0; while ("+index+" < wd::len("+source+","+site+")) { "+("const auto&" if read else self.type(element))+" "+variable(symbol)+" = "+item+";"
+
+    fn expression(mut self, module: int, value: int) -> str:
+        if value in self.program.facts[module].calls:
+            return self.call(module,value)
+        expr = self.program.signatures.compilation.modules[module].tree.expressions[value]
+        type_id = self.program.facts[module].types[value]
+        node = self.program.signatures.pool.types[type_id]
+        kind = expr.kind
+        text = expr.token.text
+        site = self.site(module,expr.token)
+        if kind == "Name":
+            name = variable(self.program.facts[module].symbols[value])
+            return "std::move("+name+")" if value in self.moves else name
+        if kind == "Closure":
+            captures = self.program.closures[self.declarations[node.declaration]].captures
+            return self.type(type_id)+"{"+join([variable(capture.symbol) for capture in captures],",")+"}"
+        if kind == "Integer":
+            return "wd::Int{"+text+"}"
+        if kind == "Float":
+            return "double{"+text+"}"
+        if kind == "String":
+            return "std::string("+literal(text)+","+str(len(text))+")"
+        if kind == "Bool":
+            return text
+        if kind == "None":
+            return "wd::None{}"
+        if kind == "Member":
+            base = self.program.signatures.pool.types[self.program.facts[module].types[expr.children[0]]]
+            suffix = text if base.kind == "Error" else "bs_m"+str(self.program.facts[module].symbols[value])
+            return "("+self.expression(module,expr.children[0])+")."+suffix
+        if kind == "Unary":
+            if self.program.facts[module].symbols[value] == 1:
+                return "wd::min_int"
+            child = self.expression(module,expr.children[0])
+            if node.kind == "Array":
+                return child if text == "+" else "wd::array_mul("+child+",wd::Int{-1},"+site+")"
+            if text == "-" and node.kind == "Int":
+                return "wd::neg("+child+","+site+")"
+            return "("+("!" if text == "not" else text)+"("+child+"))"
+        if kind in ["List","Tuple"]:
+            parts: list[str] = []
+            lines: list[str] = []
+            for position in range(len(expr.children)):
+                target = node.element if kind == "List" else node.parameters[position]
+                part = self.converted(module,expr.children[position],target)
+                if kind == "Tuple":
+                    name = self.fresh()
+                    append(lines,"auto "+name+" = "+part+";")
+                    part = "std::move("+name+")"
+                append(parts,part)
+            if kind == "Tuple":
+                return "([&]() -> "+self.type(type_id)+" { "+join(lines," ")+" return "+self.type(type_id)+"{"+join(parts,",")+"}; }())"
+            return self.type(type_id)+"{"+join(parts,",")+"}"
+        if kind in ["ListComprehension","DictComprehension"]:
+            return self.comprehension(module,value)
+        if kind == "Dict":
+            result = self.fresh()
+            lines = [self.type(type_id)+" "+result+";"]
+            for position in range(0,len(expr.children),2):
+                key = self.fresh()
+                item = self.fresh()
+                append(lines,"auto "+key+" = "+self.expression(module,expr.children[position])+";")
+                append(lines,"auto "+item+" = "+self.converted(module,expr.children[position+1],node.element)+";")
+                append(lines,result+".set("+key+","+item+","+site+");")
+            return "([&]() -> "+self.type(type_id)+" { "+join(lines," ")+" return "+result+"; }())"
+        if kind == "Conditional":
+            return "([&]() -> "+self.type(type_id)+" { if ("+self.expression(module,expr.children[1])+") return "+self.converted(module,expr.children[0],type_id)+"; return "+self.converted(module,expr.children[2],type_id)+"; }())"
+        if kind == "Binary" and text in ["and","or"]:
+            return "("+self.expression(module,expr.children[0])+(" && " if text == "and" else " || ")+self.expression(module,expr.children[1])+")"
+        if kind in ["Binary","CompareChain"]:
+            left = self.fresh()
+            lines = ["auto "+left+" = "+self.expression(module,expr.children[0])+";"]
+            operators = [text] if kind == "Binary" else expr.operators
+            for position in range(len(operators)):
+                right = self.fresh()
+                append(lines,"auto "+right+" = "+self.expression(module,expr.children[position+1])+";")
+                operation = self.operation(operators[position],type_id,left,right,site)
+                if kind == "Binary":
+                    append(lines,"return "+operation+";")
+                else:
+                    append(lines,"if (!("+operation+")) return false;")
+                left = right
+            if kind == "CompareChain":
+                append(lines,"return true;")
+            return "([&]() -> "+self.type(type_id)+" { "+join(lines," ")+" }())"
+        if kind == "Index":
+            base_type = self.program.signatures.pool.types[self.program.facts[module].types[expr.children[0]]]
+            base = self.expression(module,expr.children[0])
+            if base_type.kind == "Tuple":
+                return "std::get<"+str(self.program.facts[module].symbols[value])+">("+base+")"
+            first = self.fresh()
+            index = self.fresh()
+            read = base_type.kind in ["Str","Array"] and self.stable_index(module,expr.children[1]) and self.borrow_lifetime(module,expr.children[0])
+            return "([&]() -> "+self.type(type_id)+" { "+("const auto& " if read else "auto ")+first+" = "+base+"; auto "+index+" = "+self.expression(module,expr.children[1])+"; return wd::at("+first+","+index+","+site+"); }())"
+        if kind == "Slice":
+            base = self.fresh()
+            base_type = self.program.signatures.pool.types[self.program.facts[module].types[expr.children[0]]]
+            read = base_type.kind == "Str" and self.borrow_lifetime(module,expr.children[0])
+            for bound in expr.children[1:]:
+                if not self.stable_index(module,bound):
+                    read = false
+            lines = [("const auto& " if read else "auto ")+base+" = "+self.expression(module,expr.children[0])+";"]
+            arguments = [base]
+            for position in range(1,4):
+                name = self.fresh()
+                bound = "std::nullopt" if position != 3 else "wd::Int{1}"
+                if expr.children[position] >= 0:
+                    bound = self.expression(module,expr.children[position])
+                append(lines,("std::optional<wd::Int> " if position != 3 else "wd::Int ")+name+" = "+bound+";")
+                append(arguments,name)
+            append(arguments,site)
+            return "([&]() -> "+self.type(type_id)+" { "+join(lines," ")+" return wd::slice("+join(arguments,",")+"); }())"
+        raise "unhandled checked expression: "+kind
+
+    fn leave(mut self, how: int, value: str):
+        self.finals[-1].uses = self.finals[-1].uses | (1 << how)
+        stored = "" if value == "" else self.finals[-1].value+".emplace("+value+"); "
+        self.line("{ "+stored+self.finals[-1].flow+" = "+str(how)+"; goto "+self.finals[-1].label+"; }")
+
+    fn leaves_loop(self) -> bool:
+        return len(self.finals) > 0 and self.finals[-1].loops == self.loops
+
+    fn returns_value(self) -> bool:
+        return self.returning != 0 and self.program.signatures.pool.types[self.returning].kind != "Void"
+
+    fn block(mut self, module: int, body: list[int]):
+        tree = self.program.signatures.compilation.modules[module].tree
+        for value in body:
+            stmt = tree.statements[value]
+            facts = self.program.facts[module]
+            site = self.site(module,stmt.token)
+            if stmt.kind in ["Function","Record","Import"]:
+                continue
+            if stmt.kind == "Assign":
+                prefix = self.type(facts.annotations[value])+" " if facts.declares[value] else ""
+                self.line(prefix+variable(facts.statements[value])+" = "+self.converted(module,stmt.expressions[0],facts.annotations[value])+";")
+            elif stmt.kind == "IndexAssign":
+                temp = self.fresh()
+                self.line("{ auto "+temp+" = "+self.converted(module,stmt.expressions[1],facts.annotations[value])+";")
+                target_expr = tree.expressions[stmt.expressions[0]]
+                base_type = self.program.signatures.pool.types[facts.types[target_expr.children[0]]]
+                if target_expr.kind == "Index" and base_type.kind == "Dict":
+                    target = self.path(module,target_expr.children[0],[])
+                    for line in target[1]:
+                        self.line(line)
+                    key = self.fresh()
+                    self.line("auto "+key+" = "+self.expression(module,target_expr.children[1])+";")
+                    self.line(target[0]+".set("+key+","+temp+","+site+"); }")
+                else:
+                    target = self.path(module,stmt.expressions[0],[])
+                    for line in target[1]:
+                        self.line(line)
+                    self.line(target[0]+" = "+temp+"; }")
+            elif stmt.kind == "AugAssign":
+                path = self.captured_path(module,stmt.expressions[0])
+                self.line("{")
+                for line in path[2]:
+                    self.line(line)
+                old = self.fresh()
+                item = self.fresh()
+                self.line("auto "+old+" = "+path[0]+";")
+                self.line("auto "+item+" = "+self.expression(module,stmt.expressions[1])+";")
+                self.line(path[1]+" = "+self.operation(stmt.name,facts.annotations[value],old,item,site)+"; }")
+            elif stmt.kind == "Expression":
+                self.line("(void)("+self.expression(module,stmt.expressions[0])+");")
+            elif stmt.kind == "Return":
+                if len(self.finals) > 0:
+                    self.leave(1,"" if len(stmt.expressions) == 0 else self.converted(module,stmt.expressions[0],facts.annotations[value]))
+                else:
+                    self.line("return;" if len(stmt.expressions) == 0 else "return "+self.converted(module,stmt.expressions[0],facts.annotations[value])+";")
+            elif stmt.kind in ["Break","Continue"] and self.leaves_loop():
+                self.leave(2 if stmt.kind == "Break" else 3,"")
+            elif stmt.kind in ["Break","Continue","Pass"]:
+                self.line({"Break":"break;","Continue":"continue;","Pass":";"}[stmt.kind])
+            elif stmt.kind == "Raise":
+                self.line("wd::raise("+self.expression(module,stmt.expressions[0])+","+site+");")
+            elif stmt.kind == "If":
+                self.line("if ("+self.expression(module,stmt.expressions[0])+") {")
+                self.block(module,stmt.body)
+                if len(stmt.otherwise) > 0:
+                    self.line("} else {")
+                    self.block(module,stmt.otherwise)
+                self.line("}")
+            elif stmt.kind == "While":
+                self.line("while ("+self.expression(module,stmt.expressions[0])+") {")
+                self.loops += 1
+                self.block(module,stmt.body)
+                self.loops -= 1
+                self.line("}")
+            elif stmt.kind == "For":
+                self.line("{ "+self.iteration(module,stmt.expressions[0],facts.annotations[value],facts.statements[value],stmt.token))
+                self.loops += 1
+                self.block(module,stmt.body)
+                self.loops -= 1
+                self.line("} }")
+            elif stmt.kind == "Finally":
+                label = self.fresh()
+                flow = self.fresh()
+                held = self.fresh()
+                pending = self.fresh()
+                self.line("{ [[maybe_unused]] int "+flow+" = 0; std::exception_ptr "+pending+";")
+                if self.returns_value():
+                    self.line("std::optional<"+self.type(self.returning)+"> "+held+";")
+                self.line("try {")
+                append(self.finals,Final(label,flow,held,self.loops,0))
+                self.block(module,stmt.body)
+                uses = self.finals[-1].uses
+                pop(self.finals)
+                # Only wood errors run the finally block on the way out; exit and host failures do not.
+                self.line("} catch (const wd::Error&) { "+pending+" = std::current_exception(); }")
+                if uses != 0:
+                    self.line(label+":;")
+                self.block(module,stmt.otherwise)
+                self.line("if ("+pending+") std::rethrow_exception("+pending+");")
+                moved = "std::move(*"+held+")" if self.returns_value() else ""
+                if (uses & 2) != 0:
+                    self.line("if ("+flow+" == 1)")
+                    if len(self.finals) > 0:
+                        self.leave(1,moved)
+                    else:
+                        self.line("return;" if moved == "" else "return "+moved+";")
+                for how in [2,3]:
+                    if (uses & (1 << how)) != 0:
+                        self.line("if ("+flow+" == "+str(how)+")")
+                        if self.leaves_loop():
+                            self.leave(how,"")
+                        else:
+                            self.line("break;" if how == 2 else "continue;")
+                self.line("}")
+            elif stmt.kind == "Try":
+                caught = self.fresh()
+                self.line("try {")
+                self.block(module,stmt.body)
+                self.line("} catch (const wd::Error& "+caught+") { wd::Failure "+variable(facts.statements[value])+" = wd::failure("+caught+");")
+                self.block(module,stmt.otherwise)
+                self.line("}")
+            elif stmt.kind == "With":
+                owner = self.fresh()
+                self.line("{ wd::ResourceScope "+owner+"("+self.expression(module,stmt.expressions[0])+","+site+");")
+                resource = self.type(facts.types[stmt.expressions[0]])
+                self.line(resource+" "+variable(facts.statements[value])+" = "+owner+".value;")
+                self.block(module,stmt.body)
+                self.line("}")
+
+    fn dependency(mut self, value: int):
+        node = self.program.signatures.pool.types[value]
+        if node.kind == "Record":
+            self.record(self.declarations[node.declaration])
+        elif node.kind == "Closure":
+            self.closure(self.declarations[node.declaration])
+        elif node.kind in ["Optional","Step"]:
+            self.dependency(node.element)
+        elif node.kind == "Tuple":
+            for parameter in node.parameters:
+                self.dependency(parameter)
+
+    fn closure_signature(self, index: int, definition: bool) -> str:
+        declaration = self.program.signatures.declarations[index]
+        stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        symbols = self.program.facts[declaration.module].parameters[declaration.statement]
+        parameters = [self.type(declaration.parameters[position].type)+" "+variable(symbols[position]) for position in range(len(symbols))]
+        name = "wd::bs_c"+str(declaration.symbol)+"::" if definition else ""
+        return self.type(declaration.result)+" "+name+"operator()("+join(parameters,",")+")"+(" const" if len(stmt.mutable_captures) == 0 else "")
+
+    fn closure(mut self, index: int):
+        if index in self.emitted:
+            return
+        self.emitted[index] = true
+        for capture in self.program.closures[index].captures:
+            self.dependency(capture.type)
+        name = "bs_c"+str(self.program.signatures.declarations[index].symbol)
+        self.line("struct "+name+" {")
+        for capture in self.program.closures[index].captures:
+            self.line(self.type(capture.type)+" "+variable(capture.symbol)+";")
+        self.line(self.closure_signature(index,false)+"; };")
+        self.line("inline std::string to_str(const "+name+"&) { return \"<closure>\"; }")
+
+    fn record(mut self, index: int):
+        declaration = self.program.signatures.declarations[index]
+        if index in self.emitted:
+            return
+        self.emitted[index] = true
+        for field in declaration.parameters:
+            self.dependency(field.type)
+        name = "bs_r"+str(declaration.symbol)
+        self.line("struct "+name+" {")
+        for position in range(len(declaration.parameters)):
+            self.line(self.type(declaration.parameters[position].type)+" bs_m"+str(position)+";")
+        record_type = self.program.record_types[declaration.symbol]
+        if self.comparable(record_type):
+            self.line("bool operator==(const "+name+"&) const;")
+        self.line("};")
+
+    fn comparable(self, value: int) -> bool:
+        pending = [value]
+        seen: dict[int,bool] = {}
+        while len(pending) > 0:
+            item = pop(pending)
+            if item in seen:
+                continue
+            seen[item] = true
+            node = self.program.signatures.pool.types[item]
+            if node.kind in ["Range","Cursor","Callable","Closure"]:
+                return false
+            if node.element >= 0:
+                append(pending,node.element)
+            if node.kind == "Tuple":
+                pending = pending+node.parameters
+            elif node.kind == "Record":
+                for field in self.program.signatures.declarations[self.declarations[node.declaration]].parameters:
+                    append(pending,field.type)
+        return true
+
+    fn json_compatible(self, value: int) -> bool:
+        pending = [value]
+        seen: dict[int,bool] = {}
+        while len(pending) > 0:
+            item = pop(pending)
+            if item in seen:
+                continue
+            seen[item] = true
+            node = self.program.signatures.pool.types[item]
+            if node.kind in ["List","Optional"]:
+                append(pending,node.element)
+            elif node.kind == "Dict":
+                if self.program.signatures.pool.types[node.key].kind != "Str":
+                    return false
+                append(pending,node.element)
+            elif node.kind == "Tuple":
+                pending = pending+node.parameters
+            elif node.kind == "Record":
+                for field in self.program.signatures.declarations[self.declarations[node.declaration]].parameters:
+                    append(pending,field.type)
+            elif node.kind not in ["Int","Float","Bool","Str","None","Json","Error"]:
+                return false
+        return true
+
+    fn signature(self, index: int) -> str:
+        declaration = self.program.signatures.declarations[index]
+        stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        symbols = self.program.facts[declaration.module].parameters[declaration.statement]
+        parameters: list[str] = []
+        for position in range(len(declaration.parameters)):
+            borrowed = (stmt.method and stmt.mutating and position == 0) or stmt.parameters[position].mutable_borrow
+            append(parameters,self.type(declaration.parameters[position].type)+("& " if borrowed else " ")+variable(symbols[position]))
+        return self.type(declaration.result)+" bs_f"+str(declaration.symbol)+"("+join(parameters,",")+")"
+
+    fn array_return_moves(mut self, index: int):
+        self.moves = {}
+        declaration = self.program.signatures.declarations[index]
+        if self.program.signatures.pool.types[declaration.result].kind != "Array":
+            return
+        tree = self.program.signatures.compilation.modules[declaration.module].tree
+        stmt = tree.statements[declaration.statement]
+        if len(stmt.body) == 0:
+            return
+        last = tree.statements[stmt.body[-1]]
+        if last.kind != "Return" or len(last.expressions) == 0:
+            return
+        root = last.expressions[0]
+        if tree.expressions[root].kind == "Name":
+            return
+        facts = self.program.facts[declaration.module]
+        owned: dict[int,bool] = {}
+        symbols = facts.parameters[declaration.statement]
+        for position in range(len(declaration.parameters)):
+            parameter = declaration.parameters[position]
+            if self.program.signatures.pool.types[parameter.type].kind == "Array" and not stmt.parameters[position].mutable_borrow:
+                owned[symbols[position]] = true
+        # Only owned locals/parameters: never capture fields, receiver fields or
+        # foreign mutable borrows. A top-level return has no local error handler
+        # which could observe a value consumed before a later operand throws.
+        pending = stmt.body
+        while len(pending) > 0:
+            statement = pop(pending)
+            item = tree.statements[statement]
+            if item.kind == "Function":
+                continue
+            if item.kind == "Assign" and facts.declares[statement] and self.program.signatures.pool.types[facts.annotations[statement]].kind == "Array":
+                owned[facts.statements[statement]] = true
+            for child in item.body + item.otherwise:
+                append(pending,child)
+        if len(owned) == 0:
+            return
+        uses: dict[int,int] = {}
+        names: list[int] = []
+        expressions = [root]
+        while len(expressions) > 0:
+            value = pop(expressions)
+            expr = tree.expressions[value]
+            if expr.function >= 0 or len(expr.clauses) > 0:
+                return
+            if expr.kind == "Name":
+                symbol = facts.symbols[value]
+                uses[symbol] = get(uses,symbol,0)+1
+                append(names,value)
+            for child in expr.children:
+                if child >= 0:
+                    append(expressions,child)
+        for value in names:
+            symbol = facts.symbols[value]
+            if symbol in owned and uses[symbol] == 1:
+                self.moves[value] = true
+
+    fn external_signature(self, index: int) -> str:
+        declaration = self.program.signatures.declarations[index]
+        stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        parameters: list[str] = []
+        for position in range(len(declaration.parameters)):
+            actual = declaration.parameters[position].type
+            node = self.program.signatures.pool.types[actual]
+            if node.kind == "Array":
+                append(parameters,("" if stmt.parameters[position].mutable_borrow else "const ")+self.type(node.element)+"*,wd::Int")
+            elif node.kind == "Str":
+                append(parameters,"const char*,wd::Int")
+            else:
+                append(parameters,self.type(actual))
+        return "extern \"C\" "+self.type(declaration.result)+" "+stmt.name+"("+join(parameters,",")+");"
+
+    fn external_body(mut self, index: int):
+        declaration = self.program.signatures.declarations[index]
+        stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        symbols = self.program.facts[declaration.module].parameters[declaration.statement]
+        arguments: list[str] = []
+        guards: list[str] = []
+        failure = self.fresh()
+        for parameter in declaration.parameters:
+            if self.program.signatures.pool.types[parameter.type].kind == "Function":
+                self.line("wd::CallbackFailure "+failure+";")
+                break
+        for position in range(len(declaration.parameters)):
+            actual = declaration.parameters[position].type
+            node = self.program.signatures.pool.types[actual]
+            name = variable(symbols[position])
+            if node.kind == "Str":
+                append(arguments,name+".data(),static_cast<wd::Int>("+name+".size())")
+            elif node.kind == "Array":
+                pointer = self.fresh()
+                access = ".foreign_mutable_data(" if stmt.parameters[position].mutable_borrow else ".foreign_data("
+                self.line("auto* "+pointer+" = "+name+access+self.site(declaration.module,stmt.token)+");")
+                append(arguments,pointer+",static_cast<wd::Int>("+name+".size())")
+            elif node.kind == "Function":
+                guard = self.fresh()
+                self.line("wd::CallbackGuard<"+self.type(actual)+","+str(symbols[position])+"> "+guard+"("+name+","+failure+");")
+                append(arguments,"&decltype("+guard+")::invoke")
+                append(guards,guard)
+            else:
+                append(arguments,name)
+        call = "bs_ffi::"+stmt.name+"("+join(arguments,",")+");"
+        if len(guards) == 0:
+            self.line("return "+call)
+        else:
+            result = self.fresh()
+            self.line(("" if declaration.result == 1 else "auto "+result+" = ")+call)
+            for guard in guards:
+                self.line(guard+".check();")
+            if declaration.result != 1:
+                self.line("return "+result+";")
+
+    fn run(mut self, runtime: str, json_runtime: bool = true) -> str:
+        self.line(runtime)
+        # A list loop always owns its snapshot. Borrow only string bindings
+        # without writes; mutable captures conservatively count as writes too.
+        # Scan the typed flat arena once, including specialized/closure bodies.
+        for module in range(len(self.program.facts)):
+            tree = self.program.signatures.compilation.modules[module].tree
+            facts = self.program.facts[module]
+            for value in range(len(tree.statements)):
+                stmt = tree.statements[value]
+                if stmt.kind == "Assign" and value < len(facts.statements) and facts.statements[value] >= 0:
+                    self.written[facts.statements[value]] = true
+                elif stmt.kind == "AugAssign":
+                    target = stmt.expressions[0]
+                    while tree.expressions[target].kind in ["Member","Index"]:
+                        target = tree.expressions[target].children[0]
+                    if tree.expressions[target].kind == "Name" and target < len(facts.symbols) and facts.symbols[target] >= 0:
+                        self.written[facts.symbols[target]] = true
+        self.line("namespace { template<class L> decltype(auto) wd_read_iteration(const L& source, wd::Int index, wd::Site site) { if constexpr(requires { source.get_ref(index, site); }) return source.get_ref(index, site); else return source.get(index, site); } }")
+        records: list[int] = []
+        functions: list[int] = []
+        for index in range(len(self.program.signatures.declarations)):
+            if index in self.program.closures:
+                continue
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if len(stmt.type_parameters) > 0:
+                continue
+            if declaration.parent >= 0:
+                parent = self.program.signatures.declarations[declaration.parent]
+                if parent.symbol not in self.program.record_types or declaration.statement not in self.program.facts[declaration.module].parameters:
+                    continue
+            if stmt.kind == "Record":
+                append(records,index)
+            else:
+                append(functions,index)
+        self.line("namespace wd {")
+        for index in self.program.closures:
+            symbol = self.program.signatures.declarations[index].symbol
+            self.line("struct bs_c"+str(symbol)+"; std::string to_str(const bs_c"+str(symbol)+"&);")
+        for index in records:
+            declaration = self.program.signatures.declarations[index]
+            name = "bs_r"+str(declaration.symbol)
+            self.line("struct "+name+"; std::string to_str(const "+name+"&);")
+            record_type = self.program.record_types[declaration.symbol]
+            if self.json_compatible(record_type):
+                self.line("Json to_json(const "+name+"&, Site, std::size_t = 0);")
+        for index in records:
+            self.record(index)
+        for index in self.program.closures:
+            self.closure(index)
+        for index in records:
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            name = "bs_r"+str(declaration.symbol)
+            equal = ["true"]
+            self.line("inline std::string to_str(const "+name+"& value) { std::string text = "+literal(stmt.name+"(")+";")
+            for position in range(len(declaration.parameters)):
+                field = declaration.parameters[position]
+                append(equal,"bs_m"+str(position)+" == other.bs_m"+str(position))
+                self.line("text += "+literal((", " if position > 0 else "")+field.name+"=")+" + repr(value.bs_m"+str(position)+");")
+            self.line("return text + ')'; }")
+            record_type = self.program.record_types[declaration.symbol]
+            if self.comparable(record_type):
+                self.line("inline bool "+name+"::operator==(const "+name+"& other) const { return "+join(equal," && ")+"; }")
+            if self.json_compatible(record_type):
+                self.line("inline Json to_json(const "+name+"& value, Site site, std::size_t depth) { json_depth(depth,site); Json::Object object;")
+                for position in range(len(declaration.parameters)):
+                    self.line("object.emplace("+literal(declaration.parameters[position].name)+",to_json(value.bs_m"+str(position)+",site,depth+1));")
+                self.line("return Json(std::move(object)); }")
+        self.line("}")
+        self.line("namespace bs_ffi {")
+        for index in functions:
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if stmt.external:
+                self.line(self.external_signature(index))
+        self.line("}")
+        for index in functions:
+            self.line(self.signature(index)+";")
+        for index in self.program.closures:
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            self.line(self.closure_signature(index,true)+" {")
+            self.array_return_moves(index)
+            self.returning = declaration.result
+            self.block(declaration.module,stmt.body)
+            self.line("}")
+        for index in functions:
+            declaration = self.program.signatures.declarations[index]
+            stmt = self.program.signatures.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            self.line(self.signature(index)+" {")
+            if stmt.external:
+                self.external_body(index)
+            else:
+                self.array_return_moves(index)
+                self.returning = declaration.result
+                self.block(declaration.module,stmt.body)
+            self.line("}")
+        self.moves = {}
+        self.returning = 0
+        self.line("#ifdef _WIN32\nint wmain(int argc,wchar_t** argv) {\n#else\nint main(int argc,char** argv) {\n#endif\ntry { wd::init_args(argc,argv);")
+        entry = self.program.signatures.compilation.entry
+        self.block(entry,self.program.signatures.compilation.modules[entry].tree.roots)
+        report_json = "true" if json_runtime else "false"
+        self.line("return 0; } catch(const wd::Exit& result) { return result.code; } catch(const wd::Error& error) { wd::report(error,"+report_json+"); return 70; } catch(const std::exception& error) { wd::report(wd::Error{wd::Site{"+self.files[entry]+",0,0},\"R4099\",error.what()},"+report_json+"); return 70; } }")
+        return join(self.lines,"\n")+"\n"
+
+fn emit(program: ir.Result, runtime: str, json_runtime: bool = true) -> str:
+    if program.diagnostic.code != "":
+        raise "cannot emit a rejected program"
+    declarations: dict[int,int] = {}
+    for index in range(len(program.signatures.declarations)):
+        declarations[program.signatures.declarations[index].symbol] = index
+    files = [literal(module.file) for module in program.signatures.compilation.modules]
+    generator = Generator(program,[],0,native.fixed(),{},declarations,files,{},{},[],0,0)
+    return generator.run(runtime,json_runtime)

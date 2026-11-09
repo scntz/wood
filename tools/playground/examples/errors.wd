@@ -1,0 +1,11 @@
+fn parse_age(text: str) -> int:
+    age = int(text)
+    if age < 0:
+        raise "age cannot be negative"
+    return age
+
+for text in ["42", "-1", "old"]:
+    try:
+        print(parse_age(text))
+    except err:
+        print("bad input:", err.message)

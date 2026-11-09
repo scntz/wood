@@ -1,0 +1,31 @@
+{
+  "owner": "wood",
+  "name": "log",
+  "package": "wood_log",
+  "tier": "official",
+  "description": "Leveled application logging to stderr and files.",
+  "readme": "# wood_log 0.1.0\n\nLeveled application logging in pure Wood. Listed in the catalog as `wood@log`.\n\n```sh\nwood add wood@log\n```\n\n```wood\nimport log.log as logging\n\nlogger = logging.logger(\"server\", \"info\", \"server.log\")\nlogging.info(logger, \"listening\", {\"port\":\"8080\"})\nlogging.failure(logger, \"request failed\", {\"status\":\"500\"})\n```\n\nRecords go to stderr and, when a file is given, are appended to it, one record per\nline. Newlines in messages and values are escaped, so input cannot forge a log line.\nLevels are `debug`, `info`, `warn` and `error`.\n\nStatus: experimental. There is no rotation, timestamping or asynchronous sink.\n\nLicensed MIT OR Apache-2.0.\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_log/README.md",
+  "categories": [
+    "system",
+    "tooling"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import log.log as logging\n\nlogger = logging.logger(\"server\", \"info\", \"server.log\")\nlogging.info(logger, \"listening\", {\"port\":\"8080\"})\n",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "published": "2026-11-01",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_log-0.1.0.woodpkg",
+        "sha256": "9a8b6f5d281a1e60c777f82091beb5d5b4fa1d92f9548bdd64a251343c500bc4"
+      }
+    }
+  ]
+}

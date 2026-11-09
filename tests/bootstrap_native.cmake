@@ -1,0 +1,123 @@
+# Invoked inside the staged bootstrap gate: every emitter below is stage2.
+foreach(item IN ITEMS native_computing bootstrap_arrays bootstrap_native_ffi bootstrap_borrow_lifetimes bootstrap_dict_fallbacks)
+    emit("${stage2}" "${SOURCE_DIR}/tests/${item}.wd" "${item}" cpp)
+    if(item STREQUAL "bootstrap_native_ffi")
+        native_build("${cpp}" "${item}" executable "${FFI_LIBRARY}")
+        set(expected "native hosted numerical FFI passed\n")
+    else()
+        native_build("${cpp}" "${item}" executable)
+        if(item STREQUAL "native_computing")
+            set(expected "native computing passed\n")
+        elseif(item STREQUAL "bootstrap_arrays")
+            set(expected "native hosted array safety passed\n")
+        elseif(item STREQUAL "bootstrap_dict_fallbacks")
+            set(expected "native dictionary fallback conversions passed\n")
+        else()
+            set(expected "native hosted borrowing lifetimes passed\n")
+        endif()
+    endif()
+    execute_process(COMMAND "${executable}" RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
+        WORKING_DIRECTORY "${TEST_DIR}" TIMEOUT 90)
+    if(NOT status STREQUAL "0" OR NOT output STREQUAL expected OR NOT error STREQUAL "")
+        message(FATAL_ERROR "Staged ${item} failed: ${status}\n${output}${error}")
+    endif()
+endforeach()
+emit("${stage2}" "${SOURCE_DIR}/examples/mesh_torus.wd" mesh-torus cpp)
+native_build("${cpp}" mesh-torus mesh)
+foreach(subdivision IN ITEMS "16,12" "48,32")
+    string(REPLACE "," ";" dimensions "${subdivision}")
+    list(GET dimensions 0 rings)
+    list(GET dimensions 1 sides)
+    execute_process(COMMAND "${mesh}" "${TEST_DIR}/torus.obj" "${rings}" "${sides}"
+        RESULT_VARIABLE status OUTPUT_VARIABLE report ERROR_VARIABLE error TIMEOUT 90)
+    if(NOT status STREQUAL "0" OR NOT error STREQUAL "")
+        message(FATAL_ERROR "Staged mesh application failed: ${status}\n${report}${error}")
+    endif()
+    file(WRITE "${TEST_DIR}/torus-report.json" "${report}")
+    execute_process(COMMAND "${OBJ_CHECK}" "${TEST_DIR}/torus.obj" "${TEST_DIR}/torus-report.json" "${rings}" "${sides}"
+        RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 30)
+    if(NOT status STREQUAL "0")
+        message(FATAL_ERROR "Independent staged mesh verification failed: ${output}${error}")
+    endif()
+endforeach()
+set(fixture "${SOURCE_DIR}/tests/fixtures/obj/tetrahedron.obj")
+emit("${stage2}" "${SOURCE_DIR}/tests/obj_import.wd" obj-import-tests cpp)
+native_build("${cpp}" obj-import-tests executable)
+execute_process(COMMAND "${executable}" "${fixture}" RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
+    WORKING_DIRECTORY "${TEST_DIR}" TIMEOUT 90)
+if(NOT status STREQUAL "0" OR NOT output STREQUAL "OBJ importing passed\n" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Staged bounded OBJ corpus failed: ${status}\n${output}${error}")
+endif()
+emit("${stage2}" "${SOURCE_DIR}/examples/mesh_import.wd" mesh-import cpp)
+native_build("${cpp}" mesh-import mesh_import)
+execute_process(COMMAND "${mesh_import}" "${fixture}" "${TEST_DIR}/imported.obj"
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 90)
+if(NOT status STREQUAL "0" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Staged OBJ import/transform/export failed: ${status}\n${output}${error}")
+endif()
+file(WRITE "${TEST_DIR}/mesh-import-report.txt" "${output}")
+emit("${stage2}" "${SOURCE_DIR}/tests/mesh_transform_verify.wd" mesh-verify cpp)
+native_build("${cpp}" mesh-verify executable)
+execute_process(COMMAND "${executable}" "${fixture}" "${TEST_DIR}/imported.obj"
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 60)
+if(NOT status STREQUAL "0" OR NOT output STREQUAL "native mesh workflow verified\n" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Staged OBJ transform verification failed: ${status}\n${output}${error}")
+endif()
+file(WRITE "${TEST_DIR}/malformed.obj" "f 1 2 3\n")
+file(WRITE "${TEST_DIR}/preserve.obj" "preserve")
+execute_process(COMMAND "${mesh_import}" "${TEST_DIR}/malformed.obj" "${TEST_DIR}/preserve.obj"
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 30)
+file(READ "${TEST_DIR}/preserve.obj" preserved)
+if(NOT status STREQUAL "70" OR NOT preserved STREQUAL "preserve")
+    message(FATAL_ERROR "Staged invalid OBJ changed output: ${status}\n${error}")
+endif()
+# Arrays and borrowed-buffer declarations also cross local package boundaries.
+file(MAKE_DIRECTORY "${TEST_DIR}/numeric-lib/src" "${TEST_DIR}/numeric-app/src")
+file(WRITE "${TEST_DIR}/numeric-lib/wood.json" "{\"format\":1,\"name\":\"numeric_lib\",\"version\":\"1.0.0\",\"source\":\"src\"}")
+file(WRITE "${TEST_DIR}/numeric-app/wood.json" "{\"format\":1,\"name\":\"numeric_app\",\"version\":\"1.0.0\",\"source\":\"src\",\"entry\":\"main.wd\",\"dependencies\":{\"numeric_lib\":{\"path\":\"../numeric-lib\",\"version\":\"1.0.0\"}}}")
+file(WRITE "${TEST_DIR}/numeric-lib/src/buffers.wd" [=[
+import std.num as num
+extern fn wood_array_scale(mut values: array[float], factor: float)
+record Buffer[T]:
+    values: array[T]
+    fn reversed(self):
+        return Buffer(self.values[::-1])
+fn make():
+    return Buffer(num.from_list([1.0,2.0,3.0]))
+fn scaled(values: array[float], factor: float):
+    wood_array_scale(values,factor)
+    return values
+]=])
+file(WRITE "${TEST_DIR}/numeric-app/src/main.wd" [=[
+import numeric_lib.buffers as buffers
+import std.num as num
+original = buffers.make()
+reversed = original.reversed()
+reversed.values[0] = 9.0
+assert(num.to_list(original.values) == [1.0,2.0,3.0])
+assert(num.to_list(reversed.values) == [9.0,2.0,1.0])
+result = buffers.scaled(original.values,2.0)
+assert(num.to_list(result) == [2.0,4.0,6.0])
+assert(num.to_list(original.values) == [1.0,2.0,3.0])
+print("native hosted numeric package passed")
+]=])
+emit("${stage2}" "${TEST_DIR}/numeric-app" numeric-package cpp)
+native_build("${cpp}" numeric-package executable "${FFI_LIBRARY}")
+execute_process(COMMAND "${executable}" RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 60)
+if(NOT status STREQUAL "0" OR NOT output STREQUAL "native hosted numeric package passed\n" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Staged numeric package failed: ${status}\n${output}${error}")
+endif()
+# Imported declarations must agree about the C ABI before emission.
+file(WRITE "${TEST_DIR}/readonly_buffer.wd" "extern fn conflicting_buffer(values: array[float])\n")
+file(WRITE "${TEST_DIR}/writable_buffer.wd" "extern fn conflicting_buffer(mut values: array[float])\n")
+file(WRITE "${TEST_DIR}/conflicting-ffi.wd" "import readonly_buffer as reader\nimport writable_buffer as writer\n")
+execute_process(COMMAND "${stage2}" "${STDLIB_BUNDLE}" "${RUNTIME}" "${TEST_DIR}/conflicting-ffi.wd" "${TEST_DIR}/conflicting-ffi.cpp"
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 60)
+if(NOT status STREQUAL "1" OR EXISTS "${TEST_DIR}/conflicting-ffi.cpp")
+    message(FATAL_ERROR "Staged cross-module ABI conflict was accepted: ${status}\n${error}")
+endif()
+string(JSON code GET "${error}" code)
+if(NOT code STREQUAL "E3023")
+    message(FATAL_ERROR "Expected staged cross-module ABI conflict: ${error}")
+endif()
+message(STATUS "Staged arrays, numerical FFI/callbacks, linalg, geometry and bounded OBJ workflows passed")

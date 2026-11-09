@@ -1,0 +1,39 @@
+import frontend as frontend
+import project as project
+import sources as src
+import std.time as time
+
+record Measurement:
+    iterations: int
+    modules: int
+    symbols: int
+    elapsed_ns: int
+
+fn counts(input: str, standards: dict[str,str]) -> tuple[int,int]:
+    result = frontend.load(input,standards)
+    if result.diagnostic.code != "":
+        raise result.diagnostic.code+": "+result.diagnostic.message
+    return (len(result.compilation.modules),len(result.bindings.symbols))
+
+arguments = args()
+if len(arguments) != 3:
+    print("usage: wood-bootstrap-module-measure STDLIB.json ITERATIONS ENTRY")
+    exit(2)
+standards: dict[str,str] = {}
+# Decode the bundle once, outside the measured frontend work.
+bundle = project.object(json_parse(src.read(arguments[0],16777216)))
+for name in bundle:
+    standards[name] = project.string(bundle[name])
+iterations = int(arguments[1])
+if iterations < 1 or iterations > 10000:
+    exit(2)
+counts(arguments[2],standards)
+modules = 0
+symbols = 0
+started = time.perf_counter_ns()
+for iteration in range(iterations):
+    result = counts(arguments[2],standards)
+    modules += result[0]
+    symbols += result[1]
+elapsed = time.perf_counter_ns()-started
+print(json_dump(Measurement(iterations,modules,symbols,elapsed)))

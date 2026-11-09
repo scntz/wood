@@ -1,0 +1,138 @@
+import type_system as ts
+import signatures as sig
+import signature_frontend as frontend
+import syntax as ast
+import syntax_wire as bytes
+import module_wire as mw
+
+record Type:
+    kind: str
+    name: str
+    element: int
+    key: int
+    parameters: list[int]
+    declaration: int
+    display: str
+
+record Default:
+    kind: str
+    text_hex: str
+    children: int
+    offset: int
+    line: int
+    column: int
+
+record Parameter:
+    name: str
+    type: int
+    mode: str
+    mutable_borrow: bool
+    field: int
+    default_events: list[Default]
+
+record Declaration:
+    module: int
+    root: int
+    method: int
+    symbol: int
+    parent: int
+    kind: str
+    name: str
+    result: int
+    parameters: list[Parameter]
+    type_parameters: list[str]
+    external: bool
+    mutating: bool
+    inferred_return: bool
+    offset: int
+    line: int
+    column: int
+
+record Reply:
+    format: int
+    stage: str
+    bodies_checked: bool
+    lock_verified: bool
+    layout_scope: str
+    diagnostic: mw.Diagnostic
+    files: list[str]
+    types: list[Type]
+    declarations: list[Declaration]
+
+record Writer:
+    input: ts.Pool
+    output: ts.Pool
+    known: dict[int,int]
+
+    fn type(mut self, value: int) -> int:
+        if value in self.known:
+            return self.known[value]
+        node = self.input.types[value]
+        element = -1
+        key = -1
+        if node.element >= 0:
+            element = self.type(node.element)
+        if node.key >= 0:
+            key = self.type(node.key)
+        parameters: list[int] = []
+        for item in node.parameters:
+            append(parameters,self.type(item))
+        index = self.output.intern(node.kind,node.name,element,key,parameters,node.declaration)
+        self.known[value] = index
+        return index
+
+fn defaults(tree: ast.Tree, expression: int) -> list[Default]:
+    events: list[Default] = []
+    pending: list[int] = []
+    if expression >= 0:
+        append(pending,expression)
+    while len(pending) > 0:
+        node = tree.expressions[pop(pending)]
+        token = node.token
+        append(events,Default(node.kind,bytes.hex_text(token.text),len(node.children),token.offset,token.line,token.column))
+        for index in range(len(node.children)-1,-1,-1):
+            append(pending,node.children[index])
+    return events
+
+fn summarize(result: sig.Result) -> Reply:
+    diagnostic = mw.diagnostic(result.diagnostic)
+    if result.diagnostic.code != "":
+        return Reply(1,"declaration-signatures",false,false,"unspecialized-declarations",diagnostic,[],[],[])
+    writer = Writer(result.pool,ts.Pool([],{},1048576),{})
+    files: list[str] = []
+    roots: list[dict[int,int]] = []
+    for unit in result.compilation.modules:
+        append(files,unit.file)
+        indices: dict[int,int] = {}
+        for index in range(len(unit.tree.roots)):
+            indices[unit.tree.roots[index]] = index
+        append(roots,indices)
+    declarations: list[Declaration] = []
+    for item in result.declarations:
+        unit = result.compilation.modules[item.module]
+        stmt = unit.tree.statements[item.statement]
+        root = -1
+        method = -1
+        if item.parent >= 0:
+            parent = result.declarations[item.parent]
+            root = roots[item.module][parent.statement]
+            methods = unit.tree.statements[parent.statement].body
+            for index in range(len(methods)):
+                if methods[index] == item.statement:
+                    method = index
+        else:
+            root = roots[item.module][item.statement]
+        return_type = writer.type(item.result)
+        parameters: list[Parameter] = []
+        for parameter in item.parameters:
+            append(parameters,Parameter(parameter.name,writer.type(parameter.type),parameter.mode,parameter.mutable_borrow,parameter.field,defaults(unit.tree,parameter.default_value)))
+        token = stmt.token
+        append(declarations,Declaration(item.module,root,method,item.symbol,item.parent,stmt.kind,stmt.name,return_type,parameters,stmt.type_parameters,stmt.external,stmt.mutating,stmt.inferred_return,token.offset,token.line,token.column))
+    types: list[Type] = []
+    for index in range(len(writer.output.types)):
+        node = writer.output.types[index]
+        append(types,Type(node.kind,node.name,node.element,node.key,node.parameters,node.declaration,writer.output.display(index)))
+    return Reply(1,"declaration-signatures",false,false,"unspecialized-declarations",diagnostic,files,types,declarations)
+
+fn inspect(input: str, standards: dict[str,str]) -> Reply:
+    return summarize(frontend.load(input,standards))

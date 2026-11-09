@@ -1,0 +1,1989 @@
+# Integrated hosted body semantics. No production-frontend calls.
+import frontend as frontend
+import signatures as sig
+import declaration_checks as declarations
+import expressions as ex
+import checked_program as ir
+import native_calls as native
+import return_types as returns
+import sources as src
+import lexer as lx
+import syntax as ast
+import bindings as bind
+import specialization as specialization
+import generic_inference as generic
+
+record Binding:
+    type: int
+    symbol: int
+
+# A local narrowed from an optional: the binding it hides, and whether that binding was in the same scope.
+record Narrowing:
+    original: Binding
+    replaced: bool
+
+record Frame:
+    module: int
+    function: int
+    scopes: list[dict[str,Binding]]
+    sites: list[returns.Site]
+    loops: int
+    readonly: int
+    enclosing: int
+    finally_loops: int
+
+record Analyzer:
+    resolver: sig.Resolver
+    facts: list[ir.Facts]
+    states: dict[int,int]
+    methods: dict[str,int]
+    next_symbol: int
+    kernel: ex.Checker
+    module: int
+    function: int
+    scopes: list[dict[str,Binding]]
+    sites: list[returns.Site]
+    loops: int
+    readonly: int
+    frames: list[Frame]
+    natives: dict[str,native.Native]
+    problem: src.Diagnostic | None
+    instances: dict[str,int]
+    type_bindings: dict[int,dict[str,int]]
+    origins: dict[int,int]
+    record_types: dict[int,int]
+    record_parameters: dict[int,list[str]]
+    instance_count: int
+    instance_depth: int
+    known: dict[str,bool]
+    prepared: dict[int,bool]
+    concrete_types: dict[int,int]
+    closures: dict[int,ir.Closure]
+    enclosing: int
+    closure_depth: int
+    holding: int
+    tolerant: bool
+    collected: list[src.Diagnostic]
+    poisoned: dict[str,bool]
+    # Symbols of locals narrowed from an optional, and whether the last if body never falls through.
+    narrowed: dict[int,Narrowing]
+    if_exits: bool
+    # Error symbols of the except blocks being checked, innermost last, for a bare raise.
+    handlers: list[int]
+    # The loop depth where the finally block being checked starts, or -1; return, break and continue cannot leave it.
+    finally_loops: int
+
+    # Editor mode. One failed statement must not hide the rest of the file, but what it would
+    # have declared must not produce a wave of follow-up errors either.
+    fn take_problem(mut self) -> src.Diagnostic | None:
+        found: src.Diagnostic | None = None
+        if self.problem is not None:
+            found = self.problem
+        elif self.kernel.problem is not None:
+            found = self.kernel.problem
+        elif self.resolver.problem is not None:
+            found = self.resolver.problem
+        self.problem = None
+        self.kernel.problem = None
+        self.resolver.problem = None
+        return found
+
+    fn names_in(self, statement: int, seen: tuple[dict[str,bool],dict[str,bool]]) -> tuple[dict[str,bool],dict[str,bool]]:
+        tree = self.kernel.tree
+        stmt = tree.statements[statement]
+        used = seen[0]
+        assigned = seen[1]
+        if stmt.kind in ["Assign","For","With"] and stmt.name != "":
+            assigned[stmt.name] = true
+        pending: list[int] = []
+        for value in stmt.expressions:
+            append(pending,value)
+        while len(pending) > 0:
+            value = pop(pending)
+            if value < 0 or value >= len(tree.expressions):
+                continue
+            node = tree.expressions[value]
+            if node.kind in ["Name","Call"]:
+                used[split(node.token.text,".")[0]] = true
+            for child in node.children:
+                append(pending,child)
+        result = (used,assigned)
+        for child in stmt.body+stmt.otherwise:
+            result = self.names_in(child,result)
+        return result
+
+    fn record_failure(mut self, statement: int, problem: src.Diagnostic):
+        empty_names: dict[str,bool] = {}
+        names = self.names_in(statement,(empty_names,empty_names))
+        used = names[0]
+        assigned = names[1]
+        follow_up = false
+        for name in used:
+            if name in self.poisoned:
+                follow_up = true
+        for name in assigned:
+            self.poisoned[name] = true
+        if not follow_up:
+            append(self.collected,problem)
+
+    fn guarded(mut self, statement: int) -> int:
+        depth = len(self.frames)
+        scopes = len(self.scopes)
+        loops = self.loops
+        handlers = len(self.handlers)
+        finally_loops = self.finally_loops
+        try:
+            return self.statement(statement)
+        except err:
+            found = self.take_problem()
+            if found is None and err.code == "R4010" and err.message == "bootstrap semantic type budget exceeded":
+                raise err
+            if found is None:
+                raise err
+            while len(self.frames) > depth:
+                self.abandon_active(len(self.frames)-1)
+                self.flush()
+                self.restore()
+            while len(self.scopes) > scopes:
+                pop(self.scopes)
+            self.loops = loops
+            self.handlers = self.handlers[:handlers]
+            self.finally_loops = finally_loops
+            self.kernel.requested = -1
+            self.kernel.depth = 0
+            self.kernel.requests = true
+            self.record_failure(statement,unwrap(found))
+            return 1
+
+    fn check_guarded(mut self, index: int):
+        # A failure outside any statement, such as in a signature's defaults.
+        try:
+            self.check_function(index)
+        except err:
+            found = self.take_problem()
+            if found is None:
+                raise err
+            self.kernel.requested = -1
+            self.kernel.depth = 0
+            self.kernel.requests = true
+            append(self.collected,unwrap(found))
+            self.states[index] = 2
+            self.flush()
+
+    fn abandon_active(mut self, frame: int):
+        # A function that failed part way must not read as a recursive dependency later.
+        for function in self.states:
+            if self.states[function] == 1 and function != self.frames[frame].function:
+                self.states[function] = 2
+                name = self.resolver.compilation.modules[self.resolver.declarations[function].module].tree.statements[self.resolver.declarations[function].statement].name
+                self.poisoned[name] = true
+
+    fn fail(mut self, code: str, message: str, token: lx.Token):
+        self.problem = src.located(code,message,self.resolver.compilation.modules[self.module].file,self.module,token)
+        raise "bootstrap body rejection"
+
+    fn unsupported(mut self, detail: str, token: lx.Token):
+        self.fail("B3403",detail+" is not yet implemented by the integrated bootstrap compiler",token)
+
+    fn supported_type(mut self, value: int, token: lx.Token, abstract: bool = false):
+        pending = [value]
+        seen: dict[int,bool] = {}
+        while len(pending) > 0:
+            item = pop(pending)
+            if item in seen:
+                continue
+            seen[item] = true
+            node = self.kernel.pool.types[item]
+            if node.kind not in ["Unknown","Void","Int","Float","Bool","Str","None","Error","Json","Stream","Database","Statement","Transaction","TlsContext","PythonObject","Task","Range","Record","List","Array","Dict","Tuple","Optional","Function","Callable","Closure","Step","Cursor"] and not (abstract and node.kind in ["Parameter","Signature","Projection"]):
+                self.unsupported("type "+self.kernel.pool.display(item),token)
+            if node.element >= 0:
+                append(pending,node.element)
+            if node.key >= 0:
+                append(pending,node.key)
+            pending = pending+node.parameters
+
+    fn fresh(mut self) -> int:
+        symbol = self.next_symbol
+        self.next_symbol += 1
+        return symbol
+
+    fn flush(mut self):
+        self.resolver.pool = self.kernel.pool
+        self.resolver.compilation.modules[self.module].tree = self.kernel.tree
+        self.facts[self.module].types = self.kernel.types
+        self.facts[self.module].symbols = self.kernel.symbols
+
+    fn enter(mut self, module: int, function: int):
+        self.module = module
+        self.function = function
+        unit = self.resolver.compilation.modules[module]
+        if len(self.facts[self.holding].types) == 0 and len(self.kernel.types) > 0:
+            self.facts[self.holding].types = self.kernel.types
+            self.facts[self.holding].symbols = self.kernel.symbols
+        self.holding = module
+        self.kernel = ex.checker(unit.tree,self.resolver.pool,declarations=self.resolver.declarations,file=unit.file,source=module,record_parameters=self.record_parameters,tables=false)
+        # The tables move rather than alias, or the first write would copy a whole module's worth.
+        # flush() is what puts them back, before anything else reads them.
+        self.kernel.types = self.facts[module].types
+        self.kernel.symbols = self.facts[module].symbols
+        self.facts[module].types = []
+        self.facts[module].symbols = []
+        self.kernel.symbol_index = self.resolver.symbols
+        self.kernel.requests = true
+        self.scopes = [{}]
+        self.sites = []
+        self.loops = 0
+        self.readonly = 0
+        self.enclosing = -1
+        self.finally_loops = -1
+
+    fn save(mut self):
+        self.flush()
+        append(self.frames,Frame(self.module,self.function,self.scopes,self.sites,self.loops,self.readonly,self.enclosing,self.finally_loops))
+
+    fn restore(mut self):
+        frame = pop(self.frames)
+        self.enter(frame.module,frame.function)
+        self.scopes = frame.scopes
+        self.sites = frame.sites
+        self.loops = frame.loops
+        self.readonly = frame.readonly
+        self.enclosing = frame.enclosing
+        self.finally_loops = frame.finally_loops
+
+    fn bound_type(mut self, value: int, arguments: dict[str,int], module: int, token: lx.Token) -> int:
+        if not self.kernel.pool.abstract(value) and self.kernel.pool.types[value].kind != "Named":
+            return self.concrete(value,token)
+        self.flush()
+        value = self.resolver.pool.substitute(value,arguments)
+        value = self.resolver.resolve_type(value,module,token,arguments)
+        self.kernel.pool = self.resolver.pool
+        return self.concrete(value,token)
+
+    fn concrete(mut self, value: int, token: lx.Token) -> int:
+        if value in self.concrete_types:
+            return self.concrete_types[value]
+        node = self.kernel.pool.types[value]
+        element = node.element
+        key = node.key
+        if element >= 0:
+            element = self.concrete(element,token)
+        if key >= 0:
+            key = self.concrete(key,token)
+        parameters: list[int] = []
+        for parameter in node.parameters:
+            append(parameters,self.concrete(parameter,token))
+        result = self.kernel.pool.intern(node.kind,node.name,element,key,parameters,node.declaration)
+        if not self.kernel.pool.depth_valid(result):
+            self.fail("E2002","type nesting exceeds 64 levels",token)
+        if node.kind in ["List","Optional","Step","Cursor"] and element == 1:
+            self.fail("E3002","container items cannot have type void",token)
+        if node.kind == "Array" and not self.kernel.pool.abstract(element) and self.kernel.pool.types[element].kind not in ["Int","Float"]:
+            self.fail("E3031","array elements must be int or float",token)
+        if node.kind == "Cursor" and not self.kernel.pool.abstract(element) and self.kernel.pool.types[element].kind not in ["List","Dict","Str","Range","Array"]:
+            self.fail("E3029","cursor source must be a list, dictionary, string or range",token)
+        if node.kind in ["Tuple","Record","Function","Callable","Closure"] and 1 in parameters:
+            self.fail("E3002","value types and callable parameters cannot be void",token)
+        if node.kind == "Dict" and self.kernel.pool.types[key].kind not in ["Int","Str","Bool","Parameter"]:
+            self.fail("E3020","dictionary keys must be int, str, or bool",token)
+        if node.kind == "Projection" and not self.kernel.pool.abstract(element):
+            resolved = result
+            if self.kernel.pool.types[element].kind == "Record" and node.name in ["Item","Iterator"]:
+                resolved = self.associated(element,node.name,token)
+            else:
+                self.flush()
+                resolved = self.resolver.resolve_type(result,self.module,token,{})
+                self.kernel.pool = self.resolver.pool
+            if resolved != result:
+                result = self.concrete(resolved,token)
+        if node.kind == "Record" and not self.kernel.pool.abstract(result):
+            index = self.resolver.symbols[node.declaration]
+            declaration = self.resolver.declarations[index]
+            stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if len(stmt.type_parameters) > 0:
+                arguments: dict[str,int] = {}
+                for position in range(len(parameters)):
+                    arguments[stmt.type_parameters[position]] = parameters[position]
+                selected = self.instantiate(index,arguments,token)
+                result = self.record_types[self.resolver.declarations[selected].symbol]
+        if not self.kernel.pool.abstract(result):
+            self.concrete_types[value] = result
+        return result
+
+    fn prepare_function(mut self, index: int):
+        if index in self.prepared:
+            return
+        self.prepared[index] = true
+        declaration = self.resolver.declarations[index]
+        self.save()
+        self.enter(declaration.module,index)
+        arguments = self.type_bindings[index] if index in self.type_bindings else {}
+        stmt = self.kernel.tree.statements[declaration.statement]
+        for position in range(len(declaration.parameters)):
+            actual = self.bound_type(declaration.parameters[position].type,arguments,declaration.module,stmt.parameters[position].token)
+            self.supported_type(actual,stmt.parameters[position].token)
+            self.resolver.declarations[index].parameters[position].type = actual
+        self.resolver.declarations[index].result = self.bound_type(declaration.result,arguments,declaration.module,stmt.token)
+        self.supported_type(self.resolver.declarations[index].result,stmt.token)
+        self.flush()
+        self.restore()
+
+    fn infer(mut self, pattern: int, actual: int, arguments: dict[str,int], token: lx.Token) -> dict[str,int]:
+        solver = generic.Solver(self.kernel.pool,arguments,self.origins,None,self.kernel.file,self.module,self.resolver,self.concrete_types)
+        try:
+            solver.infer(pattern,actual,token)
+        except err:
+            if solver.problem is not None:
+                self.problem = unwrap(solver.problem)
+            raise err
+        self.kernel.pool = solver.pool
+        return solver.arguments
+
+    fn clone(mut self, index: int) -> int:
+        self.flush()
+        declaration = self.resolver.declarations[index]
+        module = declaration.module
+        cloner = specialization.Cloner(self.resolver.compilation.modules[module].tree,{},{})
+        statement = cloner.statement(declaration.statement)
+        cloner.tree.statements[statement].type_parameters = []
+        self.resolver.compilation.modules[module].tree = cloner.tree
+        while len(self.facts[module].types) < len(cloner.tree.expressions):
+            append(self.facts[module].types,0)
+            append(self.facts[module].symbols,0)
+        while len(self.facts[module].annotations) < len(cloner.tree.statements):
+            append(self.facts[module].annotations,0)
+            append(self.facts[module].statements,0)
+            append(self.facts[module].declares,false)
+        if module == self.module:
+            self.kernel.tree = cloner.tree
+            self.kernel.types = self.facts[module].types
+            self.kernel.symbols = self.facts[module].symbols
+        symbol = self.fresh()
+        selected = len(self.resolver.declarations)
+        copy = sig.Declaration(module,statement,symbol,declaration.parent,declaration.result,declaration.parameters)
+        for position in range(len(copy.parameters)):
+            copy.parameters[position].default_value = cloner.tree.statements[statement].parameters[position].default_value
+        self.resolver.indices[module][statement] = selected
+        self.resolver.symbols[symbol] = selected
+        append(self.resolver.declarations,copy)
+        self.kernel.declarations = self.resolver.declarations
+        return selected
+
+    fn instantiate(mut self, index: int, arguments: dict[str,int], token: lx.Token) -> int:
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        types: list[int] = []
+        for name in stmt.type_parameters:
+            if name not in arguments:
+                suffix = "; use a concrete record annotation" if stmt.kind == "Record" else ""
+                self.fail("E3024","cannot infer type parameter '"+name+"' of '"+stmt.name+"'"+suffix,token)
+            append(types,arguments[name])
+        pieces = [str(index)]
+        for item in types:
+            append(pieces,str(item))
+        identity = join(pieces,",")
+        if identity in self.instances:
+            return self.instances[identity]
+        if self.instance_depth >= 64 or self.instance_count >= 1024:
+            self.fail("E2002","generic instantiation exceeds 64 active levels or 1024 specializations",token)
+        self.instance_depth += 1
+        self.instance_count += 1
+        selected = self.clone(index)
+        self.instances[identity] = selected
+        symbol = self.resolver.declarations[selected].symbol
+        self.origins[symbol] = self.origins[declaration.symbol] if declaration.symbol in self.origins else declaration.symbol
+        self.type_bindings[selected] = arguments
+        self.save()
+        self.enter(declaration.module,selected)
+        if stmt.kind == "Record":
+            record_type = self.kernel.pool.intern("Record",stmt.name,parameters=types,declaration=symbol)
+            self.record_types[symbol] = record_type
+            self.record_parameters[symbol] = stmt.type_parameters
+        try:
+            copy = self.resolver.declarations[selected]
+            for position in range(len(copy.parameters)):
+                field_token = self.kernel.tree.statements[copy.statement].parameters[position].token
+                actual = self.bound_type(copy.parameters[position].type,arguments,copy.module,field_token)
+                if stmt.kind == "Record" and actual == 1:
+                    self.fail("E3002","record fields cannot have type void",field_token)
+                self.supported_type(actual,field_token)
+                self.resolver.declarations[selected].parameters[position].type = actual
+            self.resolver.declarations[selected].result = self.bound_type(copy.result,arguments,copy.module,stmt.token)
+            if stmt.kind == "Record":
+                template = self.resolver.compilation.modules[copy.module].tree.statements[declaration.statement]
+                cloned = self.kernel.tree.statements[copy.statement]
+                for position in range(len(cloned.body)):
+                    origin = self.resolver.indices[copy.module][template.body[position]]
+                    method = self.resolver.declarations[origin]
+                    child = len(self.resolver.declarations)
+                    member = cloned.body[position]
+                    method_symbol = self.fresh()
+                    parameters: list[sig.Parameter] = []
+                    for parameter in range(len(method.parameters)):
+                        item = method.parameters[parameter]
+                        item.type = self.kernel.pool.substitute(item.type,arguments)
+                        item.default_value = self.kernel.tree.statements[member].parameters[parameter].default_value
+                        append(parameters,item)
+                    parameters[0].type = self.record_types[symbol]
+                    result = self.kernel.pool.substitute(method.result,arguments)
+                    append(self.resolver.declarations,sig.Declaration(copy.module,member,method_symbol,selected,result,parameters))
+                    self.resolver.indices[copy.module][member] = child
+                    self.resolver.symbols[method_symbol] = child
+                    self.type_bindings[child] = arguments
+                    self.methods[str(symbol)+"."+self.kernel.tree.statements[member].name] = child
+                self.kernel.declarations = self.resolver.declarations
+                self.kernel.record_parameters = self.record_parameters
+                self.flush()
+            else:
+                self.flush()
+                self.prepared[selected] = true
+                self.check_function(selected)
+        except err:
+            suffix = "\n  while instantiating function '"+stmt.name+"'"
+            if stmt.kind == "Record":
+                suffix = "\n  while instantiating record "+self.kernel.pool.display(self.record_types[symbol])
+            if self.problem is not None:
+                problem = unwrap(self.problem)
+                problem.message += suffix
+                self.problem = problem
+            elif self.kernel.problem is not None:
+                problem = unwrap(self.kernel.problem)
+                problem.message += suffix
+                self.problem = problem
+            elif self.resolver.problem is not None:
+                problem = unwrap(self.resolver.problem)
+                problem.message += suffix
+                self.problem = problem
+            raise err
+        self.restore()
+        self.instance_depth -= 1
+        return selected
+
+    fn capture(mut self, index: int, name: str, binding: Binding):
+        for capture in self.closures[index].captures:
+            if capture.symbol == binding.symbol:
+                return
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        append(self.closures[index].captures,ir.Capture(name,binding.type,binding.symbol,name in stmt.mutable_captures))
+
+    fn outer_binding(mut self, frame: int, name: str) -> Binding | None:
+        for index in range(len(self.frames[frame].scopes)-1,-1,-1):
+            if name in self.frames[frame].scopes[index]:
+                return self.frames[frame].scopes[index][name]
+        parent = self.frames[frame].enclosing
+        if parent >= 0:
+            found = self.outer_binding(parent,name)
+            if found is not None:
+                binding = unwrap(found)
+                self.capture(self.frames[frame].function,name,binding)
+                self.frames[frame].scopes[0][name] = binding
+                return binding
+        return None
+
+    fn lookup(mut self, name: str) -> Binding | None:
+        for index in range(len(self.scopes)-1,-1,-1):
+            if name in self.scopes[index]:
+                return self.scopes[index][name]
+        if self.enclosing >= 0:
+            found = self.outer_binding(self.enclosing,name)
+            if found is not None:
+                binding = unwrap(found)
+                self.capture(self.function,name,binding)
+                self.scopes[0][name] = binding
+                return binding
+        return None
+
+    fn immutable_capture(self, symbol: int) -> bool:
+        if self.function in self.closures:
+            for capture in self.closures[self.function].captures:
+                if capture.symbol == symbol:
+                    return not capture.mutable
+        return false
+
+    # name = unwrap(name) from the parser: declares a narrowed local when name is optional, else nothing.
+    fn narrow(mut self, value: int, stmt: ast.Stmt) -> int:
+        binding = self.lookup(stmt.name)
+        optional = binding is not None and self.kernel.pool.types[unwrap(binding).type].kind == "Optional"
+        if not optional or (stmt.relative > 0 and not self.if_exits):
+            self.kernel.tree.statements[value].kind = "Pass"
+            return 1
+        actual = self.expression(stmt.expressions[0])
+        symbol = self.fresh()
+        self.facts[self.module].statements[value] = symbol
+        self.facts[self.module].declares[value] = true
+        self.facts[self.module].annotations[value] = actual
+        self.narrowed[symbol] = Narrowing(unwrap(binding),stmt.name in self.scopes[-1])
+        self.scopes[-1][stmt.name] = Binding(actual,symbol)
+        return 1
+
+    # Assigning a narrowed name writes the original variable, and the narrowing ends.
+    fn end_narrowing(mut self, name: str):
+        for index in range(len(self.scopes)-1,-1,-1):
+            if name in self.scopes[index]:
+                symbol = self.scopes[index][name].symbol
+                if symbol in self.narrowed:
+                    narrowing = self.narrowed[symbol]
+                    if narrowing.replaced:
+                        self.scopes[index][name] = narrowing.original
+                    else:
+                        remove(self.scopes[index],name)
+                    self.end_narrowing(name)
+                return
+
+    fn assigned_names(self, body: list[int]) -> list[str]:
+        result: list[str] = []
+        pending = body
+        while len(pending) > 0:
+            stmt = self.kernel.tree.statements[pop(pending)]
+            if stmt.kind == "Assign" and not stmt.expression_body:
+                append(result,stmt.name)
+            if stmt.kind not in ["Function","Record"]:
+                pending = pending+stmt.body+stmt.otherwise
+        return result
+
+    # The parser marks an unpacking's hidden variable with the number of names (relative > 0).
+    fn unpackable(mut self, actual: int, count: int, token: lx.Token):
+        if count <= 0:
+            return
+        node = self.kernel.pool.types[actual]
+        if node.kind != "Tuple":
+            self.fail("E3025","cannot unpack "+self.kernel.pool.display(actual)+"; unpacking needs a tuple",token)
+        if len(node.parameters) != count:
+            self.fail("E3025","cannot unpack a tuple of "+str(len(node.parameters))+" values into "+str(count)+" names",token)
+
+    fn valid_variable(mut self, name: str, token: lx.Token):
+        env = self.resolver.bindings.environments[self.module]
+        if bind.reserved(name) or name in env.names or name in env.namespaces:
+            self.fail("E3001","name '"+name+"' is reserved by a type or function",token)
+
+    fn suggestion(self, name: str, call: bool) -> str:
+        matches: dict[str,bool] = {}
+        visible: dict[str,bool] = {}
+        scopes = self.scopes
+        parent = self.enclosing
+        while parent >= 0:
+            scopes = self.frames[parent].scopes+scopes
+            parent = self.frames[parent].enclosing
+        for index in range(len(scopes)-1,-1,-1):
+            scope = scopes[index]
+            for candidate in scope:
+                if candidate in visible:
+                    continue
+                visible[candidate] = true
+                if ex.similar(name,candidate) and (not call or self.kernel.pool.types[scope[candidate].type].kind in ["Function","Callable","Closure"]):
+                    matches[candidate] = true
+        env = self.resolver.bindings.environments[self.module].names
+        for candidate in env:
+            declaration = self.resolver.declarations[env[candidate]-1]
+            stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if candidate not in visible and (call or stmt.kind == "Function") and ex.similar(name,candidate):
+                matches[candidate] = true
+        if call:
+            for candidate in self.known:
+                if ex.similar(name,candidate):
+                    matches[candidate] = true
+        if len(matches) == 1:
+            for candidate in matches:
+                return "; did you mean '"+candidate+"'?"
+        return ""
+
+    fn annotation(mut self, value: int, token: lx.Token) -> int:
+        self.flush()
+        raw = self.resolver.raw(self.kernel.tree,value)
+        arguments = self.type_bindings[self.function] if self.function in self.type_bindings else {}
+        actual = self.resolver.resolve_type(raw,self.module,token,arguments)
+        if not self.resolver.pool.depth_valid(actual):
+            self.fail("E2002","type nesting exceeds 64 levels",token)
+        self.kernel.pool = self.resolver.pool
+        actual = self.concrete(actual,token)
+        if actual != 0:
+            self.kernel.resolved(actual,token)
+            self.supported_type(actual,token)
+        return actual
+
+    fn ensure_return(mut self, index: int, token: lx.Token):
+        if self.resolver.declarations[index].result != 0:
+            return
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if index in self.states and self.states[index] == 1:
+            self.fail("E3030","recursive return inference for '"+stmt.name+"'; annotate a function in this dependency cycle",token)
+        self.save()
+        self.check_function(index)
+        self.restore()
+
+    fn function_target(mut self, index: int, token: lx.Token, expected: int) -> int:
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if len(stmt.type_parameters) == 0:
+            return index
+        if self.kernel.pool.types[expected].kind not in ["Function","Callable"]:
+            self.fail("E3024","generic function value requires a concrete fn annotation",token)
+        parameters: list[int] = []
+        for parameter in declaration.parameters:
+            append(parameters,parameter.type)
+        pattern = self.kernel.pool.intern("Function",element=declaration.result,parameters=parameters)
+        arguments = self.infer(pattern,expected,{},token)
+        return self.instantiate(index,arguments,token)
+
+    fn argument(mut self, reference: ir.Reference, hint: int, isolated: bool = false) -> int:
+        node = self.kernel.pool.types[hint]
+        if node.kind in ["Function","Callable","Closure","Signature"]:
+            parameters: list[int] = []
+            for item in node.parameters:
+                append(parameters,0 if self.kernel.pool.abstract(item) else item)
+            element = 0 if self.kernel.pool.abstract(node.element) else node.element
+            hint = self.kernel.pool.intern("Function",element=element,parameters=parameters)
+        elif self.kernel.pool.abstract(hint):
+            hint = 0
+        if reference.module == self.module and not isolated:
+            return self.expression(reference.expression,hint)
+        self.flush()
+        other = self.resolver.compilation.modules[reference.module]
+        kernel = ex.checker(other.tree,self.resolver.pool,file=other.file,source=reference.module)
+        actual = 0
+        try:
+            actual = kernel.expression(reference.expression,hint)
+        except err:
+            if kernel.problem is not None:
+                self.problem = unwrap(kernel.problem)
+            raise err
+        self.resolver.pool = kernel.pool
+        self.kernel.pool = kernel.pool
+        self.resolver.compilation.modules[reference.module].tree = kernel.tree
+        for item in range(len(kernel.types)):
+            if kernel.types[item] != 0:
+                self.facts[reference.module].types[item] = kernel.types[item]
+                self.facts[reference.module].symbols[item] = kernel.symbols[item]
+        if reference.module == self.module:
+            self.kernel.tree = kernel.tree
+            self.kernel.types = self.facts[self.module].types
+            self.kernel.symbols = self.facts[self.module].symbols
+        return actual
+
+    fn argument_node(self, reference: ir.Reference) -> ast.Expr:
+        if reference.module == self.module:
+            return self.kernel.tree.expressions[reference.expression]
+        return self.resolver.compilation.modules[reference.module].tree.expressions[reference.expression]
+
+    fn function_value(mut self, index: int, token: lx.Token) -> int:
+        self.prepare_function(index)
+        self.ensure_return(index,token)
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        for parameter in stmt.parameters:
+            if parameter.mutable_borrow:
+                self.fail("E3023","mutable native array imports must be called by name",token)
+        parameters: list[int] = []
+        for parameter in declaration.parameters:
+            append(parameters,parameter.type)
+        return self.kernel.pool.intern("Function",element=declaration.result,parameters=parameters)
+
+    fn qualified(self, value: int) -> str:
+        node = self.kernel.tree.expressions[value]
+        if node.kind == "Name":
+            return node.token.text
+        if node.kind == "Member":
+            base = self.qualified(node.children[0])
+            if base != "":
+                return base+"."+node.token.text
+        return ""
+
+    fn lvalue(mut self, value: int):
+        node = self.kernel.tree.expressions[value]
+        if node.kind == "Name":
+            if self.kernel.symbols[value] in self.narrowed:
+                self.fail("E3015","'"+node.token.text+"' was narrowed from an optional here, so it cannot be changed in place; assign it with "+node.token.text+" = ...",node.token)
+            if self.immutable_capture(self.kernel.symbols[value]):
+                self.fail("E3028","captured values are immutable snapshots; mutate a local copy instead",node.token)
+            if self.readonly != 0 and self.kernel.symbols[value] == self.readonly:
+                self.fail("E3027","self is read-only; declare mut self to mutate the receiver",node.token)
+            return
+        if node.kind in ["Member","Index"]:
+            base = self.kernel.pool.types[self.kernel.types[node.children[0]]]
+            if (node.kind == "Member" and base.kind == "Record") or (node.kind == "Index" and base.kind in ["List","Array","Dict"]):
+                self.lvalue(node.children[0])
+                return
+        self.fail("E3015","mutation target must be a variable or a rooted record/list/dictionary path",node.token)
+
+    fn argument_type(mut self, actual: int, expected: int, token: lx.Token, detail: str):
+        if self.kernel.pool.assignable(expected,actual):
+            return
+        wanted = self.kernel.pool.display(expected)
+        received = self.kernel.pool.display(actual)
+        suffix = "; these types contain distinct nominal record declarations" if wanted == received else ""
+        self.fail("E3002","expected "+wanted+", got "+received+" for "+detail+suffix,token)
+
+    fn expectation(self, index: int, provided: int) -> str:
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        first = 1 if stmt.method else 0
+        parts: list[str] = []
+        for position in range(first,len(declaration.parameters)):
+            parameter = declaration.parameters[position]
+            if parameter.mode == "KeywordOnly" and (position == first or declaration.parameters[position-1].mode != "KeywordOnly"):
+                append(parts,"*")
+            text = parameter.name+": "+self.kernel.pool.display(parameter.type)
+            if parameter.default_value >= 0:
+                text += " = ..."
+            append(parts,text)
+            if parameter.mode == "PositionalOnly" and (position+1 == len(declaration.parameters) or declaration.parameters[position+1].mode != "PositionalOnly"):
+                append(parts,"/")
+        count = provided-first
+        return " (expected "+stmt.name+"("+join(parts,", ")+"); provided "+str(count)+(" argument)" if count == 1 else " arguments)")
+
+    fn declared(mut self, value: int, index: int, children: list[int], keywords: list[str], expected_result: int = 0, explicit: list[int] = [], indirect_call: bool = false) -> int:
+        node = self.kernel.tree.expressions[value]
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if stmt.kind == "Function" and len(stmt.type_parameters) == 0:
+            self.prepare_function(index)
+            declaration = self.resolver.declarations[index]
+        supplied: dict[int,bool] = {}
+        arguments: list[ir.Reference] = []
+        order: list[int] = []
+        positional = 0
+        suffix = self.expectation(index,len(children))
+        for position in range(len(children)):
+            keyword = keywords[position] if len(keywords) > 0 else ""
+            parameter = positional
+            token = self.kernel.tree.expressions[children[position]].token
+            if keyword == "":
+                if parameter >= len(declaration.parameters) or declaration.parameters[parameter].mode == "KeywordOnly":
+                    self.fail("E3003","too many positional arguments to '"+stmt.name+"'"+suffix,token)
+                positional += 1
+            else:
+                parameter = -1
+                for candidate in range(len(declaration.parameters)):
+                    if declaration.parameters[candidate].name == keyword:
+                        parameter = candidate
+                if parameter < 0:
+                    self.fail("E3003","unknown keyword '"+keyword+"' to '"+stmt.name+"'"+suffix,token)
+                if declaration.parameters[parameter].mode == "PositionalOnly":
+                    self.fail("E3003","parameter '"+keyword+"' is positional-only in '"+stmt.name+"'"+suffix,token)
+            if parameter in supplied:
+                self.fail("E3003","multiple values for parameter '"+declaration.parameters[parameter].name+"' in '"+stmt.name+"'"+suffix,token)
+            supplied[parameter] = true
+            append(arguments,ir.Reference(self.module,children[position]))
+            append(order,parameter)
+        for parameter in range(len(declaration.parameters)):
+            if parameter not in supplied:
+                item = declaration.parameters[parameter]
+                if item.default_value < 0:
+                    self.fail("E3003","missing argument '"+item.name+"' to '"+stmt.name+"'"+suffix,node.token)
+                append(arguments,ir.Reference(declaration.module,item.default_value))
+                append(order,parameter)
+        bound = self.type_bindings[index] if index in self.type_bindings else {}
+        if len(explicit) > 0:
+            if stmt.kind != "Record" or len(explicit) != len(stmt.type_parameters):
+                self.fail("E3024","wrong number of record type arguments",node.token)
+            for position in range(len(explicit)):
+                bound[stmt.type_parameters[position]] = self.annotation(explicit[position],node.token)
+        context = self.kernel.pool.types[expected_result]
+        if stmt.kind == "Record" and context.kind == "Record":
+            origin = self.origins[context.declaration] if context.declaration in self.origins else context.declaration
+            if origin == declaration.symbol:
+                for position in range(len(stmt.type_parameters)):
+                    if stmt.type_parameters[position] not in bound:
+                        bound[stmt.type_parameters[position]] = context.parameters[position]
+        fixed = stmt.kind == "Record" and len(bound) > 0
+        actuals: list[int] = []
+        deferred: list[int] = []
+        for position in range(len(arguments)):
+            append(actuals,0)
+            reference = arguments[position]
+            pattern = declaration.parameters[order[position]].type
+            hint = self.kernel.pool.substitute(pattern,bound)
+            hint = self.concrete(hint,node.token)
+            expr = self.argument_node(reference)
+            env = self.resolver.bindings.environments[reference.module].names
+            if expr.kind == "Closure" and self.kernel.pool.abstract(hint):
+                needs_context = false
+                for parameter in self.resolver.compilation.modules[reference.module].tree.statements[expr.function].parameters:
+                    if self.resolver.compilation.modules[reference.module].tree.types[parameter.type].kind == "Unknown":
+                        needs_context = true
+                if needs_context:
+                    append(deferred,position)
+                    continue
+            if expr.kind == "Name" and expr.token.text in env and self.lookup(expr.token.text) is None and self.kernel.pool.abstract(hint):
+                target = self.resolver.declarations[env[expr.token.text]-1]
+                if len(self.resolver.compilation.modules[target.module].tree.statements[target.statement].type_parameters) > 0:
+                    append(deferred,position)
+                    continue
+            actuals[position] = self.argument(reference,hint,position >= len(children))
+            if len(stmt.type_parameters) > 0 and not fixed:
+                bound = self.infer(pattern,actuals[position],bound,expr.token)
+        for position in deferred:
+            reference = arguments[position]
+            pattern = declaration.parameters[order[position]].type
+            hint = self.kernel.pool.substitute(pattern,bound)
+            hint = self.concrete(hint,node.token)
+            actuals[position] = self.argument(reference,hint)
+            if len(stmt.type_parameters) > 0 and not fixed:
+                bound = self.infer(pattern,actuals[position],bound,self.argument_node(reference).token)
+        if stmt.kind == "Function" and len(stmt.type_parameters) > 0 and expected_result != 0:
+            bound = self.infer(declaration.result,expected_result,bound,node.token)
+        if len(stmt.type_parameters) > 0:
+            index = self.instantiate(index,bound,node.token)
+        declaration = self.resolver.declarations[index]
+        for position in range(len(children),len(arguments)):
+            arguments[position] = ir.Reference(declaration.module,declaration.parameters[order[position]].default_value)
+        if stmt.kind == "Function":
+            self.ensure_return(index,node.token)
+        for argument in range(len(arguments)):
+            parameter = declaration.parameters[order[argument]]
+            if not self.kernel.pool.assignable(parameter.type,actuals[argument]):
+                reference = arguments[argument]
+                token = self.argument_node(reference).token
+                try:
+                    detail = "argument "+str(argument+1)+" to function value" if indirect_call else "argument '"+parameter.name+"' to '"+stmt.name+"'"
+                    self.argument_type(actuals[argument],parameter.type,token,detail)
+                except err:
+                    if reference.module != self.module and self.problem is not None:
+                        self.problem = src.located("E3002",unwrap(self.problem).message,self.resolver.compilation.modules[reference.module].file,reference.module,token)
+                    raise err
+        if stmt.method and stmt.mutating:
+            self.lvalue(children[0])
+        for position in range(len(arguments)):
+            if stmt.parameters[order[position]].mutable_borrow:
+                self.lvalue(arguments[position].expression)
+        kind = "declared"
+        result = self.resolver.declarations[index].result
+        if stmt.kind == "Record":
+            kind = "construct"
+            result = self.record_types[declaration.symbol]
+        self.facts[self.module].calls[value] = ir.Call(kind,index,stmt.name,arguments,order)
+        return result
+
+    fn arity(mut self, name: str, count: int, minimum: int, maximum: int, token: lx.Token):
+        if count < minimum or count > maximum:
+            expected = str(minimum)
+            if minimum != maximum:
+                expected += ".."+str(maximum)
+            self.fail("E3003","wrong number of arguments to '"+name+"' (expected "+expected+", got "+str(count)+")",token)
+
+    fn json_compatible(self, value: int) -> bool:
+        pending = [value]
+        seen: dict[int,bool] = {}
+        while len(pending) > 0:
+            item = pop(pending)
+            if item in seen:
+                continue
+            seen[item] = true
+            node = self.kernel.pool.types[item]
+            if node.kind in ["List","Optional"]:
+                append(pending,node.element)
+            elif node.kind == "Tuple":
+                for parameter in node.parameters:
+                    append(pending,parameter)
+            elif node.kind == "Dict":
+                if self.kernel.pool.types[node.key].kind != "Str":
+                    return false
+                append(pending,node.element)
+            elif node.kind == "Record":
+                declaration = self.resolver.declarations[self.resolver.symbols[node.declaration]]
+                for parameter in declaration.parameters:
+                    append(pending,parameter.type)
+            elif node.kind not in ["Int","Float","Bool","Str","None","Json","Error"]:
+                return false
+        return true
+
+    fn native_type(mut self, name: str) -> int:
+        if name == "ListStr":
+            return self.kernel.pool.intern("List",element=self.kernel.pool.intern("Str"))
+        if name == "OptionalStr":
+            return self.kernel.pool.intern("Optional",element=self.kernel.pool.intern("Str"))
+        if name == "ListPythonObject":
+            return self.kernel.pool.intern("List",element=self.kernel.pool.intern("PythonObject"))
+        if name == "DictPythonObject":
+            return self.kernel.pool.intern("Dict",element=self.kernel.pool.intern("PythonObject"),key=self.kernel.pool.intern("Str"))
+        if name in ["Job","IoJob"]:
+            payload = self.kernel.pool.intern("Json")
+            parameters = [payload] if name == "Job" else [self.kernel.pool.intern("Stream"),payload]
+            return self.kernel.pool.intern("Function",element=payload,parameters=parameters)
+        return self.kernel.pool.intern(name)
+
+    fn builtin(mut self, value: int, name: str, children: list[int], keywords: list[str], expected_result: int = 0) -> int:
+        node = self.kernel.tree.expressions[value]
+        if name not in self.natives and name not in native.polymorphic() and name not in ["iter","next","yielded","finished","has_item","step_value"] and name not in native.known():
+            self.fail("E3005",self.unknown_function(name),node.token)
+        for keyword in keywords:
+            if keyword != "":
+                self.fail("E3003","builtins use positional arguments",node.token)
+        if name in ["iter","next","yielded","finished","has_item","step_value"]:
+            return self.iterator_call(value,name,children,expected_result)
+        if starts_with(name,"array_") and name in native.polymorphic():
+            return self.array_call(value,name,children,expected_result)
+        if name not in self.natives and name not in native.polymorphic():
+            if name in native.known():
+                self.unsupported("native primitive "+name,node.token)
+            self.fail("E3005",self.unknown_function(name),node.token)
+        counts = {"append":2,"pop":1,"get":3,"remove":2,"slice":3,"split":2,"fs_list":2,"args":0,"keys":1,"values":1,"json_list":1,"json_dict":1,"json":1,"json_dump":1,"unwrap":1,"len":1,"str":1,"int":1,"float":1}
+        if name in counts:
+            self.arity(name,len(children),counts[name],counts[name],node.token)
+        elif name == "range":
+            self.arity(name,len(children),1,3,node.token)
+        elif name == "assert":
+            self.arity(name,len(children),1,2,node.token)
+        elif name in self.natives and not native.service(name):
+            self.arity(name,len(children),len(self.natives[name].parameters),len(self.natives[name].parameters),node.token)
+        actual: list[int] = []
+        arguments: list[ir.Reference] = []
+        for position in range(len(children)):
+            hint = 0
+            if name == "append" and position == 1 and self.kernel.pool.types[actual[0]].kind == "List":
+                hint = self.kernel.pool.types[actual[0]].element
+            elif name == "join" and position == 0:
+                hint = self.kernel.pool.intern("List",element=self.kernel.pool.intern("Str"))
+            elif name in ["get","remove"] and position == 1 and self.kernel.pool.types[actual[0]].kind == "Dict":
+                hint = self.kernel.pool.types[actual[0]].key
+            elif name == "get" and position == 2 and self.kernel.pool.types[actual[0]].kind == "Dict":
+                hint = self.kernel.pool.types[actual[0]].element
+            elif name in ["json","json_dump"] and position == 0 and len(self.kernel.tree.expressions[children[position]].children) == 0:
+                kind = self.kernel.tree.expressions[children[position]].kind
+                if kind == "List":
+                    hint = self.kernel.pool.intern("List",element=self.kernel.pool.intern("Json"))
+                elif kind == "Dict":
+                    hint = self.kernel.pool.intern("Dict",element=self.kernel.pool.intern("Json"),key=self.kernel.pool.intern("Str"))
+            item = self.expression(children[position],hint)
+            if item == 1:
+                self.fail("E3002","void expression cannot be used as an argument",self.kernel.tree.expressions[children[position]].token)
+            append(actual,item)
+            append(arguments,ir.Reference(self.module,children[position]))
+        integer = self.kernel.pool.intern("Int")
+        string = self.kernel.pool.intern("Str")
+        boolean = self.kernel.pool.intern("Bool")
+        result = 1
+        if name in self.natives:
+            signature = self.natives[name]
+            if native.service(name):
+                self.arity(name,len(children),len(signature.parameters),len(signature.parameters),node.token)
+            for position in range(len(actual)):
+                expected = 0
+                if signature.parameters[position] == "ListStr":
+                    expected = self.kernel.pool.intern("List",element=string)
+                else:
+                    expected = self.native_type(signature.parameters[position])
+                token = self.kernel.tree.expressions[children[position]].token if native.service(name) else node.token
+                self.kernel.require(actual[position],expected,token)
+            result = self.native_type(signature.result)
+        elif name == "range":
+            for item in actual:
+                self.kernel.require(item,integer,node.token)
+            result = self.kernel.pool.intern("Range")
+        elif name == "args":
+            result = self.kernel.pool.intern("List",element=string)
+        elif name in ["json_list","json_dict"]:
+            json_type = self.kernel.pool.intern("Json")
+            self.kernel.require(actual[0],json_type,node.token)
+            result = self.kernel.pool.intern("List",element=json_type)
+            if name == "json_dict":
+                result = self.kernel.pool.intern("Dict",element=json_type,key=string)
+        elif name in ["json","json_dump"]:
+            if not self.json_compatible(actual[0]):
+                self.fail("E3022","JSON conversion requires supported values and string dictionary keys",node.token)
+            result = self.kernel.pool.intern("Json") if name == "json" else string
+        elif name == "len":
+            if self.kernel.pool.types[actual[0]].kind not in ["Str","List","Array","Dict","Tuple"]:
+                self.fail("E3002","len requires a string, list, or dictionary",node.token)
+            result = integer
+        elif name == "str":
+            result = string
+        elif name in ["int","float"]:
+            if self.kernel.pool.types[actual[0]].kind not in ["Int","Float","Str"]:
+                self.fail("E3002","numeric conversion requires int, float, or str",node.token)
+            result = integer if name == "int" else self.kernel.pool.intern("Float")
+        elif name == "assert":
+            self.kernel.require(actual[0],boolean,node.token)
+            if len(actual) == 2:
+                self.kernel.require(actual[1],string,node.token)
+        elif name in ["append","pop"]:
+            container = self.kernel.pool.types[actual[0]]
+            if container.kind != "List":
+                self.fail("E3002","list mutation requires a list",node.token)
+            self.lvalue(children[0])
+            if name == "append":
+                self.kernel.require(actual[1],container.element,node.token)
+            else:
+                result = container.element
+        elif name in ["keys","values","get","remove"]:
+            container = self.kernel.pool.types[actual[0]]
+            if container.kind != "Dict":
+                self.fail("E3002","dictionary operation requires a dict",node.token)
+            if name in ["keys","values"]:
+                result = self.kernel.pool.intern("List",element=container.key if name == "keys" else container.element)
+            else:
+                self.kernel.require(actual[1],container.key,self.kernel.tree.expressions[children[1]].token)
+                result = boolean
+                if name == "get":
+                    self.kernel.require(actual[2],container.element,self.kernel.tree.expressions[children[2]].token)
+                    result = container.element
+                else:
+                    self.lvalue(children[0])
+        elif name == "unwrap":
+            container = self.kernel.pool.types[actual[0]]
+            argument = children[0]
+            if container.kind != "Optional" and self.kernel.tree.expressions[argument].kind == "Name" and self.kernel.symbols[argument] in self.narrowed:
+                # unwrap(x) on a narrowed x reads the original optional, so code written before narrowing still works.
+                original = self.narrowed[self.kernel.symbols[argument]].original
+                self.kernel.symbols[argument] = original.symbol
+                self.kernel.types[argument] = original.type
+                container = self.kernel.pool.types[original.type]
+            if container.kind != "Optional":
+                self.fail("E3002","unwrap requires an optional value",node.token)
+            result = container.element
+        elif name == "slice":
+            if self.kernel.pool.types[actual[0]].kind not in ["Str","List"]:
+                self.fail("E3002","slice requires a string or list",node.token)
+            self.kernel.require(actual[1],integer,node.token)
+            self.kernel.require(actual[2],integer,node.token)
+            result = actual[0]
+        elif name in ["split","fs_list"]:
+            self.kernel.require(actual[0],string,node.token)
+            self.kernel.require(actual[1],string if name == "split" else integer,node.token)
+            result = self.kernel.pool.intern("List",element=string)
+        self.facts[self.module].calls[value] = ir.Call("builtin",-1,name,arguments,[])
+        return result
+
+    fn array_shape(self, value: int) -> bool:
+        node = self.kernel.pool.types[value]
+        if node.kind == "Int":
+            return true
+        if node.kind == "List":
+            return self.kernel.pool.types[node.element].kind == "Int"
+        if node.kind != "Tuple" or len(node.parameters) == 0 or len(node.parameters) > 8:
+            return false
+        for parameter in node.parameters:
+            if self.kernel.pool.types[parameter].kind != "Int":
+                return false
+        return true
+
+    fn array_call(mut self, value: int, name: str, children: list[int], expected: int) -> int:
+        node = self.kernel.tree.expressions[value]
+        count = 5 if name == "array_slice" else (2 if name in ["array_full","array_dot","array_matmul","array_affine","array_reshape","array_transpose"] else 1)
+        integer = self.kernel.pool.intern("Int")
+        integers = self.kernel.pool.intern("List",element=integer)
+        actual: list[int] = []
+        arguments: list[ir.Reference] = []
+        for position in range(len(children)):
+            hint = 0
+            if (name == "array_full" and position == 0) or (name in ["array_reshape","array_transpose"] and position == 1):
+                hint = integers
+            elif name == "array_from_list" and self.kernel.pool.types[expected].kind == "Array":
+                hint = self.kernel.pool.intern("List",element=self.kernel.pool.types[expected].element)
+            item = self.expression(children[position],hint)
+            if item == 1:
+                self.fail("E3002","void expression cannot be used as an argument",self.kernel.tree.expressions[children[position]].token)
+            append(actual,item)
+            append(arguments,ir.Reference(self.module,children[position]))
+        self.arity(name,len(children),count,count,node.token)
+        first = self.kernel.pool.types[actual[0]]
+        result = actual[0]
+        if name == "array_full":
+            if not self.array_shape(actual[0]):
+                self.fail("E3031","array shape requires an int, integer tuple of rank 1..8, or list[int]",node.token)
+            if self.kernel.pool.types[actual[1]].kind not in ["Int","Float"]:
+                self.fail("E3031","array fill must be int or float",node.token)
+            result = self.kernel.pool.intern("Array",element=actual[1])
+        elif name == "array_from_list":
+            if first.kind != "List" or self.kernel.pool.types[first.element].kind not in ["Int","Float"]:
+                self.fail("E3031","array construction requires list[int] or list[float]",node.token)
+            result = self.kernel.pool.intern("Array",element=first.element)
+        else:
+            if first.kind != "Array":
+                self.fail("E3031","numerical operation requires an array",node.token)
+            if name == "array_shape":
+                result = integers
+            elif name == "array_rank":
+                result = integer
+            elif name == "array_contiguous":
+                result = self.kernel.pool.intern("Bool")
+            elif name in ["array_sum","array_dot"]:
+                result = first.element
+            elif name == "array_to_list":
+                result = self.kernel.pool.intern("List",element=first.element)
+            elif name in ["array_floats","array_integers"]:
+                result = self.kernel.pool.intern("Array",element=self.kernel.pool.intern("Float" if name == "array_floats" else "Int"))
+            if name == "array_transpose":
+                self.kernel.require(actual[1],integers,node.token)
+            elif name == "array_reshape" and not self.array_shape(actual[1]):
+                self.fail("E3031","invalid reshape dimensions",node.token)
+            elif name == "array_slice":
+                for item in actual[1:]:
+                    self.kernel.require(item,integer,node.token)
+            elif name in ["array_dot","array_matmul","array_affine"]:
+                self.kernel.require(actual[1],actual[0],node.token)
+                if name != "array_dot" and self.kernel.pool.types[first.element].kind != "Float":
+                    self.fail("E3031","matrix and affine kernels require array[float]; use num.floats",node.token)
+        self.facts[self.module].calls[value] = ir.Call("builtin",-1,name,arguments,[])
+        return result
+
+    fn rooted(self, value: int) -> bool:
+        node = self.kernel.tree.expressions[value]
+        while node.kind in ["Member","Index"]:
+            node = self.kernel.tree.expressions[node.children[0]]
+        return node.kind == "Name" and not (value in self.facts[self.module].calls and self.facts[self.module].calls[value].kind == "function")
+
+    fn indirect(mut self, value: int, target: int, children: list[int], keywords: list[str]) -> int:
+        node = self.kernel.tree.expressions[value]
+        function_type = self.expression(target)
+        function = self.kernel.pool.types[function_type]
+        mutable = function.kind == "Callable"
+        if function.kind == "Closure":
+            declaration = self.resolver.declarations[self.resolver.symbols[function.declaration]]
+            mutable = len(self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement].mutable_captures) > 0
+        if mutable:
+            if self.rooted(target):
+                self.lvalue(target)
+        if function.kind not in ["Function","Callable","Closure"]:
+            self.fail("E3002",self.kernel.pool.display(function_type)+" cannot be called, because it is not a function",node.token)
+        if function.kind == "Closure":
+            index = self.resolver.symbols[function.declaration]
+            result = self.declared(value,index,children,keywords,indirect_call=true)
+            call = self.facts[self.module].calls[value]
+            call.kind = "closure"
+            call.arguments = [ir.Reference(self.module,target)]+call.arguments
+            self.facts[self.module].calls[value] = call
+            return result
+        for keyword in keywords:
+            if keyword != "":
+                self.fail("E3003","erased callable and function pointers use positional arguments",node.token)
+        if len(children) != len(function.parameters):
+            self.fail("E3003","wrong number of arguments to function value (expected "+str(len(function.parameters))+", got "+str(len(children))+")",node.token)
+        arguments = [ir.Reference(self.module,target)]
+        for position in range(len(children)):
+            actual = self.expression(children[position],function.parameters[position])
+            self.argument_type(actual,function.parameters[position],self.kernel.tree.expressions[children[position]].token,"argument "+str(position+1)+" to function value")
+            append(arguments,ir.Reference(self.module,children[position]))
+        self.facts[self.module].calls[value] = ir.Call("indirect",-1,"",arguments,[])
+        return function.element
+
+    fn normalize_local_default(mut self, value: int):
+        node = self.kernel.tree.expressions[value]
+        if node.kind == "Name":
+            if self.lookup(node.token.text) is not None or node.token.text in self.resolver.bindings.environments[self.module].names:
+                self.fail("E3026","default literal name is shadowed",node.token)
+            self.kernel.tree.expressions[value].kind = "None" if node.token.text == "None" else "Bool"
+            self.kernel.tree.expressions[value].token.text = "false" if node.token.text == "False" else ("true" if node.token.text == "True" else "None")
+        for child in node.children:
+            self.normalize_local_default(child)
+
+    fn closure(mut self, value: int, expected: int) -> int:
+        node = self.kernel.tree.expressions[value]
+        stmt = self.kernel.tree.statements[node.function]
+        if self.closure_depth >= 64:
+            self.fail("E2002","closure nesting exceeds 64 levels",node.token)
+        self.closure_depth += 1
+        mutable_names: dict[str,bool] = {}
+        for name in stmt.mutable_captures:
+            if name in mutable_names or self.lookup(name) is None:
+                self.fail("E3028","duplicate or undefined mutable capture '"+name+"'",node.token)
+            if unwrap(self.lookup(name)).symbol in self.narrowed:
+                self.fail("E3028","'"+name+"' was narrowed from an optional here, so it cannot be captured with mut",node.token)
+            mutable_names[name] = true
+            for parameter in stmt.parameters:
+                if parameter.name == name:
+                    self.fail("E3028","parameter shadows explicit capture '"+name+"'",parameter.token)
+        for parameter in stmt.parameters:
+            if parameter.default_value >= 0:
+                self.flush()
+                if not self.resolver.constant(self.module,parameter.default_value):
+                    self.fail("E3026","default arguments require literal values",parameter.token)
+                self.normalize_local_default(parameter.default_value)
+        context = self.kernel.pool.types[expected]
+        types: list[int] = []
+        for position in range(len(stmt.parameters)):
+            parameter = stmt.parameters[position]
+            actual = self.annotation(parameter.type,parameter.token)
+            if actual == 0:
+                if context.kind not in ["Function","Callable","Closure","Signature"] or len(context.parameters) != len(stmt.parameters) or context.parameters[position] == 0:
+                    self.fail("E3028","closure parameter needs a type or concrete callable context",parameter.token)
+                actual = context.parameters[position]
+            append(types,actual)
+        result = self.annotation(stmt.return_type,stmt.token)
+        parameters: list[sig.Parameter] = []
+        for position in range(len(stmt.parameters)):
+            parameter = stmt.parameters[position]
+            append(parameters,sig.Parameter(parameter.name,types[position],parameter.mode,false,-1,parameter.default_value))
+        symbol = self.fresh()
+        index = len(self.resolver.declarations)
+        append(self.resolver.declarations,sig.Declaration(self.module,node.function,symbol,-2,result,parameters))
+        self.resolver.symbols[symbol] = index
+        self.resolver.indices[self.module][node.function] = index
+        self.closures[index] = ir.Closure([],0)
+        self.type_bindings[index] = self.type_bindings[self.function] if self.function in self.type_bindings else {}
+        self.prepared[index] = true
+        self.save()
+        parent = len(self.frames)-1
+        self.enter(self.module,index)
+        self.enclosing = parent
+        self.states[index] = 1
+        symbols: list[int] = []
+        for position in range(len(parameters)):
+            parameter = parameters[position]
+            token = stmt.parameters[position].token
+            self.valid_variable(parameter.name,token)
+            if parameter.name in self.scopes[0]:
+                self.fail("E3001","duplicate closure parameter",token)
+            parameter_symbol = self.fresh()
+            append(symbols,parameter_symbol)
+            self.scopes[0][parameter.name] = Binding(parameter.type,parameter_symbol)
+            if parameter.default_value >= 0:
+                actual = self.expression(parameter.default_value,parameter.type)
+                self.kernel.require(actual,parameter.type,self.kernel.tree.expressions[parameter.default_value].token)
+        self.facts[self.module].parameters[node.function] = symbols
+        if stmt.inferred_return and stmt.expression_body:
+            hint = context.element if context.kind in ["Function","Callable","Closure","Signature"] else 0
+            returned = stmt.body[0]
+            result = self.expression(self.kernel.tree.statements[returned].expressions[0],hint)
+            if hint != 0:
+                self.kernel.require(result,hint,node.token)
+                result = hint
+            self.resolver.declarations[index].result = result
+            self.facts[self.module].annotations[returned] = result
+            self.states[index] = 2
+            self.flush()
+        else:
+            self.finish_function(index)
+        for name in stmt.mutable_captures:
+            self.lookup(name)
+        if len(self.closures[index].captures) > 255:
+            self.fail("E2002","closures support at most 255 captures",node.token)
+        pending: list[tuple[int,int]] = []
+        for capture in self.closures[index].captures:
+            append(pending,(capture.type,1))
+        seen: dict[int,bool] = {}
+        depth = 0
+        while len(pending) > 0:
+            item = pop(pending)
+            kind = self.kernel.pool.types[item[0]]
+            height = item[1]
+            if kind.kind == "Closure":
+                height += self.closures[self.resolver.symbols[kind.declaration]].depth
+            if height > 256:
+                self.fail("E2002","closure capture containment exceeds 256 levels",node.token)
+            if height > depth:
+                depth = height
+            if kind.kind == "Record" and kind.declaration not in seen:
+                seen[kind.declaration] = true
+                for field in self.resolver.declarations[self.resolver.symbols[kind.declaration]].parameters:
+                    append(pending,(field.type,height+1))
+            elif kind.kind == "Tuple":
+                for parameter in kind.parameters:
+                    append(pending,(parameter,height+1))
+            elif kind.kind in ["Optional","Step"]:
+                append(pending,(kind.element,height+1))
+        self.closures[index].depth = depth
+        result = self.resolver.declarations[index].result
+        self.flush()
+        self.restore()
+        self.closure_depth -= 1
+        return self.kernel.pool.intern("Closure",element=result,parameters=types,declaration=symbol)
+
+    fn protocol_method(mut self, receiver: int, name: str, token: lx.Token) -> int:
+        node = self.kernel.pool.types[receiver]
+        if node.kind != "Record":
+            return -1
+        key = str(node.declaration)+"."+name
+        if key not in self.methods:
+            return -1
+        index = self.methods[key]
+        declaration = self.resolver.declarations[index]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        if len(declaration.parameters) != 1 or len(stmt.type_parameters) != 0 or (not stmt.mutating if name == "next" else stmt.mutating):
+            self.fail("E3029","iterator protocol requires fn iter(self) and fn next(mut self) without additional parameters",token)
+        self.prepare_function(index)
+        self.ensure_return(index,token)
+        return index
+
+    fn iterator_element(mut self, cursor: int, token: lx.Token) -> tuple[int,int]:
+        node = self.kernel.pool.types[cursor]
+        if node.kind == "Range":
+            return (self.kernel.pool.intern("Int"),-1)
+        if node.kind == "Cursor":
+            source = self.kernel.pool.types[node.element]
+            if source.kind in ["List","Array"]:
+                return (source.element,-1)
+            if source.kind == "Dict":
+                return (source.key,-1)
+            if source.kind in ["Str","Range"]:
+                return (self.kernel.pool.intern("Str" if source.kind == "Str" else "Int"),-1)
+        next = self.protocol_method(cursor,"next",token)
+        if next >= 0:
+            result = self.kernel.pool.types[self.resolver.declarations[next].result]
+            if result.kind != "Step":
+                self.fail("E3029","iterator next must return step[T]",token)
+            return (result.element,next)
+        self.fail("E3029","type "+self.kernel.pool.display(cursor)+" is not an iterator",token)
+        return (0,-1)
+
+    fn associated(mut self, receiver: int, name: str, token: lx.Token) -> int:
+        first = "next" if name == "Item" else "iter"
+        method = self.protocol_method(receiver,first,token)
+        if method < 0:
+            method = self.protocol_method(receiver,"iter" if first == "next" else "next",token)
+        if method < 0:
+            self.fail("E3029","type "+self.kernel.pool.display(receiver)+" does not provide ."+name,token)
+        declaration = self.resolver.declarations[method]
+        stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+        cursor = declaration.result if stmt.name == "iter" else receiver
+        if name == "Iterator":
+            return cursor
+        return self.iterator_element(cursor,token)[0]
+
+    fn iterator_call(mut self, value: int, name: str, children: list[int], expected: int) -> int:
+        node = self.kernel.tree.expressions[value]
+        self.arity(name,len(children),0 if name == "finished" else 1,0 if name == "finished" else 1,node.token)
+        arguments: list[ir.Reference] = []
+        result = expected
+        kind = "builtin"
+        if name == "finished":
+            if self.kernel.pool.types[expected].kind != "Step":
+                self.fail("E3029","finished() requires a step[T] context",node.token)
+        elif name == "yielded":
+            context = self.kernel.pool.types[expected]
+            hint = context.element if context.kind == "Step" else 0
+            actual = self.expression(children[0],hint)
+            if actual == 1:
+                self.fail("E3029","iterator items cannot be void",node.token)
+            if hint != 0:
+                self.kernel.require(actual,hint,node.token)
+            result = self.kernel.pool.intern("Step",element=actual if hint == 0 else hint)
+            append(arguments,ir.Reference(self.module,children[0]))
+        else:
+            actual = self.expression(children[0])
+            source = self.kernel.pool.types[actual]
+            append(arguments,ir.Reference(self.module,children[0]))
+            if name in ["has_item","step_value"]:
+                if source.kind != "Step":
+                    self.fail("E3029","expected step[T]",node.token)
+                result = self.kernel.pool.intern("Bool") if name == "has_item" else source.element
+            elif name == "next":
+                self.lvalue(children[0])
+                item = self.iterator_element(actual,node.token)
+                if item[1] >= 0:
+                    return self.declared(value,item[1],children,[""],expected)
+                result = self.kernel.pool.intern("Step",element=item[0])
+            else:
+                if source.kind in ["List","Array","Dict","Str","Range"]:
+                    result = self.kernel.pool.intern("Cursor",element=actual)
+                else:
+                    method = self.protocol_method(actual,"iter",node.token)
+                    if method >= 0:
+                        result = self.declared(value,method,children,[""],expected)
+                        self.iterator_element(result,node.token)
+                        return result
+                    self.iterator_element(actual,node.token)
+                    result = actual
+                    kind = "snapshot"
+        self.facts[self.module].calls[value] = ir.Call(kind,-1,name,arguments,[])
+        return result
+
+    fn iterable(mut self, value: int) -> int:
+        actual = self.expression(value)
+        node = self.kernel.pool.types[actual]
+        if node.kind in ["List","Array"]:
+            return node.element
+        if node.kind == "Dict":
+            return node.key
+        if node.kind == "Str":
+            return actual
+        if node.kind == "Range":
+            return self.kernel.pool.intern("Int")
+        if node.kind in ["Record","Cursor"]:
+            token = self.kernel.tree.expressions[value].token
+            make = self.protocol_method(actual,"iter",token)
+            cursor = self.resolver.declarations[make].result if make >= 0 else actual
+            if make >= 0 and self.kernel.pool.types[cursor].kind not in ["Record","Cursor"]:
+                self.fail("E3010","cannot iterate over "+self.kernel.pool.display(actual)+"; iteration requires a collection, range or iterator protocol",token)
+            item = self.iterator_element(cursor,token)
+            self.facts[self.module].protocols[value] = ir.Protocol(make,item[1])
+            return item[0]
+        hint = "; use range(value) to count" if node.kind == "Int" else ""
+        self.fail("E3010","cannot iterate over "+self.kernel.pool.display(actual)+"; iteration requires a collection, range or iterator protocol"+hint,self.kernel.tree.expressions[value].token)
+        return 0
+
+    fn comprehension(mut self, value: int, expected: int) -> int:
+        node = self.kernel.tree.expressions[value]
+        dictionary = node.kind == "DictComprehension"
+        head = 2 if dictionary else 1
+        iterations: list[ir.Iteration] = []
+        bindings = 0
+        for position in range(len(node.clauses)):
+            clause = node.clauses[position]
+            child = node.children[head+position]
+            if clause.name == "":
+                actual = self.expression(child)
+                self.kernel.require(actual,self.kernel.pool.intern("Bool"),self.kernel.tree.expressions[child].token)
+                append(iterations,ir.Iteration(0,0))
+            else:
+                element = self.iterable(child)
+                self.valid_variable(clause.name,clause.token)
+                symbol = self.fresh()
+                append(self.scopes,{clause.name:Binding(element,symbol)})
+                bindings += 1
+                append(iterations,ir.Iteration(element,symbol))
+        hint = self.kernel.pool.types[expected]
+        family = "Dict" if dictionary else "List"
+        value_hint = hint.element if hint.kind == family else 0
+        key = -1
+        if dictionary:
+            key = self.expression(node.children[0],hint.key if hint.kind == "Dict" else 0)
+            if self.kernel.pool.types[key].kind not in ["Int","Str","Bool"]:
+                self.fail("E3020","dictionary keys must be int, str, or bool",node.token)
+        actual = self.expression(node.children[head-1],value_hint)
+        if actual == 1:
+            self.fail("E3002","comprehension results cannot be void",node.token)
+        for ignored in range(bindings):
+            pop(self.scopes)
+        if value_hint != 0:
+            self.kernel.require(actual,value_hint,node.token)
+        self.facts[self.module].iterations[value] = iterations
+        return self.kernel.pool.intern(family,element=actual if value_hint == 0 else value_hint,key=key)
+
+    fn request(mut self, value: int, expected: int) -> int:
+        node = self.kernel.tree.expressions[value]
+        if node.kind == "Closure":
+            return self.closure(value,expected)
+        if node.kind in ["ListComprehension","DictComprehension"]:
+            return self.comprehension(value,expected)
+        env = self.resolver.bindings.environments[self.module].names
+        name = self.qualified(value)
+        if node.kind == "Name":
+            binding = self.lookup(node.token.text)
+            if binding is not None:
+                self.kernel.symbols[value] = unwrap(binding).symbol
+                return unwrap(binding).type
+            if name in env:
+                index = env[name]-1
+                declaration = self.resolver.declarations[index]
+                stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                if stmt.kind == "Function":
+                    index = self.function_target(index,node.token,expected)
+                    actual = self.function_value(index,node.token)
+                    self.facts[self.module].calls[value] = ir.Call("function",index,name,[],[])
+                    return actual
+            if name in ["None","True","False"] and name not in env:
+                self.kernel.requests = false
+                actual = self.kernel.expression(value,expected)
+                self.kernel.requests = true
+                return actual
+            hint = self.suggestion(name,false)
+            if name in ["null","nil","undefined","none","NULL"]:
+                hint = "; wood spells this None"
+            elif hint == "" and name in standard_modules():
+                hint = "; add 'import std."+name+" as "+name+"'"
+            self.fail("E3007","undefined variable '"+name+"'"+hint,node.token)
+        if node.kind == "Member":
+            if name in env:
+                index = env[name]-1
+                declaration = self.resolver.declarations[index]
+                stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                if stmt.kind == "Function":
+                    index = self.function_target(index,node.token,expected)
+                    actual = self.function_value(index,node.token)
+                    self.facts[self.module].calls[value] = ir.Call("function",index,name,[],[])
+                    return actual
+            self.member_exists(self.expression(node.children[0]),node.token)
+            self.kernel.requests = false
+            actual = self.kernel.expression(value,expected)
+            self.kernel.requests = true
+            return actual
+        if node.kind == "Call":
+            name = node.token.text
+            first = split(name,".")[0]
+            local = self.lookup(first)
+            if local is not None and ("." in name or self.kernel.pool.types[unwrap(local).type].kind in ["Function","Callable","Closure"] or name not in self.known):
+                if len(split(name,".")) >= 256:
+                    self.fail("E2002","expression nesting exceeds 256 levels",node.token)
+                # Release only the checkpoint alias during non-reentrant construction.
+                # Republish before invoke() can analyze defaults, generics or closures.
+                target = len(self.kernel.tree.expressions)
+                self.resolver.compilation.modules[self.module].tree.expressions = []
+                try:
+                    # Turn a parser's dotted call spelling into ordinary typed paths.
+                    token = node.token
+                    token.text = first
+                    append(self.kernel.tree.expressions,ast.Expr("Name",token,[],[],[],[],[],-1,1))
+                    append(self.kernel.types,0)
+                    append(self.kernel.symbols,0)
+                    for member in split(name,".")[1:]:
+                        token.text = member
+                        append(self.kernel.tree.expressions,ast.Expr("Member",token,[target],[],[],[],[],-1,1))
+                        append(self.kernel.types,0)
+                        append(self.kernel.symbols,0)
+                        target = len(self.kernel.tree.expressions)-1
+                except err:
+                    self.resolver.compilation.modules[self.module].tree.expressions = self.kernel.tree.expressions
+                    raise err
+                self.resolver.compilation.modules[self.module].tree.expressions = self.kernel.tree.expressions
+                return self.invoke(value,target,node.children,node.keywords,expected)
+            if name in env:
+                return self.declared(value,env[name]-1,node.children,node.keywords,expected)
+            return self.builtin(value,name,node.children,node.keywords,expected)
+        if node.kind == "Invoke":
+            return self.invoke(value,node.children[0],node.children[1:],node.keywords,expected)
+        self.unsupported(node.kind,node.token)
+        return 0
+
+    fn unknown_function(self, name: str) -> str:
+        suggestion = self.suggestion(name,true)
+        pieces = split(name,".")
+        env = self.resolver.bindings.environments[self.module]
+        if suggestion == "" and len(pieces) > 1 and pieces[0] in env.namespaces:
+            return "unknown function '"+name+"': module '"+join(pieces[:-1],".")+"' does not export it"
+        if suggestion == "" and len(pieces) == 2 and pieces[0] in standard_modules():
+            return "unknown function '"+name+"'; add 'import std."+pieces[0]+" as "+pieces[0]+"'"
+        familiar: dict[str,str] = {"input":"read_line()","println":"print","printf":"print","puts":"print","echo":"print","length":"len","size":"len","strlen":"len","to_string":"str","toString":"str"}
+        if suggestion == "" and name in familiar:
+            return "unknown function '"+name+"'; wood's name for this is "+familiar[name]
+        return "unknown function '"+name+"'"+suggestion
+
+    fn member_exists(mut self, value: int, token: lx.Token):
+        # The checker knows fields. Only this level also knows methods, so it words the error.
+        node = self.kernel.pool.types[value]
+        if node.kind != "Record":
+            return
+        name = token.text
+        if str(node.declaration)+"."+name in self.methods:
+            self.fail("E3016","method '"+name+"' must be called, as "+name+"(...)",token)
+        names: list[str] = []
+        found = self.kernel.declaration_of(node.declaration)
+        if found >= 0:
+            for parameter in self.kernel.declarations[found].parameters:
+                if parameter.name == name:
+                    return
+                append(names,parameter.name)
+        # Declaration order, so the message is stable and matches the reference compiler.
+        if found >= 0:
+            declared = self.kernel.declarations[found]
+            for item in self.resolver.compilation.modules[declared.module].tree.statements[declared.statement].body:
+                member = self.resolver.compilation.modules[declared.module].tree.statements[item]
+                if member.kind == "Function" and not starts_with(member.name,"_"):
+                    append(names,member.name+"()")
+        self.fail("E3016",self.kernel.member_problem(value,name,names),token)
+
+    fn invoke(mut self, value: int, target: int, children: list[int], keywords: list[str], expected: int = 0) -> int:
+        node = self.kernel.tree.expressions[target]
+        if node.kind == "TypeApply":
+            qualified = self.qualified(node.children[0])
+            env = self.resolver.bindings.environments[self.module].names
+            if qualified in env:
+                declaration = self.resolver.declarations[env[qualified]-1]
+                stmt = self.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+                if stmt.kind == "Record":
+                    return self.declared(value,env[qualified]-1,children,keywords,expected,node.type_arguments)
+            if node.children[1] < 0:
+                self.fail("E3024","explicit type applications require a record constructor",self.kernel.tree.expressions[value].token)
+            self.kernel.tree.expressions[target].kind = "Index"
+            self.kernel.tree.expressions[target].type_arguments = []
+            node = self.kernel.tree.expressions[target]
+        qualified = self.qualified(target)
+        env = self.resolver.bindings.environments[self.module].names
+        if qualified in env:
+            return self.declared(value,env[qualified]-1,children,keywords,expected)
+        if node.kind == "Member":
+            base = self.expression(node.children[0])
+            record_type = self.kernel.pool.types[base]
+            if record_type.kind == "Record":
+                key = str(record_type.declaration)+"."+node.token.text
+                if key in self.methods:
+                    return self.declared(value,self.methods[key],[node.children[0]]+children,[""]+keywords,expected)
+        return self.indirect(value,target,children,keywords)
+
+    fn expression(mut self, value: int, expected: int = 0) -> int:
+        while true:
+            try:
+                return self.kernel.expression(value,expected)
+            except err:
+                if self.kernel.requested < 0:
+                    raise err
+                requested = self.kernel.requested
+                hint = self.kernel.requested_expected
+                self.kernel.requested = -1
+                self.kernel.depth = 0
+                actual = self.request(requested,hint)
+                self.kernel.types[requested] = actual
+                self.kernel.depth = 0
+        return 0
+
+    fn block(mut self, statements: list[int], nested: bool = true) -> int:
+        if nested:
+            append(self.scopes,{})
+        exits = 1
+        for value in statements:
+            stmt = self.kernel.tree.statements[value]
+            if stmt.kind in ["Function","Record","Import"]:
+                continue
+            if (exits & 1) == 0:
+                if not self.tolerant:
+                    self.fail("E3008","unreachable statement",stmt.token)
+                append(self.collected,src.located("E3008","unreachable statement",self.kernel.file,self.module,stmt.token))
+                exits = exits | 1
+            exits = (exits & ~1) | (self.guarded(value) if self.tolerant else self.statement(value))
+        if nested:
+            pop(self.scopes)
+        return exits
+
+    fn statement(mut self, value: int) -> int:
+        stmt = self.kernel.tree.statements[value]
+        if stmt.kind == "Assign" and stmt.expression_body:
+            return self.narrow(value,stmt)
+        if stmt.kind == "Assign":
+            self.end_narrowing(stmt.name)
+            self.valid_variable(stmt.name,stmt.token)
+            annotation = self.annotation(stmt.annotation,stmt.token)
+            binding = self.lookup(stmt.name)
+            hint = unwrap(binding).type if binding is not None else annotation
+            actual = self.expression(stmt.expressions[0],hint)
+            if actual == 1:
+                self.fail("E3002","cannot assign a void expression",stmt.token)
+            self.unpackable(actual,stmt.relative,stmt.token)
+            if binding is not None:
+                if self.immutable_capture(unwrap(binding).symbol):
+                    self.fail("E3028","capture is an immutable snapshot; use an explicit mut capture",stmt.token)
+                if unwrap(binding).symbol == self.readonly:
+                    self.fail("E3027","self is read-only; declare mut self to mutate the receiver",stmt.token)
+                if annotation != 0:
+                    self.fail("E3009","type annotations are only allowed on a variable's first assignment",stmt.token)
+                annotation = unwrap(binding).type
+                self.facts[self.module].statements[value] = unwrap(binding).symbol
+            else:
+                if annotation == 0:
+                    annotation = actual
+                symbol = self.fresh()
+                self.facts[self.module].statements[value] = symbol
+                self.facts[self.module].declares[value] = true
+                self.scopes[-1][stmt.name] = Binding(annotation,symbol)
+            self.kernel.require(actual,annotation,self.kernel.tree.expressions[stmt.expressions[0]].token)
+            self.facts[self.module].annotations[value] = annotation
+            return 1
+        if stmt.kind in ["IndexAssign","AugAssign"]:
+            target = self.expression(stmt.expressions[0])
+            self.lvalue(stmt.expressions[0])
+            actual = self.expression(stmt.expressions[1],target)
+            if stmt.kind == "AugAssign":
+                actual = self.kernel.operator_type(stmt.name,target,actual,stmt.token)
+            self.kernel.require(actual,target,self.kernel.tree.expressions[stmt.expressions[1]].token)
+            self.facts[self.module].annotations[value] = target
+            return 1
+        if stmt.kind == "Expression":
+            self.expression(stmt.expressions[0])
+            expr = self.kernel.tree.expressions[stmt.expressions[0]]
+            return 16 if expr.kind == "Call" and expr.token.text == "exit" else 1
+        if stmt.kind == "Return":
+            if self.function < 0:
+                self.fail("E3011","return is only allowed inside a function",stmt.token)
+            if self.finally_loops >= 0:
+                self.fail("E3011","return cannot leave a finally block",stmt.token)
+            expected = self.resolver.declarations[self.function].result
+            actual = 1
+            token = stmt.token
+            if len(stmt.expressions) > 0:
+                actual = self.expression(stmt.expressions[0],expected)
+                token = self.kernel.tree.expressions[stmt.expressions[0]].token
+            if expected != 0:
+                self.kernel.require(actual,expected,token)
+            append(self.sites,returns.Site(actual,stmt.token))
+            self.facts[self.module].annotations[value] = actual if expected == 0 else expected
+            return 2
+        if stmt.kind == "Raise":
+            if len(stmt.expressions) == 0 or (stmt.relative > 0 and len(self.handlers) == 0):
+                self.fail("E3017","raise without a value re-raises the error being handled, so it belongs in an except block",stmt.token)
+            if stmt.relative > 0:
+                self.kernel.symbols[stmt.expressions[0]] = self.handlers[-1]
+                self.kernel.types[stmt.expressions[0]] = self.kernel.pool.intern("Error")
+                return 16
+            actual = self.expression(stmt.expressions[0])
+            if self.kernel.pool.types[actual].kind not in ["Str","Error"]:
+                self.fail("E3017","raise requires a string or error value",stmt.token)
+            return 16
+        if stmt.kind == "If":
+            actual = self.expression(stmt.expressions[0])
+            self.kernel.require(actual,self.kernel.pool.intern("Bool"),self.kernel.tree.expressions[stmt.expressions[0]].token)
+            body = self.block(stmt.body)
+            result = body | (self.block(stmt.otherwise) if len(stmt.otherwise) > 0 else 1)
+            self.if_exits = len(stmt.otherwise) == 0 and (body & 1) == 0
+            return result
+        if stmt.kind in ["For","While"]:
+            # A loop that assigns a narrowed name may run its body again after the assignment.
+            for name in self.assigned_names(stmt.body):
+                self.end_narrowing(name)
+            actual = self.expression(stmt.expressions[0])
+            if stmt.kind == "While":
+                self.kernel.require(actual,self.kernel.pool.intern("Bool"),self.kernel.tree.expressions[stmt.expressions[0]].token)
+                append(self.scopes,{})
+            else:
+                self.valid_variable(stmt.name,stmt.token)
+                element = self.iterable(stmt.expressions[0])
+                self.unpackable(element,stmt.relative,stmt.token)
+                symbol = self.fresh()
+                self.facts[self.module].statements[value] = symbol
+                self.facts[self.module].annotations[value] = element
+                append(self.scopes,{stmt.name:Binding(element,symbol)})
+            self.loops += 1
+            body = self.block(stmt.body,false)
+            self.loops -= 1
+            pop(self.scopes)
+            return 1 | (body & 2)
+        if stmt.kind in ["Break","Continue"]:
+            if self.loops == 0:
+                self.fail("E3012","break and continue require an enclosing loop",stmt.token)
+            if self.loops == self.finally_loops:
+                self.fail("E3012","break and continue cannot leave a finally block",stmt.token)
+            return 4 if stmt.kind == "Break" else 8
+        if stmt.kind == "Try":
+            body = self.block(stmt.body)
+            self.valid_variable(stmt.name,stmt.token)
+            symbol = self.fresh()
+            self.facts[self.module].statements[value] = symbol
+            append(self.scopes,{stmt.name:Binding(self.kernel.pool.intern("Error"),symbol)})
+            append(self.handlers,symbol)
+            handler = self.block(stmt.otherwise,false)
+            pop(self.handlers)
+            pop(self.scopes)
+            return (body & ~16) | handler
+        if stmt.kind == "Finally":
+            body = self.block(stmt.body)
+            outer = self.finally_loops
+            self.finally_loops = self.loops
+            cleanup = self.block(stmt.otherwise)
+            self.finally_loops = outer
+            return body | (cleanup & ~1) if (cleanup & 1) != 0 else cleanup
+        if stmt.kind == "With":
+            resource = self.expression(stmt.expressions[0])
+            if self.kernel.pool.types[resource].kind not in ["Stream","Database","Statement","Transaction","TlsContext","PythonObject","Task"]:
+                self.fail("E3002","with requires a native resource",stmt.token)
+            self.valid_variable(stmt.name,stmt.token)
+            symbol = self.fresh()
+            self.facts[self.module].statements[value] = symbol
+            append(self.scopes,{stmt.name:Binding(resource,symbol)})
+            body = self.block(stmt.body,false)
+            pop(self.scopes)
+            return body
+        return 1
+
+    fn check_function(mut self, index: int):
+        if index in self.states:
+            return
+        self.prepare_function(index)
+        declaration = self.resolver.declarations[index]
+        self.enter(declaration.module,index)
+        stmt = self.kernel.tree.statements[declaration.statement]
+        if declaration.result == 0:
+            active = 0
+            for function in self.states:
+                if self.states[function] == 1 and self.resolver.declarations[function].result == 0:
+                    active += 1
+            if active >= 64:
+                self.fail("E2002","return inference exceeds 64 active dependencies",stmt.token)
+        self.states[index] = 1
+        parameters: list[int] = []
+        for position in range(len(declaration.parameters)):
+            parameter = declaration.parameters[position]
+            token = stmt.parameters[position].token
+            if parameter.default_value >= 0:
+                actual = self.expression(parameter.default_value,parameter.type)
+                self.kernel.require(actual,parameter.type,self.kernel.tree.expressions[parameter.default_value].token)
+        for position in range(len(declaration.parameters)):
+            parameter = declaration.parameters[position]
+            token = stmt.parameters[position].token
+            self.valid_variable(parameter.name,token)
+            symbol = self.fresh()
+            append(parameters,symbol)
+            self.scopes[0][parameter.name] = Binding(parameter.type,symbol)
+        self.facts[self.module].parameters[declaration.statement] = parameters
+        if stmt.method and not stmt.mutating:
+            self.readonly = parameters[0]
+        if stmt.external:
+            self.states[index] = 2
+            self.flush()
+            return
+        self.finish_function(index)
+
+    fn finish_function(mut self, index: int):
+        declaration = self.resolver.declarations[index]
+        stmt = self.kernel.tree.statements[declaration.statement]
+        failures = len(self.collected)
+        exits = self.block(stmt.body,false)
+        result = declaration.result
+        if self.tolerant and len(self.collected) > failures:
+            # Statements were skipped, so what this function returns is not known.
+            self.states[index] = 2
+            self.flush()
+            return
+        if result == 0:
+            inferred = returns.infer(self.kernel.pool,self.sites,stmt.token,self.kernel.file,self.module)
+            if inferred.diagnostic.code != "":
+                self.problem = inferred.diagnostic
+                raise "bootstrap return rejection"
+            self.kernel.pool = inferred.pool
+            result = inferred.type
+            self.resolver.declarations[index].result = result
+            for position in collect_returns(self.kernel.tree,stmt.body):
+                self.facts[self.module].annotations[position] = result
+        if result != 1 and (exits & 1) != 0:
+            self.fail("E3013","function '"+stmt.name+"' does not return a value on every path",stmt.token)
+        self.states[index] = 2
+        self.flush()
+
+fn collect_returns(tree: ast.Tree, body: list[int]) -> list[int]:
+    pending = body
+    result: list[int] = []
+    while len(pending) > 0:
+        value = pop(pending)
+        stmt = tree.statements[value]
+        if stmt.kind == "Return":
+            append(result,value)
+        if stmt.kind not in ["Function","Record"]:
+            pending = pending+stmt.body+stmt.otherwise
+    return result
+
+fn standard_modules() -> list[str]:
+    return ["binary","collections","csv","env","fs","functional","geometry","http","https","io","iter","linalg","math","net","num","path","python","random","sqlite","stats","task","time","tls","utf8"]
+
+record EditorAnalysis:
+    result: ir.Result
+    diagnostics: list[src.Diagnostic]
+    methods: dict[str,int]
+    record_parameters: dict[int,list[str]]
+
+fn analyze(input: frontend.Result) -> ir.Result:
+    return run(input,-1,[]).result
+
+# The language server's entry: all problems in one module, without checking the others' bodies.
+fn analyze_module(input: frontend.Result, focus: int, poisoned: list[str]) -> EditorAnalysis:
+    return run(input,focus,poisoned)
+
+fn run(input: frontend.Result, focus: int, poisoned: list[str]) -> EditorAnalysis:
+    if input.diagnostic.code != "":
+        return EditorAnalysis(ir.rejected(input.diagnostic),[],{},{})
+    signed = sig.resolve(input.compilation,input.bindings)
+    if signed.diagnostic.code != "":
+        return EditorAnalysis(ir.rejected(signed.diagnostic),[],{},{})
+    facts: list[ir.Facts] = []
+    indices: list[dict[int,int]] = []
+    symbols: dict[int,int] = {}
+    for unit in signed.compilation.modules:
+        types: list[int] = []
+        expr_symbols: list[int] = []
+        annotations: list[int] = []
+        statements: list[int] = []
+        declares: list[bool] = []
+        for expression in unit.tree.expressions:
+            append(types,0)
+            append(expr_symbols,0)
+        for statement in unit.tree.statements:
+            append(annotations,0)
+            append(statements,0)
+            append(declares,false)
+        append(facts,ir.Facts(types,expr_symbols,annotations,statements,declares,{},{},{},{}))
+        append(indices,{})
+    for index in range(len(signed.declarations)):
+        item = signed.declarations[index]
+        indices[item.module][item.statement] = index
+        if item.symbol > 0:
+            symbols[item.symbol] = index
+    resolver = sig.Resolver(signed.compilation,input.bindings,signed.pool,signed.declarations,indices,symbols,None,0,src.origin())
+    kernel = ex.checker(signed.compilation.modules[0].tree,signed.pool)
+    known: dict[str,bool] = {}
+    for name in native.known():
+        known[name] = true
+    analyzer = Analyzer(resolver,facts,{}, {},input.bindings.next_symbol,kernel,0,-1,[{}],[],0,0,[],native.with_python(),None,{},{},{},{},{},0,0,known,{},{},{},-1,0,0,focus >= 0,[],{},{},false,[],-1)
+    for name in poisoned:
+        analyzer.poisoned[name] = true
+    try:
+        for index in range(len(signed.declarations)):
+            item = signed.declarations[index]
+            analyzer.enter(item.module,-1)
+            stmt = signed.compilation.modules[item.module].tree.statements[item.statement]
+            analyzer.supported_type(item.result,stmt.token,true)
+            for parameter in item.parameters:
+                analyzer.supported_type(parameter.type,stmt.token,true)
+            if stmt.kind == "Record":
+                analyzer.record_parameters[item.symbol] = stmt.type_parameters
+                if len(stmt.type_parameters) == 0:
+                    analyzer.record_types[item.symbol] = analyzer.kernel.pool.intern("Record",stmt.name,declaration=item.symbol)
+            if item.parent >= 0:
+                symbol = analyzer.fresh()
+                analyzer.resolver.declarations[index].symbol = symbol
+                analyzer.resolver.symbols[symbol] = index
+                parent = signed.declarations[item.parent]
+                analyzer.methods[str(parent.symbol)+"."+stmt.name] = index
+            analyzer.flush()
+        for index in range(len(signed.declarations)):
+            item = signed.declarations[index]
+            stmt = signed.compilation.modules[item.module].tree.statements[item.statement]
+            if stmt.kind == "Record" and len(stmt.type_parameters) == 0:
+                analyzer.enter(item.module,-1)
+                for position in range(len(item.parameters)):
+                    token = stmt.parameters[position].token
+                    actual = analyzer.bound_type(item.parameters[position].type,{},item.module,token)
+                    analyzer.supported_type(actual,token)
+                    analyzer.resolver.declarations[index].parameters[position].type = actual
+                analyzer.flush()
+        for module in range(len(signed.compilation.modules)):
+            if focus >= 0 and module != focus:
+                continue
+            for index in range(len(signed.declarations)):
+                item = signed.declarations[index]
+                stmt = signed.compilation.modules[item.module].tree.statements[item.statement]
+                if item.module == module and item.parent < 0 and stmt.kind == "Function" and len(stmt.type_parameters) == 0:
+                    if focus >= 0:
+                        analyzer.check_guarded(index)
+                    else:
+                        analyzer.check_function(index)
+            analyzer.enter(module,-1)
+            analyzer.block(analyzer.kernel.tree.roots,false)
+            analyzer.flush()
+        index = 0
+        while index < len(analyzer.resolver.declarations):
+            declaration = analyzer.resolver.declarations[index]
+            stmt = analyzer.resolver.compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if declaration.parent >= 0 and len(stmt.type_parameters) == 0 and (focus < 0 or declaration.module == focus):
+                parent = analyzer.resolver.declarations[declaration.parent]
+                record = analyzer.resolver.compilation.modules[parent.module].tree.statements[parent.statement]
+                if len(record.type_parameters) > 0 or (parent.symbol in analyzer.origins and index not in analyzer.prepared):
+                    index += 1
+                    continue
+                if focus >= 0:
+                    analyzer.check_guarded(index)
+                    index += 1
+                    continue
+                try:
+                    analyzer.check_function(index)
+                except err:
+                    name = analyzer.resolver.pool.display(analyzer.record_types[parent.symbol])
+                    suffix = "\n  while checking method "+name+"."+stmt.name
+                    if analyzer.problem is not None:
+                        problem = unwrap(analyzer.problem)
+                        problem.message += suffix
+                        analyzer.problem = problem
+                    elif analyzer.kernel.problem is not None:
+                        problem = unwrap(analyzer.kernel.problem)
+                        problem.message += suffix
+                        analyzer.kernel.problem = problem
+                    raise err
+            index += 1
+        output = sig.Result(analyzer.resolver.compilation,analyzer.resolver.pool,analyzer.resolver.declarations,src.success())
+        problem = declarations.check(output)
+        if problem.code != "":
+            if focus >= 0:
+                append(analyzer.collected,problem)
+            else:
+                return EditorAnalysis(ir.rejected(problem),[],{},{})
+        return EditorAnalysis(ir.Result(output,analyzer.facts,src.success(),analyzer.record_types,analyzer.closures),analyzer.collected,analyzer.methods,analyzer.record_parameters)
+    except err:
+        if analyzer.problem is not None:
+            return EditorAnalysis(ir.rejected(unwrap(analyzer.problem)),analyzer.collected,{},{})
+        if analyzer.kernel.problem is not None:
+            return EditorAnalysis(ir.rejected(unwrap(analyzer.kernel.problem)),analyzer.collected,{},{})
+        if analyzer.resolver.problem is not None:
+            return EditorAnalysis(ir.rejected(unwrap(analyzer.resolver.problem)),analyzer.collected,{},{})
+        if err.code == "R4010" and err.message == "bootstrap semantic type budget exceeded":
+            return EditorAnalysis(ir.rejected(src.located("B3202",err.message,analyzer.kernel.file,analyzer.module,analyzer.kernel.current)),analyzer.collected,{},{})
+        raise err
+
+fn load(input: str, standards: dict[str,str]) -> ir.Result:
+    return analyze(frontend.load(input,standards))

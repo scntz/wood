@@ -1,0 +1,524 @@
+# Optional python@ provider. Wood itself never needs Python; this runs only for projects
+# that ask for it. A checksum-pinned CPython goes in Wood's cache, each project gets its
+# own environment, and pip from that runtime resolves binary wheels only, so no package
+# build backend or install script ever runs. The user's system Python is never touched.
+import driver_host as host
+import package_manager as manager
+import project as project
+import sources as src
+import sha256 as sha
+import std.path as path
+import std.fs as fs
+
+fn cpython_version() -> str:
+    return "3.14.10"
+
+fn cpython_digest(platform: str) -> str:
+    if platform == "windows-x86_64":
+        return "c1876a9795d3a94ee49a1499a69cd91e26ca3e2829593f93fa6e4db90d05402b"
+    return "4d3c16c59ed0802a3d1d34d8bce504b15ceeaff39d62dadecc6a9fa803412aed"
+
+fn cpython_url(platform: str) -> str:
+    triple = "x86_64-pc-windows-msvc" if platform == "windows-x86_64" else "x86_64-unknown-linux-gnu"
+    return "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.14.10%2B20261026-"+triple+"-install_only_stripped.tar.gz"
+
+fn host_platform() -> str:
+    return "windows-x86_64" if json_bool(project.object(host.call("assets"))["windows"]) else "linux-x86_64"
+
+fn interpreter(prefix: str, platform: str) -> str:
+    return path.combine(prefix, "python.exe" if platform == "windows-x86_64" else "bin/python3")
+
+fn environment_interpreter(environment: str, platform: str) -> str:
+    return path.combine(environment, "Scripts/python.exe" if platform == "windows-x86_64" else "bin/python3")
+
+fn site_packages(environment: str, platform: str) -> str:
+    return path.combine(environment, "Lib/site-packages" if platform == "windows-x86_64" else "lib/python3.14/site-packages")
+
+fn environment_root(root: str) -> str:
+    return path.combine(path.combine(root, ".wood"), "python")
+
+fn normalize_name(name: str) -> str:
+    # PEP 503: lower case, with runs of - _ . collapsed to one dash.
+    pieces: list[str] = []
+    dash = false
+    for byte in manager.lower(name):
+        if byte in ["-", "_", "."]:
+            dash = true
+        else:
+            if dash:
+                append(pieces, "-")
+            append(pieces, byte)
+            dash = false
+    return join(pieces, "")
+
+fn valid_name(name: str) -> bool:
+    if name == "" or len(name) > 100 or name[0] in ["-", "_", "."] or name[len(name)-1] in ["-", "_", "."]:
+        return false
+    for byte in name:
+        if not (("a" <= byte and byte <= "z") or ("A" <= byte and byte <= "Z") or ("0" <= byte and byte <= "9") or byte in ["-", "_", "."]):
+            return false
+    return true
+
+fn valid_version(version: str) -> bool:
+    if version == "" or len(version) > 64 or not ("0" <= version[0] and version[0] <= "9"):
+        return false
+    for byte in version:
+        if not (("a" <= byte and byte <= "z") or ("A" <= byte and byte <= "Z") or ("0" <= byte and byte <= "9") or byte in [".", "!", "+", "-", "_"]):
+            return false
+    return true
+
+fn is_python(input: str) -> bool:
+    return starts_with(input, "python@")
+
+record Requested:
+    name: str
+    version: str
+
+fn parse_request(input: str) -> Requested:
+    pieces = split(input[7:], "#")
+    if len(pieces) > 2 or not valid_name(pieces[0]):
+        raise manager.problem("D5101", "invalid Python package '"+input+"'; expected python@name or python@name#version")
+    version = pieces[1] if len(pieces) == 2 else ""
+    if version != "" and not valid_version(version):
+        raise manager.problem("D5101", "invalid Python version in '"+input+"'; use an exact version")
+    return Requested(normalize_name(pieces[0]), version)
+
+record Wheel:
+    name: str
+    version: str
+    url: str
+    sha256: str
+    license: str
+    direct: bool
+
+record Session:
+    logs: str
+    cache: str
+    offline: bool
+    platform: str
+    counter: int
+
+    fn run(mut self, arguments: list[str], timeout: int = 600000) -> tuple[int,str]:
+        self.counter += 1
+        file = path.combine(self.logs, "python-"+str(self.counter)+".log")
+        status = host.process(arguments, file, timeout, 16777216, false)
+        return (status, src.read(file, 16777216) if path_exists(file) else "")
+
+    fn tar_program(self) -> str:
+        # On Windows only the system's own tar, never one that happens to be first on PATH.
+        if self.platform == "windows-x86_64":
+            return path.combine(host.string("environment", {"name":json("SystemRoot")}), "System32/tar.exe")
+        return "tar"
+
+    fn file_digest(mut self, file: str) -> str:
+        # Runtimes exceed the in-process hash's limit, so use the system's own tool.
+        arguments = [path.combine(host.string("environment", {"name":json("SystemRoot")}), "System32/certutil.exe"),"-hashfile",file,"SHA256"] if self.platform == "windows-x86_64" else ["sha256sum",file]
+        result = self.run(arguments)
+        if result[0] == 0:
+            for raw in split(replace(result[1], "\r", ""), "\n"):
+                piece = split(strip(raw), " ")[0]
+                if manager.digest_id(piece):
+                    return piece
+        raise manager.problem("D5105", "cannot compute the SHA-256 of "+file)
+
+    fn fetch(mut self, url: str, digest: str, target: str, label: str):
+        # -q ignores curlrc so configuration cannot add credentials or redirect output.
+        fs.make_dirs(path.parent(target))
+        stage = host.temporary(path.parent(target))
+        file = path.combine(stage, "download")
+        result = (2, "")
+        try:
+            result = self.run(["curl","-q","--fail","--silent","--show-error","--location","--proto","=https","--proto-redir","=https","--max-time","1800","--output",file,url], 1860000)
+        except err:
+            raise manager.problem("D5102", "downloading "+label+" requires the curl executable on PATH")
+        if result[0] != 0:
+            raise manager.problem("D5102", "cannot download "+label+": "+manager.scrub(result[1]))
+        actual = self.file_digest(file)
+        if actual != digest:
+            raise manager.problem("D5105", label+" SHA-256 "+actual+" differs from the pinned "+digest)
+        host.publish(file, target)
+        host.release(stage)
+
+    fn extract_runtime(mut self, target: str):
+        # target/python receives the runtime. Paths are checked before anything is written.
+        archive = path.combine(path.combine(self.cache, "python"), cpython_digest(self.platform)+".tar.gz")
+        if fs.kind(archive) != "file" or self.file_digest(archive) != cpython_digest(self.platform):
+            if self.offline:
+                raise manager.problem("D5108", "CPython "+cpython_version()+" is not in the offline cache; run once online")
+            self.fetch(cpython_url(self.platform), cpython_digest(self.platform), archive, "CPython "+cpython_version())
+        listing = self.run([self.tar_program(), "-tzf", archive])
+        if listing[0] != 0:
+            raise manager.problem("D5105", "cannot read the CPython archive: "+manager.scrub(listing[1]))
+        for raw in split(listing[1], "\n"):
+            entry = strip(raw)
+            if entry == "":
+                continue
+            if entry[0] == "/" or "\\" in entry or ":" in entry or ".." in split(entry, "/") or not (entry == "python/" or starts_with(entry, "python/")):
+                raise manager.problem("D5107", "unsafe path in the CPython archive: "+manager.scrub(entry))
+        fs.make_dirs(target)
+        arguments = [self.tar_program(), "-xzf", archive, "-C", target]
+        if self.platform != "windows-x86_64":
+            append(arguments, "--no-same-owner")
+        result = self.run(arguments, 600000)
+        if result[0] != 0:
+            raise manager.problem("D5105", "cannot extract the CPython archive: "+manager.scrub(result[1]))
+
+    fn ensure_runtime(mut self) -> str:
+        directory = path.combine(path.combine(self.cache, "python"), cpython_version()+"-"+cpython_digest(self.platform)[:16])
+        prefix = path.combine(directory, "python")
+        if project.kind(interpreter(prefix, self.platform)) == "file":
+            return prefix
+        fs.make_dirs(path.parent(directory))
+        stage = host.temporary(path.parent(directory))
+        self.extract_runtime(stage)
+        if project.kind(interpreter(path.combine(stage, "python"), self.platform)) != "file":
+            raise manager.problem("D5105", "the CPython archive has no interpreter")
+        fs.make_dirs(directory)
+        host.call("rename", {"from":json(path.combine(stage, "python")), "to":json(prefix)})
+        host.release(stage)
+        return prefix
+
+    fn pip_failure(self, output: str, label: str) -> str:
+        text = manager.lower(output)
+        if "do not match the hashes" in text or "hash mismatch" in text:
+            return manager.problem("D5105", label+": a downloaded wheel does not match its locked hash. The package was changed or the cache is corrupted")
+        if "resolutionimpossible" in text or "conflicting dependencies" in text or "conflict is caused by" in text:
+            return manager.problem("D5106", label+": these Python packages have conflicting requirements: "+manager.scrub(output))
+        # pip also says "no matching distribution" when it never reached the index.
+        for sign in ["connection broken by","failed to establish","max retries","proxyerror","cannot connect to proxy","timed out","name resolution","getaddrinfo","certificate verify failed"]:
+            if sign in text:
+                return manager.problem("D5102", label+": network failure reaching PyPI. Check your connection and proxy, and that any per-application firewall allows wood's Python under the wood cache directory: "+manager.scrub(output))
+        if "no matching distribution" in text or "could not find a version" in text:
+            if self.offline:
+                return manager.problem("D5108", label+" is not in the offline cache; run once online")
+            return manager.problem("D5103", label+": no compatible binary wheel for CPython 3.14 on "+self.platform+". Source builds are never run, so a package without a wheel is unsupported. pip said: "+manager.scrub(output))
+        return manager.problem("D5102", label+": pip failed: "+manager.scrub(output))
+
+    fn pip_base(self, runtime: str) -> list[str]:
+        return [interpreter(runtime, self.platform),"-I","-m","pip","--isolated","--disable-pip-version-check","--no-input","--no-color"]
+
+    fn resolve(mut self, runtime: str, requirements: list[str]) -> list[Wheel]:
+        if self.offline:
+            raise manager.problem("D5108", "resolving new Python packages needs the network; wood install --offline restores what wood.lock already records")
+        self.counter += 1
+        report = path.combine(self.logs, "resolve-"+str(self.counter)+".json")
+        result = self.run(self.pip_base(runtime)+["install","--dry-run","--ignore-installed","--only-binary=:all:","--index-url","https://pypi.org/simple","--report",report,"--quiet"]+requirements)
+        if result[0] != 0:
+            raise self.pip_failure(result[1], join(requirements, ", "))
+        wheels: list[Wheel] = []
+        for value in json_list(project.member(project.object(json_parse(src.read(report, 16777216))), "install")):
+            row = project.object(value)
+            metadata = project.object(project.member(row, "metadata"))
+            download = project.object(project.member(row, "download_info"))
+            address = project.string(project.member(download, "url"))
+            # Packages may come only from PyPI's own file host; this blocks substitution.
+            if not starts_with(address, "https://files.pythonhosted.org/") or not ends_with(address, ".whl"):
+                raise manager.problem("D5107", "refusing a Python package not served as a wheel by PyPI: "+manager.scrub(address))
+            archive = project.object(project.member(download, "archive_info"))
+            hashes = project.object(project.member(archive, "hashes"))
+            if "sha256" not in hashes or not manager.digest_id(project.string(hashes["sha256"])):
+                raise manager.problem("D5105", "PyPI did not report a SHA-256 for "+manager.scrub(address))
+            licence = ""
+            if "license_expression" in metadata:
+                licence = project.string(metadata["license_expression"])
+            elif "license" in metadata:
+                licence = project.string(metadata["license"])[:60]
+            append(wheels, Wheel(normalize_name(project.string(project.member(metadata, "name"))), project.string(project.member(metadata, "version")), address, project.string(hashes["sha256"]), licence, json_bool(project.member(row, "requested"))))
+        return wheels
+
+    fn requirement_file(mut self, rows: list[json]) -> str:
+        pieces: list[str] = []
+        for value in rows:
+            row = project.object(value)
+            name = project.string(row["name"])
+            version = project.string(row["version"])
+            digest = project.string(row["sha256"])
+            # Locks can be edited by hand, so nothing from one reaches pip unchecked.
+            if not valid_name(name) or not valid_version(version) or not manager.digest_id(digest):
+                raise manager.problem("D5105", "wood.lock has an invalid Python entry for "+manager.scrub(name))
+            append(pieces, name+"=="+version+" --hash=sha256:"+digest+"\n")
+        self.counter += 1
+        file = path.combine(self.logs, "requirements-"+str(self.counter)+".txt")
+        write_text(file, join(pieces, ""))
+        return file
+
+    fn download_wheels(mut self, runtime: str, requirements: str) -> str:
+        wheels = path.combine(path.combine(self.cache, "python"), "wheels")
+        fs.make_dirs(wheels)
+        if not self.offline:
+            result = self.run(self.pip_base(runtime)+["download","--no-deps","--only-binary=:all:","--require-hashes","--index-url","https://pypi.org/simple","--quiet","-d",wheels,"-r",requirements])
+            if result[0] != 0:
+                raise self.pip_failure(result[1], "Python packages")
+        return wheels
+
+fn open_session(work: manager.Client) -> Session:
+    return Session(work.logs, work.cache, work.offline, host_platform(), 0)
+
+fn declared(manifest: dict[str,json]) -> dict[str,str]:
+    result: dict[str,str] = {}
+    if "python" in manifest:
+        items = project.object(manifest["python"])
+        for name in items:
+            result[normalize_name(name)] = project.string(items[name])
+    return result
+
+fn graph_requirements(file: str) -> dict[str,str]:
+    # The project's Python packages plus those declared by its wood dependencies.
+    result: dict[str,str] = {}
+    snapshot = project.snapshot(file, false)
+    if snapshot.configured.diagnostic.code != "":
+        raise manager.problem("D5104", snapshot.configured.diagnostic.message)
+    for root in snapshot.manifests:
+        items = declared(project.object(json_parse(snapshot.manifests[root])))
+        for name in items:
+            if name in result and result[name] != items[name]:
+                raise manager.problem("D5106", "version conflict for python@"+name+": "+result[name]+" and "+items[name])
+            result[name] = items[name]
+    return result
+
+fn lock_document(root: str) -> dict[str,json]:
+    file = path.combine(root, "wood.lock")
+    if fs.kind(file) != "file":
+        raise manager.problem("D5101", "wood.lock is missing")
+    return project.object(json_parse(src.read(file, 16777216)))
+
+fn wheel_rows(wheels: list[Wheel]) -> list[json]:
+    ordered: dict[str,json] = {}
+    for wheel in wheels:
+        row: dict[str,json] = {"name":json(wheel.name),"version":json(wheel.version),"url":json(wheel.url),"sha256":json(wheel.sha256),"license":json(wheel.license)}
+        ordered[wheel.name] = json(row)
+    return [ordered[name] for name in json_dict(json(ordered))]
+
+fn store_lock(root: str, requirements: dict[str,str], platform: str, rows: list[json], keep_others: bool):
+    document = lock_document(root)
+    section: dict[str,json] = {"runtime":json(cpython_version())}
+    platforms: dict[str,json] = {}
+    if keep_others and "python" in document:
+        previous = project.object(document["python"])
+        if "platforms" in previous:
+            platforms = project.object(previous["platforms"])
+    platforms[platform] = json(rows)
+    wanted: dict[str,json] = {}
+    for name in requirements:
+        wanted[name] = json(requirements[name])
+    section["requirements"] = json(wanted)
+    section["platforms"] = json(platforms)
+    document["python"] = json(section)
+    host.atomic(path.combine(root, "wood.lock"), json_dump(document)+"\n")
+
+fn sync_environment(mut_session: Session, runtime: str, root: str, rows: list[json]):
+    # A digest of the locked wheels decides whether the environment is already right.
+    session = mut_session
+    base = environment_root(root)
+    environment = path.combine(base, "env")
+    state_file = path.combine(base, "state.txt")
+    wanted = sha.digest(runtime+"\n"+json_dump(json(rows)))
+    if project.kind(environment_interpreter(environment, session.platform)) == "file" and fs.kind(state_file) == "file" and src.read(state_file, 256) == wanted:
+        return
+    requirements = session.requirement_file(rows)
+    wheels = session.download_wheels(runtime, requirements)
+    fs.make_dirs(base)
+    stage = host.temporary(base)
+    if path_exists(environment):
+        host.call("rename", {"from":json(environment), "to":json(path.combine(stage, "previous"))})
+    created = session.run([interpreter(runtime, session.platform),"-I","-m","venv","--without-pip",environment])
+    if created[0] != 0:
+        raise manager.problem("D5105", "cannot create the Python environment: "+manager.scrub(created[1]))
+    if len(rows) > 0:
+        installed = session.run(session.pip_base(runtime)+["install","--no-index","--find-links",wheels,"--no-deps","--only-binary=:all:","--require-hashes","--no-compile","--quiet","--upgrade","--target",site_packages(environment, session.platform),"-r",requirements])
+        if installed[0] != 0:
+            raise session.pip_failure(installed[1], "Python packages")
+    write_text(state_file, wanted)
+    host.release(stage)
+
+fn add_package(input: str, start: str, offline: bool, standards: dict[str,str], assets: str) -> int:
+    request = parse_request(input)
+    current = manager.open_project(start)
+    work = manager.open_client(offline, assets, false)
+    session = open_session(work)
+    runtime = session.ensure_runtime()
+    wanted = graph_requirements(current.file)
+    pins: list[str] = []
+    for name in wanted:
+        if name != request.name:
+            append(pins, name+"=="+wanted[name])
+    append(pins, request.name+("=="+request.version if request.version != "" else ""))
+    wheels = session.resolve(runtime, pins)
+    version = ""
+    for wheel in wheels:
+        if wheel.name == request.name:
+            version = wheel.version
+    if version == "":
+        raise manager.problem("D5103", "pip did not resolve python@"+request.name)
+    wanted[request.name] = version
+    rows = wheel_rows(wheels)
+    # Everything was resolved and hash-checked before the project is changed.
+    items: dict[str,json] = {}
+    if "python" in current.manifest:
+        items = project.object(current.manifest["python"])
+    items[request.name] = json(version)
+    current.manifest["python"] = json(items)
+    sync_environment(session, runtime, current.root, rows)
+    host.atomic(current.file, json_dump(current.manifest)+"\n")
+    manager.write_lock(current.file, current.rows, standards)
+    store_lock(current.root, wanted, session.platform, rows, false)
+    host.release(work.logs)
+    print("Added python@"+request.name+" "+version+" with CPython "+cpython_version())
+    print("  packages: "+join([project.string(project.object(row)["name"])+" "+project.string(project.object(row)["version"]) for row in rows], ", "))
+    print("  environment: .wood/python/env (add .wood/ to .gitignore)")
+    print("Updated wood.json and wood.lock.")
+    print("Import with: import python@"+request.name+" as "+split(request.name, "-")[0])
+    print("Binary wheels only; no package build or install scripts were run. Third-party code: review it before running.")
+    return 0
+
+fn remove_package(input: str, start: str, offline: bool, standards: dict[str,str], assets: str) -> int:
+    request = parse_request(input)
+    current = manager.open_project(start)
+    items: dict[str,json] = {}
+    if "python" in current.manifest:
+        items = project.object(current.manifest["python"])
+    found = ""
+    for name in items:
+        if normalize_name(name) == request.name:
+            found = name
+    if found == "":
+        raise manager.problem("D5101", "python@"+request.name+" is not a dependency of this project")
+    remove(items, found)
+    current.manifest["python"] = json(items)
+    work = manager.open_client(offline, assets, false)
+    session = open_session(work)
+    host.atomic(current.file, json_dump(current.manifest)+"\n")
+    manager.write_lock(current.file, current.rows, standards)
+    wanted = graph_requirements(current.file)
+    rows: list[json] = []
+    if len(wanted) > 0:
+        runtime = session.ensure_runtime()
+        rows = wheel_rows(session.resolve(runtime, [name+"=="+wanted[name] for name in wanted]))
+        sync_environment(session, runtime, current.root, rows)
+    store_lock(current.root, wanted, session.platform, rows, false)
+    host.release(work.logs)
+    print("Removed python@"+request.name+". Updated wood.json and wood.lock.")
+    return 0
+
+fn update_packages(only: str, start: str, offline: bool, standards: dict[str,str], assets: str) -> int:
+    current = manager.open_project(start)
+    if offline:
+        raise manager.problem("D5108", "updating Python packages needs the network")
+    wanted = graph_requirements(current.file)
+    own = declared(current.manifest)
+    if len(wanted) == 0:
+        return 0
+    work = manager.open_client(offline, assets, false)
+    session = open_session(work)
+    runtime = session.ensure_runtime()
+    requirements: list[str] = []
+    for name in wanted:
+        # Only the project's own requests move; versions set by wood dependencies stay.
+        if name in own and (only == "" or only == name):
+            append(requirements, name)
+        else:
+            append(requirements, name+"=="+wanted[name])
+    wheels = session.resolve(runtime, requirements)
+    items: dict[str,json] = {}
+    for wheel in wheels:
+        if wheel.name in own:
+            items[wheel.name] = json(wheel.version)
+            wanted[wheel.name] = wheel.version
+    rows = wheel_rows(wheels)
+    sync_environment(session, runtime, current.root, rows)
+    current.manifest["python"] = json(items)
+    host.atomic(current.file, json_dump(current.manifest)+"\n")
+    manager.write_lock(current.file, current.rows, standards)
+    store_lock(current.root, wanted, session.platform, rows, false)
+    host.release(work.logs)
+    for wheel in wheels:
+        if wheel.direct:
+            print("python@"+wheel.name+" "+wheel.version)
+    return 0
+
+fn locked_rows(root: str, platform: str) -> list[json] | None:
+    document = lock_document(root)
+    if "python" in document:
+        section = project.object(document["python"])
+        if "platforms" in section:
+            platforms = project.object(section["platforms"])
+            if platform in platforms:
+                return json_list(platforms[platform])
+    return None
+
+fn restore(start: str, offline: bool, locked: bool, assets: str) -> int:
+    current = manager.open_project(start)
+    wanted = graph_requirements(current.file)
+    if len(wanted) == 0:
+        return 0
+    work = manager.open_client(offline, assets, false)
+    session = open_session(work)
+    runtime = session.ensure_runtime()
+    locked_value = locked_rows(current.root, session.platform)
+    rows: list[json] = []
+    if locked_value is None:
+        # Wheels differ by platform. Exact versions stay; this adds the missing platform.
+        if locked:
+            raise manager.problem("D5105", "wood.lock has no Python wheels for "+session.platform+"; run 'wood install' without --locked once on this platform and review the change")
+        rows = wheel_rows(session.resolve(runtime, [name+"=="+wanted[name] for name in wanted]))
+        store_lock(current.root, wanted, session.platform, rows, true)
+        print("Recorded Python wheels for "+session.platform+" in wood.lock; review and commit the change.")
+    else:
+        rows = unwrap(locked_value)
+    sync_environment(session, runtime, current.root, rows)
+    host.release(work.logs)
+    print("Python environment ready: "+str(len(rows))+" package(s), CPython "+cpython_version()+".")
+    return 0
+
+fn license_path(platform: str) -> str:
+    # python-build-standalone keeps CPython's license in a different place on each platform.
+    return "wood-python/LICENSE.txt" if starts_with(platform,"windows") else "wood-python/lib/python3.14/LICENSE.txt"
+
+fn bundle(directory: str, root: str, assets: str):
+    # A self-contained directory: the application, a private CPython and its wheels.
+    # The runtime discovers wood-python next to the executable, before any system Python.
+    work = manager.open_client(false, assets, false)
+    session = open_session(work)
+    runtime = session.ensure_runtime()
+    locked_value = locked_rows(root, session.platform)
+    rows: list[json] = [] if locked_value is None else unwrap(locked_value)
+    if locked_value is None and "python" in project.object(json_parse(src.read(path.combine(root, "wood.json"), 1048576))):
+        raise manager.problem("D5105", "wood.lock has no Python wheels for "+session.platform+"; run 'wood install' first")
+    stage = host.temporary(directory)
+    session.extract_runtime(stage)
+    bundled = path.combine(directory, "wood-python")
+    host.call("rename", {"from":json(path.combine(stage, "python")), "to":json(bundled)})
+    host.release(stage)
+    python = interpreter(bundled, session.platform)
+    if len(rows) > 0:
+        requirements = session.requirement_file(rows)
+        wheels = session.download_wheels(runtime, requirements)
+        installed = session.run([python,"-I","-m","pip","--isolated","--disable-pip-version-check","--no-input","install","--no-index","--find-links",wheels,"--no-deps","--only-binary=:all:","--require-hashes","--no-compile","--quiet","-r",requirements])
+        if installed[0] != 0:
+            raise session.pip_failure(installed[1], "bundled Python packages")
+    session.run([python,"-I","-m","pip","uninstall","--yes","--quiet","pip"])
+    notice: list[str] = ["This application bundles CPython "+cpython_version()+" (Python Software Foundation License; see "+license_path(session.platform)+") from python-build-standalone,\nand these Python packages, whose license files are under their .dist-info directories:\n\n"]
+    for value in rows:
+        row = project.object(value)
+        append(notice, project.string(row["name"])+" "+project.string(row["version"])+"  "+project.string(row["license"])+"\n")
+    write_text(path.combine(directory, "PYTHON-NOTICES.txt"), join(notice, ""))
+    host.release(work.logs)
+    print("Bundled CPython "+cpython_version()+" and "+str(len(rows))+" Python package(s) in "+directory)
+
+fn report_lines(start: str) -> list[str]:
+    current = manager.open_project(start)
+    lines: list[str] = []
+    wanted = declared(current.manifest)
+    locked_value = locked_rows(current.root, host_platform()) if current.lock_text != "" else None
+    if len(wanted) == 0 and locked_value is None:
+        return lines
+    append(lines, "Python packages (CPython "+cpython_version()+", "+host_platform()+")")
+    if locked_value is None:
+        for name in wanted:
+            append(lines, "  python@"+name+"  "+wanted[name]+"  not installed on this platform; run 'wood install'")
+    else:
+        for value in unwrap(locked_value):
+            row = project.object(value)
+            name = project.string(row["name"])
+            append(lines, "  python@"+name+"  "+project.string(row["version"])+("  dependency of another package" if name not in wanted else "")+"  sha256:"+project.string(row["sha256"])[:12])
+    return lines

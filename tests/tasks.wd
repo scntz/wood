@@ -1,0 +1,89 @@
+import std.task as tasks
+import std.time as time
+import std.net as net
+import std.io as io
+import std.sqlite as sql
+
+fn square(value: json) -> json:
+    number = json_int(value)
+    return json(number * number)
+
+fn failed(value: json) -> json:
+    raise "worker failure"
+
+fn cooperative(value: json) -> json:
+    while not tasks.cancelled():
+        time.sleep(0.001)
+    return value
+
+fn socket_worker(connection: stream, payload: json) -> json:
+    data = io.read_exact(connection, 3)
+    io.write(connection, data + json_str(payload))
+    return json(len(data))
+
+fn database_worker(value: json) -> json:
+    with sql.open(":memory:", 1000) as db:
+        row = sql.query(db, "SELECT ? * ? AS n", [value, value], 1, 100)
+        return row[0]["n"]
+
+fn cancel_database(value: json) -> json:
+    with sql.open(":memory:", 5000) as db:
+        rows = sql.query(db, "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) AS n FROM n", [], 1, 100)
+        return json(rows)
+
+jobs: list[task] = []
+for number in range(32):
+    append(jobs, tasks.spawn(square, json(number)))
+for number in range(len(jobs)):
+    assert(json_int(tasks.wait(jobs[number], 5000)) == number * number)
+    assert(tasks.done(jobs[number]))
+    tasks.close(jobs[number])
+    tasks.close(jobs[number])
+with tasks.spawn(database_worker, json(12)) as job:
+    assert(json_int(tasks.wait(job, 5000)) == 144)
+with tasks.spawn(cancel_database, json_null()) as job:
+    time.sleep(0.01)
+    tasks.cancel(job)
+    try:
+        tasks.wait(job, 5000)
+        assert(false)
+    except err:
+        assert(err.code == "R4020")
+with tasks.spawn(failed, json_null()) as job:
+    try:
+        tasks.wait(job, 5000)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+        assert(err.message == "worker failure")
+with tasks.spawn(cooperative, json("cancelled")) as job:
+    try:
+        tasks.wait(job, 1)
+        assert(false)
+    except err:
+        assert(err.code == "R4022")
+    tasks.cancel(job)
+    assert(json_str(tasks.wait(job, 5000)) == "cancelled")
+# Scope cleanup cancels and joins even when an exception leaves the block.
+try:
+    with tasks.spawn(cooperative, json_null()) as job:
+        raise "leave scope"
+except err:
+    assert(err.message == "leave scope")
+with net.listen("127.0.0.1", 0, 5000) as listener:
+    with net.connect("127.0.0.1", net.port(listener), 5000) as client:
+        accepted = net.accept(listener)
+        alias = accepted
+        with tasks.spawn_io(socket_worker, accepted, json("native")) as job:
+            assert(io.closed(accepted) and io.closed(alias))
+            io.write(client, "a\0b")
+            assert(io.read_exact(client, 9) == "a\0bnative")
+            assert(json_int(tasks.wait(job, 5000)) == 3)
+            assert(io.read(client, 1) == "")
+try:
+    tasks.wait(jobs[0], 1)
+    assert(false)
+except err:
+    assert(err.code == "R4022")
+assert(not tasks.cancelled())
+print("native tasks passed")

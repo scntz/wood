@@ -1,0 +1,15 @@
+# Verified TLS 1.2+ over the ordinary native stream API; optional OpenSSL 3.
+fn connect(host: str, port: int, ca_file: str, timeout_ms: int) -> stream:
+    return tls_connect(host, port, ca_file, timeout_ms)
+
+fn server(certificate_chain_file: str, private_key_file: str) -> tls_context:
+    return tls_context_new(certificate_chain_file, private_key_file)
+
+fn accept(connection: stream, context: tls_context) -> stream:
+    return tls_accept(connection, context)
+
+fn close(context: tls_context):
+    tls_context_close(context)
+
+fn version() -> str:
+    return tls_version()

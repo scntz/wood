@@ -1,0 +1,25 @@
+record Product:
+    sku: str
+    unit_price: float
+    quantity: int
+
+fn product_from_json(value: json) -> Product:
+    fields = json_dict(value)
+    for key in fields:
+        if key not in ["sku", "unit_price", "quantity"]:
+            raise "unknown product field: " + key
+    result = Product(json_str(fields["sku"]), json_float(fields["unit_price"]), json_int(fields["quantity"]))
+    if len(strip(result.sku)) == 0:
+        raise "sku must not be empty"
+    if result.unit_price < 0.0 or result.quantity < 0:
+        raise "price and quantity must be nonnegative"
+    return result
+
+fn catalog_from_json(value: json) -> dict[str, Product]:
+    products: dict[str, Product] = {}
+    for item in json_list(value):
+        product = product_from_json(item)
+        if product.sku in products:
+            raise "duplicate sku: " + product.sku
+        products[product.sku] = product
+    return products

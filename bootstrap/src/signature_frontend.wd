@@ -1,0 +1,13 @@
+import frontend as frontend
+import signatures as sig
+import declaration_checks as checks
+
+fn load(input: str, standards: dict[str,str]) -> sig.Result:
+    loaded = frontend.load(input,standards)
+    if loaded.diagnostic.code != "":
+        return sig.rejected(loaded.diagnostic)
+    result = sig.resolve(loaded.compilation,loaded.bindings)
+    diagnostic = checks.check(result)
+    if diagnostic.code != "":
+        return sig.rejected(diagnostic)
+    return result

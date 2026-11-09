@@ -1,0 +1,1308 @@
+# Decentralized source packages over the existing format-1 local model.
+# Identities such as wood@audio resolve through a reviewed catalog index; the
+# package bytes stay with their author (GitHub, any HTTPS Git host or a pinned
+# archive). Git and SHA-256 supply integrity. No checkout, filter, hook, shell,
+# stored credential or package code runs during installation.
+import driver_host as host
+import project as project
+import project_trust as trust
+import body_semantics as semantic
+import sources as src
+import sha256 as sha
+import std.path as path
+import std.fs as fs
+
+fn problem(code: str, message: str) -> str:
+    return "__WOOD_DRIVER__"+code+":"+message
+
+# kind: github | git | archive. commit/sha256 are set when a catalog pins them.
+record Spec:
+    kind: str
+    owner: str
+    repo: str
+    ref: str
+    url: str
+    directory: str
+    commit: str
+    sha256: str
+    identity: str
+    version: str
+
+fn lower(text: str) -> str:
+    pieces: list[str] = []
+    for byte in text:
+        code = byte_value(byte)
+        append(pieces,byte_string(code+32) if code >= 65 and code <= 90 else byte)
+    return join(pieces,"")
+
+fn _alnum(byte: str) -> bool:
+    return ("a" <= byte and byte <= "z") or ("A" <= byte and byte <= "Z") or ("0" <= byte and byte <= "9")
+
+fn _hex(text: str) -> bool:
+    for byte in text:
+        if not (("a" <= byte and byte <= "f") or ("0" <= byte and byte <= "9")):
+            return false
+    return true
+
+fn commit_id(text: str) -> bool:
+    return (len(text) == 40 or len(text) == 64) and _hex(text)
+
+fn digest_id(text: str) -> bool:
+    return len(text) == 64 and _hex(text)
+
+fn valid_owner(owner: str) -> bool:
+    if len(owner) < 1 or len(owner) > 39 or owner[0] == "-" or owner[len(owner)-1] == "-" or "--" in owner:
+        return false
+    for byte in owner:
+        if not _alnum(byte) and byte != "-":
+            return false
+    return true
+
+fn valid_repo(repo: str) -> bool:
+    if len(repo) < 1 or len(repo) > 100 or repo in [".",".."] or repo[0] == "-" or ends_with(lower(repo),".git"):
+        return false
+    for byte in repo:
+        if not _alnum(byte) and byte not in ["-","_","."]:
+            return false
+    return true
+
+fn valid_name(name: str) -> bool:
+    if len(name) < 1 or len(name) > 64 or not (("a" <= name[0] and name[0] <= "z") or ("0" <= name[0] and name[0] <= "9")):
+        return false
+    for byte in name:
+        if not (("a" <= byte and byte <= "z") or ("0" <= byte and byte <= "9") or byte == "_"):
+            return false
+    return true
+
+fn valid_ref(ref: str) -> bool:
+    if len(ref) < 1 or len(ref) > 200 or ref[0] in ["-","/","."] or ref[len(ref)-1] in ["/","."]:
+        return false
+    if ".." in ref or "//" in ref or "@{" in ref or ends_with(ref,".lock"):
+        return false
+    for byte in ref:
+        if not _alnum(byte) and byte not in ["-","_",".","/","+"]:
+            return false
+    return true
+
+fn valid_https(text: str) -> bool:
+    # HTTPS only, no user information, no control or shell-significant bytes.
+    if not starts_with(text,"https://") or len(text) > 500 or len(text) < 12:
+        return false
+    host_part = split(text[8:],"/")[0]
+    if host_part == "" or "@" in host_part or ":" in host_part:
+        return false
+    for byte in text:
+        if not _alnum(byte) and byte not in [":","/",".","-","_","~","%","+","="]:
+            return false
+    return ".." not in text
+
+fn empty_spec() -> Spec:
+    return Spec("","","","","","","","","","")
+
+fn is_identity(text: str) -> bool:
+    pieces = split(split(text,"#")[0],"@")
+    return len(pieces) == 2 and pieces[0] not in ["github","python",""] and valid_owner(pieces[0]) and valid_name(pieces[1])
+
+fn parse_github(text: str) -> Spec:
+    usage = "expected owner@package[#version], github@owner/repository[#ref] or python@name[#version]"
+    if not starts_with(text,"github@"):
+        raise problem("D5101","unsupported package source '"+text+"'; "+usage)
+    hash = split(text[7:],"#")
+    if len(hash) > 2:
+        raise problem("D5101","invalid package source '"+text+"'; "+usage)
+    ref = ""
+    if len(hash) == 2:
+        ref = hash[1]
+        if not valid_ref(ref):
+            raise problem("D5101","invalid Git reference in '"+text+"'")
+    names = split(hash[0],"/")
+    if len(names) != 2 or not valid_owner(names[0]):
+        raise problem("D5101","invalid GitHub owner in '"+text+"'; "+usage)
+    if not valid_repo(names[1]):
+        raise problem("D5101","invalid GitHub repository in '"+text+"'; "+usage)
+    result = empty_spec()
+    result.kind = "github"
+    result.owner = names[0]
+    result.repo = names[1]
+    result.ref = ref
+    return result
+
+fn parse_source(text: str, directory: str = "") -> Spec:
+    # Canonical forms recorded in wood.lock.
+    if starts_with(text,"git+https://") or starts_with(text,"archive+https://") or starts_with(text,"archive+file://"):
+        result = empty_spec()
+        pieces = split(text,"+")
+        result.kind = pieces[0]
+        result.url = text[len(pieces[0])+1:]
+        result.directory = directory
+        if starts_with(result.url,"https://") and not valid_https(result.url):
+            raise problem("D5107","unsafe package URL: "+text)
+        return result
+    result = parse_github(text)
+    result.directory = directory
+    return result
+
+fn valid_source_text(text: str) -> bool:
+    try:
+        if is_identity(text):
+            return true
+        parse_github(text)
+        return true
+    except err:
+        return false
+
+fn base_text(spec: Spec) -> str:
+    if spec.kind == "github":
+        return "github@"+spec.owner+"/"+spec.repo
+    return spec.kind+"+"+spec.url
+
+fn spec_text(spec: Spec) -> str:
+    if spec.identity != "":
+        return spec.identity+("#"+spec.version if spec.ref != "" else "")
+    return base_text(spec)+("#"+spec.ref if spec.ref != "" else "")
+
+fn label_text(spec: Spec) -> str:
+    return spec.identity if spec.identity != "" else base_text(spec)
+
+fn key(spec: Spec) -> str:
+    base = lower(spec.owner+"/"+spec.repo) if spec.kind == "github" else lower(spec.url)
+    return base+("//"+spec.directory if spec.directory != "" else "")
+
+fn url(spec: Spec) -> str:
+    # GitHub URLs are built only from validated names; catalog URLs are validated HTTPS.
+    if spec.kind == "github":
+        return "https://github.com/"+spec.owner+"/"+spec.repo+".git"
+    return spec.url
+
+fn scrub(text: str) -> str:
+    # Remote URLs can carry credentials through a user's insteadOf configuration.
+    remaining = text
+    pieces: list[str] = []
+    while "://" in remaining:
+        head = split(remaining,"://")[0]
+        tail = remaining[len(head)+3:]
+        authority = split(split(tail,"/")[0]," ")[0]
+        if "@" in authority:
+            names = split(authority,"@")
+            tail = names[len(names)-1]+tail[len(authority):]
+        append(pieces,head+"://")
+        remaining = tail
+    append(pieces,remaining)
+    return replace(join(pieces,"")[:1000],"\r","")
+
+fn _version_rank(tag: str) -> int:
+    text = tag[1:] if starts_with(tag,"v") else tag
+    if not project.version(text):
+        return -1
+    pieces = split(text,".")
+    for piece in pieces:
+        if len(piece) > 6:
+            return -1
+    return int(pieces[0])*1000000000000+int(pieces[1])*1000000+int(pieces[2])
+
+record Client:
+    logs: str
+    counter: int
+    offline: bool
+    cache: str
+    assets: str
+    checked: dict[str,bool]
+    catalog: list[json]
+    catalog_ref: str
+    catalog_local: bool
+
+    fn log(mut self) -> str:
+        self.counter += 1
+        return path.combine(self.logs,str(self.counter)+".log")
+
+    fn run(mut self, arguments: list[str], timeout: int = 60000) -> tuple[int,str]:
+        file = self.log()
+        # Credentials are not needed for public repositories and are never read.
+        hooks = path.combine(self.logs,"no-hooks")
+        command = ["git","--no-replace-objects","--no-optional-locks","-c","credential.helper=","-c","core.askPass=","-c","core.hooksPath="+hooks,"-c","core.fsmonitor=false","-c","protocol.ext.allow=never","-c","transfer.fsckObjects=true","-c","gc.auto=0","-c","core.quotePath=true"]
+        status = host.process(command+arguments,file,timeout,16777216,false)
+        return (status,src.read(file,16777216) if path_exists(file) else "")
+
+    fn network_failure(self, label: str, status: int, output: str) -> str:
+        text = lower(output)
+        if "rate limit" in text or "too many requests" in text or " 429" in text:
+            return problem("D5102","the host rate limited "+label+"; retry later or use --offline with a cached package")
+        if "repository not found" in text or "could not read username" in text or "authentication failed" in text or "terminal prompts disabled" in text or "does not appear to be a git repository" in text or "not found" in text or " 404" in text:
+            if starts_with(label,"wood@"):
+                # Official packages live in the wood repository, which is what has to be public.
+                return problem("D5102","official package "+label+" could not be fetched from the wood repository, which must be public and reachable. Use the copy in your installation instead: add it to wood.json as a path dependency on share/wood/packages/. See docs/official-packages.md")
+            return problem("D5102","source "+label+" is unavailable: it does not exist, was deleted or is not public. Private sources are not supported without credentials")
+        if "could not resolve" in text or "failed to connect" in text or "timed out" in text or "unable to access" in text or "connection" in text or "ssl" in text:
+            return problem("D5102","network failure reaching "+label+"; check connectivity or use --offline with a cached package: "+scrub(output))
+        return problem("D5102","could not reach "+label+" (exit "+str(status)+"): "+scrub(output))
+
+    fn remote(mut self, spec: Spec, patterns: list[str]) -> dict[str,str]:
+        result = self.run(["ls-remote",url(spec)]+patterns,120000)
+        if result[0] != 0:
+            raise self.network_failure(label_text(spec),result[0],result[1])
+        refs: dict[str,str] = {}
+        for line in split(result[1],"\n"):
+            pieces = split(replace(line,"\r",""),"\t")
+            if len(pieces) == 2 and commit_id(pieces[0]):
+                refs[pieces[1]] = pieces[0]
+        return refs
+
+    fn repository_at(mut self, directory: str, label: str) -> str:
+        if fs.kind(directory) == "symlink":
+            raise problem("D5107","package cache must not contain a filesystem link: "+directory)
+        if fs.kind(directory) != "directory":
+            if self.offline:
+                raise problem("D5108",label+" is not in the offline cache; run once online")
+            fs.make_dirs(path.parent(directory))
+            result = self.run(["init","-q","--bare","--template=",directory])
+            if result[0] != 0:
+                raise problem("D5105","cannot create package cache: "+scrub(result[1]))
+        return directory
+
+    fn repository(mut self, spec: Spec) -> str:
+        git_root = path.combine(self.cache,"git")
+        if spec.kind == "github":
+            return self.repository_at(path.combine(path.combine(git_root,lower(spec.owner)),lower(spec.repo)+".git"),label_text(spec))
+        return self.repository_at(path.combine(path.combine(git_root,"hosts"),sha.digest(lower(spec.url))[:32]+".git"),label_text(spec))
+
+    fn has_commit(mut self, directory: str, commit: str) -> bool:
+        result = self.run(["-C",directory,"cat-file","-t",commit])
+        return result[0] == 0 and strip(result[1]) == "commit"
+
+    fn valid_cache(mut self, directory: str) -> bool:
+        if directory in self.checked:
+            return self.checked[directory]
+        result = self.run(["-C",directory,"fsck","--no-progress","--no-dangling"],300000)
+        self.checked[directory] = result[0] == 0
+        return result[0] == 0
+
+    fn fetch(mut self, spec: Spec, directory: str, what: str, commit: str, ref: str):
+        # A shallow fetch of the exact object; fall back for hosts without
+        # reachable-SHA requests. Git verifies every received object.
+        destination = "+"+what+":refs/wood/fetched/"+commit
+        first = self.run(["-C",directory,"fetch","-q","--no-tags","--no-recurse-submodules","--depth=1",url(spec),destination],300000)
+        if first[0] != 0 or not self.has_commit(directory,commit):
+            full = self.run(["-C",directory,"fetch","-q","--no-tags","--no-recurse-submodules",url(spec),"+refs/heads/*:refs/wood/heads/*","+refs/tags/*:refs/wood/tags/*"],600000)
+            if full[0] != 0:
+                raise self.network_failure(label_text(spec),full[0],full[1])
+            if not self.has_commit(directory,commit):
+                raise problem("D5103","commit "+commit+" is not available from "+label_text(spec)+"; the reference may have been deleted")
+        if ref != "":
+            # Remember the resolution for an explicit offline retry of this ref.
+            self.run(["-C",directory,"update-ref","refs/wood/requested/"+ref,commit])
+
+    fn ensure(mut self, spec: Spec, what: str, commit: str, ref: str) -> str:
+        directory = self.repository(spec)
+        # Validate before trusting even a "missing object" answer from the cache.
+        if not self.valid_cache(directory):
+            if self.offline:
+                raise problem("D5105","cached package "+label_text(spec)+" failed Git integrity validation: "+directory)
+            quarantine = directory+".corrupt-"+commit[:12]
+            if path_exists(quarantine):
+                raise problem("D5105","cached package "+label_text(spec)+" is corrupted; remove "+directory)
+            host.call("rename",{"from":json(directory),"to":json(quarantine)})
+            remove(self.checked,directory)
+            directory = self.repository(spec)
+        if self.has_commit(directory,commit):
+            return directory
+        if self.offline:
+            raise problem("D5108","commit "+commit+" of "+label_text(spec)+" is not in the offline cache; run once online")
+        self.fetch(spec,directory,what,commit,ref)
+        remove(self.checked,directory)
+        if not self.valid_cache(directory):
+            raise problem("D5105","fetched package "+label_text(spec)+" failed Git integrity validation")
+        return directory
+
+    fn offline_resolve(mut self, spec: Spec) -> str:
+        directory = self.repository(spec)
+        if spec.ref == "":
+            raise problem("D5108","--offline requires an explicit #ref or an existing wood.lock entry for "+label_text(spec))
+        result = self.run(["-C",directory,"rev-parse","--verify","-q","refs/wood/requested/"+spec.ref+"^{commit}"])
+        if result[0] != 0:
+            raise problem("D5108","reference "+spec.ref+" of "+label_text(spec)+" is not in the offline cache")
+        return strip(result[1])
+
+    fn resolve(mut self, spec: Spec) -> tuple[str,str]:
+        # Returns (commit, fetchable reference). Tags are mutable: only the
+        # resulting commit is ever recorded or trusted.
+        if spec.commit != "":
+            return (spec.commit,spec.commit)
+        if commit_id(spec.ref):
+            return (spec.ref,spec.ref)
+        if self.offline:
+            commit = self.offline_resolve(spec)
+            return (commit,commit)
+        if spec.ref == "":
+            tags = self.remote(spec,["refs/tags/*"])
+            best = ""
+            rank = -1
+            for name in tags:
+                if ends_with(name,"^{}"):
+                    continue
+                value = _version_rank(name[len("refs/tags/"):])
+                if value > rank:
+                    rank = value
+                    best = name
+            if best != "":
+                return (tags[best+"^{}"] if best+"^{}" in tags else tags[best],best)
+            head = self.remote(spec,["HEAD"])
+            if "HEAD" not in head:
+                raise problem("D5103","repository "+label_text(spec)+" has no tags or default branch")
+            return (head["HEAD"],"HEAD")
+        tag = "refs/tags/"+spec.ref
+        branch = "refs/heads/"+spec.ref
+        refs = self.remote(spec,[tag,tag+"^{}",branch])
+        if tag+"^{}" in refs:
+            return (refs[tag+"^{}"],tag)
+        if tag in refs:
+            return (refs[tag],tag)
+        if branch in refs:
+            return (refs[branch],branch)
+        raise problem("D5103","reference '"+spec.ref+"' does not exist in "+label_text(spec)+"; it may have been deleted")
+
+    fn load_catalog(mut self, explicit: str):
+        if self.catalog_ref != "":
+            return
+        configured = explicit if explicit != "" else host.string("environment",{"name":json("WOOD_PACKAGE_INDEX")})
+        text = ""
+        if configured != "":
+            # A deliberately chosen local index: mirrors, air-gapped teams and tests.
+            text = src.read(path.absolute(configured),16777216)
+            self.catalog_ref = "local"
+            self.catalog_local = true
+        else:
+            text = self.fetch_catalog()
+        document = project.object(json_parse(text))
+        if json_int(project.member(document,"schema_version")) != 1:
+            raise problem("D5104","unsupported package index schema")
+        self.catalog = json_list(project.member(document,"packages"))
+
+    fn fetch_catalog(mut self) -> str:
+        # The index is an ordinary reviewed Git repository, cached like a package.
+        index = empty_spec()
+        index.kind = "github"
+        index.owner = "scntz"
+        index.repo = "wood"
+        directory = path.combine(path.combine(self.cache,"index"),"scntz-wood.git")
+        if not self.offline:
+            try:
+                self.repository_at(directory,"package index")
+                self.run(["-C",directory,"fetch","-q","--no-tags","--depth=1",url(index),"+HEAD:refs/wood/index"],120000)
+            except err:
+                pass
+        if fs.kind(directory) == "directory":
+            commit = self.run(["-C",directory,"rev-parse","--verify","-q","refs/wood/index^{commit}"])
+            if commit[0] == 0:
+                content = self.run(["-C",directory,"cat-file","blob",strip(commit[1])+":catalog/index.json"])
+                if content[0] == 0:
+                    self.catalog_ref = strip(commit[1])
+                    return content[1]
+        # Until the index repository is reachable, use the snapshot shipped with this release.
+        bundled = path.combine(path.combine(self.assets,"catalog"),"index.json")
+        if fs.kind(bundled) != "file":
+            raise problem("D5102","package index is unavailable; use github@owner/repository or set WOOD_PACKAGE_INDEX")
+        self.catalog_ref = "bundled"
+        return src.read(bundled,16777216)
+
+    fn entry(mut self, identity: str, explicit: str) -> dict[str,json]:
+        self.load_catalog(explicit)
+        pieces = split(identity,"@")
+        for value in self.catalog:
+            row = project.object(value)
+            if lower(project.string(project.member(row,"owner"))) == lower(pieces[0]) and project.string(project.member(row,"name")) == pieces[1]:
+                return row
+        raise problem("D5109","package "+identity+" is not in the catalog ("+self.catalog_ref+"). Direct installation works without listing: wood add github@owner/repository")
+
+fn _version_row(entry: dict[str,json], version: str, identity: str) -> dict[str,json]:
+    best: dict[str,json] = {}
+    rank = -1
+    for value in json_list(project.member(entry,"versions")):
+        row = project.object(value)
+        text = project.string(project.member(row,"version"))
+        if text == version:
+            if "revoked" in row:
+                raise problem("D5103",identity+" "+version+" was revoked and cannot be installed: "+scrub(project.string(row["revoked"])))
+            return row
+        if version == "" and _version_rank(text) > rank and "yanked" not in row and "revoked" not in row:
+            rank = _version_rank(text)
+            best = row
+    if version != "":
+        raise problem("D5103","version "+version+" of "+identity+" is not in the catalog")
+    if rank < 0:
+        raise problem("D5103",identity+" has no available versions in the catalog")
+    return best
+
+fn _safe_component(component: str) -> bool:
+    if component == "" or len(component) > 240 or component in [".",".."] or component[len(component)-1] == ".":
+        return false
+    for byte in component:
+        if not _alnum(byte) and byte not in ["_",".","-"]:
+            return false
+    name = lower(component)
+    if name == ".git":
+        return false
+    stem = split(name,".")[0]
+    if stem in ["con","prn","aux","nul"]:
+        return false
+    if len(stem) == 4 and (starts_with(stem,"com") or starts_with(stem,"lpt")) and "1" <= stem[3] and stem[3] <= "9":
+        return false
+    return true
+
+fn safe_relative(name: str) -> bool:
+    if name == "" or "\\" in name or ":" in name or len(name) > 1024:
+        return false
+    for component in split(name,"/"):
+        if not _safe_component(component):
+            return false
+    return true
+
+fn catalog_spec(session: Client, row: dict[str,json], identity: str, requested: str) -> Spec:
+    # Converts one catalog version into a pinned source after validating it.
+    source = project.object(project.member(row,"source"))
+    kind = project.string(project.member(source,"type"))
+    result = empty_spec()
+    result.identity = identity
+    result.version = project.string(project.member(row,"version"))
+    result.ref = requested
+    if "directory" in source:
+        result.directory = project.string(source["directory"])
+        if not safe_relative(result.directory):
+            raise problem("D5107","catalog entry has an unsafe directory: "+identity)
+    if kind == "github":
+        names = split(project.string(project.member(source,"repo")),"/")
+        if len(names) != 2 or not valid_owner(names[0]) or not valid_repo(names[1]):
+            raise problem("D5104","catalog entry has an invalid GitHub repository: "+identity)
+        result.kind = "github"
+        result.owner = names[0]
+        result.repo = names[1]
+    elif kind == "git":
+        result.kind = "git"
+        result.url = project.string(project.member(source,"url"))
+        if not valid_https(result.url):
+            raise problem("D5107","catalog entry has an unsafe Git URL: "+identity)
+    elif kind == "archive":
+        result.kind = "archive"
+        result.url = project.string(project.member(source,"url"))
+        result.sha256 = project.string(project.member(source,"sha256"))
+        if not digest_id(result.sha256):
+            raise problem("D5104","catalog archive entry requires a lowercase SHA-256: "+identity)
+        if not valid_https(result.url) and not (session.catalog_local and starts_with(result.url,"file://")):
+            raise problem("D5107","catalog entry has an unsafe archive URL: "+identity)
+        return result
+    else:
+        raise problem("D5104","unsupported catalog source type '"+kind+"': "+identity)
+    result.commit = project.string(project.member(source,"commit"))
+    if not commit_id(result.commit):
+        raise problem("D5104","catalog entry must pin a full commit: "+identity)
+    return result
+
+record Entry:
+    blob: str
+    size: int
+    name: str
+
+fn _digits(text: str) -> bool:
+    if len(text) == 0 or len(text) > 12:
+        return false
+    for byte in text:
+        if byte < "0" or byte > "9":
+            return false
+    return true
+
+record PathSet:
+    seen: dict[str,str]
+    count: int
+    total: int
+
+    fn admit(mut self, name: str, size: int, label: str):
+        if not safe_relative(name):
+            raise problem("D5107",label+": unsafe or nonportable path in package: "+scrub(name))
+        if lower(name) == "wood-source.json":
+            raise problem("D5107",label+": wood-source.json is reserved for the installation receipt")
+        prefix = ""
+        for component in split(name,"/"):
+            prefix = prefix+"/"+component if prefix != "" else component
+            folded = lower(prefix)
+            if folded in self.seen and self.seen[folded] != prefix:
+                raise problem("D5107",label+": case-colliding package paths: "+self.seen[folded]+", "+prefix)
+            self.seen[folded] = prefix
+        self.count += 1
+        self.total += size
+        if size > 16777216:
+            raise problem("D5104",label+": package file exceeds 16 MiB: "+name)
+        if self.count > 4096 or self.total > 134217728:
+            raise problem("D5104",label+": package exceeds 4096 files or 128 MiB")
+
+fn parse_tree(output: str, label: str) -> list[Entry]:
+    entries: list[Entry] = []
+    paths = PathSet({},0,0)
+    for line in split(output,"\n"):
+        line = replace(line,"\r","")
+        if line == "":
+            continue
+        split_line = split(line,"\t")
+        if len(split_line) != 2:
+            raise problem("D5107",label+": unsafe or nonportable path in package tree: "+scrub(line))
+        meta = [piece for piece in split(split_line[0]," ") if piece != ""]
+        name = split_line[1]
+        if len(meta) != 4:
+            raise problem("D5104",label+": malformed Git tree entry")
+        if meta[0] == "120000":
+            raise problem("D5107",label+": symbolic links are not allowed in packages: "+scrub(name))
+        if meta[0] not in ["100644","100755"] or meta[1] != "blob":
+            raise problem("D5107",label+": only regular files are allowed in packages; rejected "+scrub(name))
+        if not commit_id(meta[2]) or not _digits(meta[3]):
+            raise problem("D5104",label+": malformed Git tree entry")
+        size = int(meta[3])
+        paths.admit(name,size,label)
+        append(entries,Entry(meta[2],size,name))
+    return entries
+
+record Exported:
+    tree: str
+    receipt: str
+    manifest: dict[str,json]
+
+fn validate_manifest(text: str, label: str, names: dict[str,Entry]) -> dict[str,json]:
+    data: dict[str,json] = {}
+    try:
+        data = project.object(json_parse(text))
+        project.fields(data,["format","name","version","source","entry","tests","dependencies","python"])
+        format = project.member(data,"format")
+        if json_kind(format) != "int" or json_int(format) != 1:
+            raise "unsupported wood.json format"
+        name = project.string(project.member(data,"name"))
+        if not project.identifier(name) or name == "std":
+            raise "package name must be an identifier other than std"
+        if not project.version(project.string(project.member(data,"version"))):
+            raise "package version must be exact MAJOR.MINOR.PATCH"
+        source = project.string(project.member(data,"source"))
+        if source != "." and not safe_relative(source):
+            raise "source directory must stay inside the package"
+        for field in ["entry","tests"]:
+            if field in data:
+                if not safe_relative(project.string(data[field])):
+                    raise field+" must stay inside the package"
+        if "python" in data:
+            for package in project.object(data["python"]):
+                project.string(project.object(data["python"])[package])
+        if "dependencies" in data:
+            dependencies = project.object(data["dependencies"])
+            for alias in dependencies:
+                if not project.identifier(alias) or alias == "std":
+                    raise "dependency alias must be an identifier other than std"
+                item = project.object(dependencies[alias])
+                project.fields(item,["path","version","source"])
+                location = project.string(project.member(item,"path"))
+                if not safe_relative(location):
+                    raise "dependency '"+alias+"' path must stay inside the package"
+                if not project.version(project.string(project.member(item,"version"))):
+                    raise "dependency '"+alias+"' version must be exact"
+                if "source" in item:
+                    if not valid_source_text(project.string(item["source"])):
+                        raise "dependency '"+alias+"' has an invalid source"
+                elif location+"/wood.json" not in names:
+                    raise "dependency '"+alias+"' has no source and is not bundled in the package"
+    except err:
+        if starts_with(err.message,"__WOOD_DRIVER__"):
+            raise err
+        raise problem("D5104",label+": invalid wood.json: "+err.message)
+    return data
+
+fn _receipt(source: str, requested: str, commit: str, tree: str, directory: str, files: dict[str,json]) -> str:
+    data: dict[str,json] = {"format":json(1),"source":json(source),"requested":json(requested),"commit":json(commit),"tree":json(tree),"directory":json(directory),"files":json(files)}
+    return json_dump(data)+"\n"
+
+fn export_commit(session: Client, directory: str, commit: str, target: str, spec: Spec, requested: str) -> Exported:
+    # A local copy suffices: its logs are read immediately and never accumulate.
+    work = session
+    label = label_text(spec)
+    treeish = commit if spec.directory == "" else commit+":"+spec.directory
+    tree = work.run(["-C",directory,"rev-parse",commit+"^{tree}" if spec.directory == "" else treeish])
+    if tree[0] != 0 or not commit_id(strip(tree[1])):
+        raise problem("D5105",label+": commit has no readable package tree"+(" at "+spec.directory if spec.directory != "" else ""))
+    listing = work.run(["-C",directory,"ls-tree","-r","-l","--full-tree",treeish])
+    if listing[0] != 0:
+        raise problem("D5105",label+": cannot list cached commit")
+    entries = parse_tree(listing[1],label)
+    names: dict[str,Entry] = {}
+    for entry in entries:
+        names[entry.name] = entry
+    if "wood.json" not in names:
+        raise problem("D5104",label+" is not a wood package: wood.json is missing at the package root")
+    fs.make_dirs(target)
+    files: dict[str,json] = {}
+    data: dict[str,json] = {}
+    for entry in entries:
+        file = path.combine(target,entry.name)
+        fs.make_dirs(path.parent(file))
+        status = host.process(["git","--no-replace-objects","--no-optional-locks","-C",directory,"cat-file","blob",entry.blob],file,120000,16777216,false)
+        if status != 0 or fs.size(file) != entry.size:
+            raise problem("D5105",label+": cached object for "+entry.name+" is unreadable or changed size")
+        content = src.read(file,16777216)
+        row: dict[str,json] = {"size":json(entry.size),"sha256":json(sha.digest(content))}
+        files[entry.name] = json(row)
+        if entry.name == "wood.json":
+            data = validate_manifest(content,label,names)
+    receipt = _receipt(base_text(spec),requested,commit,strip(tree[1]),spec.directory,files)
+    write_text(path.combine(target,"wood-source.json"),receipt)
+    return Exported(strip(tree[1]),sha.digest(receipt),data)
+
+fn _tar_text(block: str, start: int, width: int) -> str:
+    pieces: list[str] = []
+    for i in range(start,start+width):
+        if block[i] == "\0":
+            break
+        append(pieces,block[i])
+    return join(pieces,"")
+
+fn _tar_octal(block: str, start: int, width: int, label: str) -> int:
+    value = 0
+    digits = 0
+    for i in range(start,start+width):
+        byte = block[i]
+        if byte == "\0" or byte == " ":
+            if digits > 0:
+                break
+            continue
+        if byte < "0" or byte > "7" or digits > 11:
+            raise problem("D5104",label+": malformed archive number")
+        value = value*8+byte_value(byte)-48
+        digits += 1
+    return value
+
+record ArchiveFile:
+    name: str
+    offset: int
+    size: int
+
+fn parse_tar(content: str, label: str) -> list[ArchiveFile]:
+    files: list[ArchiveFile] = []
+    known: dict[str,int] = {}
+    paths = PathSet({},0,0)
+    top = ""
+    at = 0
+    finished = false
+    while at+512 <= len(content):
+        block = content[at:at+512]
+        total = 0
+        zero = true
+        for i in range(512):
+            code = byte_value(block[i])
+            if code != 0:
+                zero = false
+            total += 32 if i >= 148 and i < 156 else code
+        if zero:
+            finished = true
+            break
+        if _tar_octal(block,148,8,label) != total:
+            raise problem("D5104",label+": archive header checksum mismatch")
+        if block[257:262] != "ustar":
+            raise problem("D5104",label+": only plain ustar archives from 'wood package pack' are supported")
+        kind = block[156]
+        size = _tar_octal(block,124,12,label)
+        name = _tar_text(block,0,100)
+        prefix = _tar_text(block,345,155)
+        if prefix != "":
+            name = prefix+"/"+name
+        if kind not in ["0","\0","5"]:
+            raise problem("D5107",label+": archive links and special entries are not allowed: "+scrub(name))
+        if name == "" or name[0] == "/" or "\\" in name or ".." in split(name,"/"):
+            raise problem("D5107",label+": archive path escapes the package: "+scrub(name))
+        pieces = split(name,"/")
+        if top == "":
+            top = pieces[0]
+        if pieces[0] != top or not _safe_component(top):
+            raise problem("D5107",label+": archive must have one top-level directory: "+scrub(name))
+        relative = join(pieces[1:],"/")
+        padded = size+(512-size%512)%512
+        if at+512+padded > len(content):
+            raise problem("D5104",label+": truncated archive")
+        if kind == "5":
+            if size != 0:
+                raise problem("D5104",label+": malformed archive directory")
+        elif relative != "":
+            if relative in known:
+                raise problem("D5107",label+": duplicate archive path: "+scrub(relative))
+            known[relative] = 0
+            paths.admit(relative,size,label)
+            append(files,ArchiveFile(relative,at+512,size))
+        at += 512+padded
+    if not finished:
+        raise problem("D5104",label+": truncated archive")
+    return files
+
+fn ensure_archive(session: Client, spec: Spec) -> str:
+    work = session
+    directory = path.combine(work.cache,"archives")
+    file = path.combine(directory,spec.sha256+".tar")
+    label = label_text(spec)
+    if fs.kind(file) == "file" and fs.size(file) <= 16777216 and sha.digest(src.read(file,16777216)) == spec.sha256:
+        return file
+    if work.offline:
+        raise problem("D5108",label+" is not in the offline cache; run once online")
+    fs.make_dirs(directory)
+    stage_directory = host.temporary(directory)
+    stage = path.combine(stage_directory,"download")
+    protocol = "=file" if starts_with(spec.url,"file://") else "=https"
+    log = work.log()
+    # -q ignores curlrc so configuration cannot add credentials or redirect output.
+    status = 2
+    try:
+        status = host.process(["curl","-q","--fail","--silent","--show-error","--location","--proto",protocol,"--proto-redir",protocol,"--max-filesize","16777216","--max-time","600","--output",stage,spec.url],log,660000,1048576,false)
+    except err:
+        raise problem("D5102","archive sources require the curl executable on PATH")
+    if status != 0:
+        raise work.network_failure(label,status,src.read(log,1048576) if path_exists(log) else "")
+    if fs.kind(stage) != "file" or fs.size(stage) > 16777216:
+        raise problem("D5104",label+": archive exceeds 16 MiB")
+    actual = sha.digest(src.read(stage,16777216))
+    if actual != spec.sha256:
+        raise problem("D5105",label+": downloaded archive SHA-256 "+actual+" differs from the pinned "+spec.sha256)
+    host.call("publish",{"from":json(stage),"to":json(file)})
+    host.release(stage_directory)
+    return file
+
+fn export_archive(session: Client, spec: Spec, target: str, requested: str) -> Exported:
+    label = label_text(spec)
+    file = ensure_archive(session,spec)
+    content = src.read(file,16777216)
+    entries = parse_tar(content,label)
+    names: dict[str,Entry] = {}
+    for entry in entries:
+        names[entry.name] = Entry("",entry.size,entry.name)
+    if "wood.json" not in names:
+        raise problem("D5104",label+" is not a wood package: wood.json is missing at the package root")
+    fs.make_dirs(target)
+    files: dict[str,json] = {}
+    data: dict[str,json] = {}
+    for entry in entries:
+        bytes = content[entry.offset:entry.offset+entry.size]
+        output = path.combine(target,entry.name)
+        fs.make_dirs(path.parent(output))
+        write_text(output,bytes)
+        row: dict[str,json] = {"size":json(entry.size),"sha256":json(sha.digest(bytes))}
+        files[entry.name] = json(row)
+        if entry.name == "wood.json":
+            data = validate_manifest(bytes,label,names)
+    receipt = _receipt(base_text(spec),requested,"sha256:"+spec.sha256,"","",files)
+    write_text(path.combine(target,"wood-source.json"),receipt)
+    return Exported("",sha.digest(receipt),data)
+
+fn lock_row(root: str, spec: Spec, requested: str, commit: str, exported: Exported, catalog: str) -> json:
+    row: dict[str,json] = {"root":json(root),"source":json(base_text(spec)),"requested":json(requested),"commit":json(commit),"tree":json(exported.tree),"receipt_sha256":json(exported.receipt)}
+    if spec.directory != "":
+        row["directory"] = json(spec.directory)
+    if spec.identity != "":
+        row["identity"] = json(spec.identity)
+        row["catalog"] = json(catalog)
+    return json(row)
+
+record Installed:
+    name: str
+    version: str
+    commit: str
+    modules: list[str]
+    dependencies: list[str]
+    label: str
+
+record Graph:
+    client: Client
+    standards: dict[str,str]
+    commits: dict[str,str]
+    requesters: dict[str,str]
+    stack: list[str]
+    rows: list[json]
+    physical: list[str]
+    index: str
+
+    fn from_source(mut self, text: str) -> Spec:
+        return self.identity_spec(text) if is_identity(text) else parse_github(text)
+
+    fn identity_spec(mut self, text: str) -> Spec:
+        pieces = split(text,"#")
+        identity = pieces[0]
+        version = pieces[1] if len(pieces) == 2 else ""
+        if len(pieces) > 2 or (version != "" and not project.version(version)):
+            raise problem("D5101","expected owner@package or owner@package#MAJOR.MINOR.PATCH: "+text)
+        entry = self.client.entry(identity,self.index)
+        return catalog_spec(self.client,_version_row(entry,version,identity),identity,version)
+
+    fn add(mut self, spec: Spec, relative: str, target: str, required: str, parent: str) -> Installed:
+        identity = key(spec)
+        if identity in self.stack:
+            raise problem("D5106","dependency cycle: "+join(self.stack," -> ")+" -> "+identity)
+        if len(self.rows) >= 128:
+            raise problem("D5106","package graph exceeds 128 packages")
+        commit = ""
+        fetchable = ""
+        if spec.kind == "archive":
+            commit = "sha256:"+spec.sha256
+        else:
+            resolved = self.client.resolve(spec)
+            commit = resolved[0]
+            fetchable = resolved[1]
+        if identity in self.commits and self.commits[identity] != commit:
+            raise problem("D5106","version conflict for "+label_text(spec)+": "+parent+" requires "+commit+" but "+self.requesters[identity]+" requires "+self.commits[identity])
+        self.commits[identity] = commit
+        self.requesters[identity] = parent
+        exported = Exported("","",{})
+        if spec.kind == "archive":
+            exported = export_archive(self.client,spec,target,spec.ref)
+        else:
+            directory = self.client.ensure(spec,fetchable,commit,spec.ref if spec.commit == "" and not commit_id(spec.ref) else "")
+            exported = export_commit(self.client,directory,commit,target,spec,spec.ref)
+        name = project.string(exported.manifest["name"])
+        version = project.string(exported.manifest["version"])
+        if required != "" and required != version:
+            raise problem("D5106","version conflict: "+parent+" requires "+label_text(spec)+" "+required+" but "+commit[:19]+" declares "+version)
+        if spec.identity != "" and spec.version != version:
+            raise problem("D5104",label_text(spec)+": the catalog lists version "+spec.version+" but the package declares "+version)
+        tag = spec.ref[1:] if starts_with(spec.ref,"v") else spec.ref
+        if project.version(tag) and tag != version:
+            raise problem("D5104",label_text(spec)+": tag "+spec.ref+" declares package version "+version)
+        append(self.rows,lock_row(relative,spec,spec.ref,commit,exported,self.client.catalog_ref))
+        append(self.physical,target)
+        append(self.stack,identity)
+        dependencies: list[str] = []
+        if "dependencies" in exported.manifest:
+            items = project.object(exported.manifest["dependencies"])
+            for alias in items:
+                item = project.object(items[alias])
+                if "source" in item:
+                    location = project.string(item["path"])
+                    if path_exists(path.combine(target,location)):
+                        raise problem("D5104",label_text(spec)+": dependency '"+alias+"' is both bundled and declared with a source")
+                    child = self.from_source(project.string(item["source"]))
+                    self.add(child,relative+"/"+location,path.combine(target,location),project.string(item["version"]),label_text(spec))
+                append(dependencies,alias+" "+project.string(item["version"]))
+        pop(self.stack)
+        return Installed(name,version,commit,package_modules(target,exported.manifest),dependencies,label_text(spec))
+
+fn package_modules(root: str, manifest: dict[str,json]) -> list[str]:
+    source = path.combine(root,project.string(manifest["source"]))
+    ordered: dict[str,int] = {}
+    if fs.kind(source) != "directory":
+        raise problem("D5104","package source directory does not exist")
+    for file in trust.source_files(source):
+        name = replace(trust.relative(path.resolve(file),path.resolve(source)),"\\","/")
+        name = replace(name[:len(name)-3],"/",".")
+        if not starts_with(path.name(file),"_") and not starts_with(name,"vendor.") and not starts_with(name,"tests."):
+            ordered[name] = 0
+    return [name for name in json_dict(json(ordered))]
+
+fn check_modules(root: str, manifest: dict[str,json], standards: dict[str,str]):
+    source = path.combine(root,project.string(manifest["source"]))
+    for file in trust.source_files(source):
+        relative = replace(trust.relative(path.resolve(file),path.resolve(source)),"\\","/")
+        if starts_with(relative,"vendor/") or starts_with(relative,"tests/"):
+            continue
+        program = semantic.analyze(trust.load(file,standards,false))
+        if program.diagnostic.code != "":
+            raise problem("D5104","package module "+relative+" does not compile: "+program.diagnostic.code+" "+program.diagnostic.message)
+
+fn cache_root() -> str:
+    configured = host.string("environment",{"name":json("WOOD_CACHE_DIR")})
+    if configured != "":
+        if not path.is_absolute(configured):
+            raise problem("D5101","WOOD_CACHE_DIR must be an absolute path")
+        return configured
+    local = host.string("environment",{"name":json("LOCALAPPDATA")})
+    if local != "":
+        return path.combine(path.combine(local,"wood"),"cache")
+    xdg = host.string("environment",{"name":json("XDG_CACHE_HOME")})
+    if xdg != "":
+        return path.combine(xdg,"wood")
+    home = host.string("environment",{"name":json("HOME")})
+    if home == "":
+        raise problem("D5101","cannot locate a package cache; set WOOD_CACHE_DIR to an absolute path")
+    return path.combine(path.combine(home,".cache"),"wood")
+
+fn open_client(offline: bool, assets: str = "", needs_git: bool = true) -> Client:
+    for name in ["GIT_TERMINAL_PROMPT","GCM_INTERACTIVE"]:
+        host.call("environment_set",{"name":json(name),"value":json("0" if name == "GIT_TERMINAL_PROMPT" else "never")})
+    for name in ["GIT_ASKPASS","SSH_ASKPASS"]:
+        host.call("environment_set",{"name":json(name),"value":json("")})
+    result = Client(host.temporary(),0,offline,cache_root(),assets,{},[],"",false)
+    if not needs_git:
+        return result
+    version = ""
+    try:
+        version = result.run(["--version"])[1]
+    except err:
+        raise problem("D5102","wood packages require the git executable on PATH")
+    if not starts_with(version,"git version"):
+        raise problem("D5102","wood packages require the git executable on PATH")
+    return result
+
+record Project:
+    file: str
+    root: str
+    text: str
+    manifest: dict[str,json]
+    rows: list[json]
+    lock_text: str
+
+fn open_project(start: str) -> Project:
+    file = project.discover(start)
+    if file == "":
+        raise problem("D5101","no wood.json project found. Packages belong to a project: run 'wood init NAME', then run this inside it")
+    root = path.resolve(path.parent(file))
+    text = src.read(file,1048576)
+    manifest = project.object(json_parse(text))
+    lock = path.combine(root,"wood.lock")
+    rows: list[json] = []
+    lock_text = ""
+    if path_exists(lock):
+        lock_text = src.read(lock,16777216)
+        document = project.object(json_parse(lock_text))
+        if "remote" in document:
+            rows = json_list(document["remote"])
+    return Project(file,root,text,manifest,rows,lock_text)
+
+fn write_lock(root_file: str, rows: list[json], standards: dict[str,str]):
+    snapshot = project.snapshot(root_file,false)
+    if snapshot.configured.diagnostic.code != "":
+        raise problem("D5104",snapshot.configured.diagnostic.message)
+    document = project.object(trust.inventory(snapshot,standards))
+    ordered: dict[str,json] = {}
+    for row in rows:
+        ordered[project.string(project.object(row)["root"])] = row
+    sorted_rows: list[json] = []
+    for name in json_dict(json(ordered)):
+        append(sorted_rows,ordered[name])
+    document["remote"] = json(sorted_rows)
+    lock = path.combine(path.parent(root_file),"wood.lock")
+    if path_exists(lock):
+        # Python pins live beside the wood packages' pins and are managed by their provider.
+        previous = project.object(json_parse(src.read(lock,16777216)))
+        if "python" in previous:
+            document["python"] = previous["python"]
+    host.atomic(lock,json_dump(document)+"\n")
+
+record Options:
+    start: str
+    alias: str
+    update: bool
+    offline: bool
+    locked: bool
+    index: str
+    positional: list[str]
+
+fn add_package(input: str, options: Options, standards: dict[str,str], assets: str) -> int:
+    work = open_client(options.offline,assets)
+    graph = Graph(work,standards,{},{},[],[],[],options.index)
+    spec = graph.from_source(input)
+    current = open_project(options.start)
+    dependencies: dict[str,json] = {}
+    if "dependencies" in current.manifest:
+        dependencies = project.object(current.manifest["dependencies"])
+    final_relative = "vendor/"+lower(spec.owner)+"/"+lower(spec.repo)
+    if spec.identity != "":
+        pieces = split(spec.identity,"@")
+        final_relative = "vendor/"+lower(pieces[0])+"/"+pieces[1]
+    existing_alias = ""
+    for alias in dependencies:
+        item = project.object(dependencies[alias])
+        if "source" in item and split(project.string(item["source"]),"#")[0] == split(input,"#")[0]:
+            existing_alias = alias
+    if existing_alias != "":
+        final_relative = project.string(project.object(dependencies[existing_alias])["path"])
+    final = path.combine(current.root,final_relative)
+    # Staged at the project root: a rejected package leaves no vendor/ directories.
+    stage = host.temporary(current.root)
+    target = path.combine(stage,"package")
+    kept: list[json] = []
+    for row in current.rows:
+        data = project.object(row)
+        root = project.string(data["root"])
+        if root == final_relative or starts_with(root,final_relative+"/"):
+            continue
+        append(kept,row)
+        identity = key(parse_source(project.string(data["source"]),project.string(data["directory"]) if "directory" in data else ""))
+        graph.commits[identity] = project.string(data["commit"])
+        graph.requesters[identity] = "wood.lock entry "+root
+    installed = graph.add(spec,final_relative,target,"",path.name(current.root))
+    fallback = split(spec.identity,"@")[1] if spec.identity != "" else installed.name
+    alias = options.alias if options.alias != "" else (existing_alias if existing_alias != "" else fallback)
+    if not project.identifier(alias) or alias == "std":
+        raise problem("D5101","dependency alias must be an identifier other than std; use --as ALIAS")
+    if alias in dependencies and alias != existing_alias:
+        raise problem("D5106","dependency alias '"+alias+"' is already used; choose another with --as ALIAS")
+    if existing_alias != "":
+        for row in current.rows:
+            data = project.object(row)
+            if project.string(data["root"]) == final_relative and project.string(data["commit"]) == installed.commit:
+                print("Already installed: "+installed.label+" "+installed.version+" at "+installed.commit)
+                host.release(stage)
+                host.release(graph.client.logs)
+                return 0
+        if not options.update:
+            raise problem("D5106",installed.label+" is already a dependency at a different commit; use 'wood update "+existing_alias+"' or --update to change it deliberately")
+    elif path_exists(final):
+        raise problem("D5101","install location already exists: "+final_relative)
+    # Validate the staged graph completely before changing the project.
+    for i in range(len(graph.physical)-1,-1,-1):
+        physical = graph.physical[i]
+        check_modules(physical,project.object(json_parse(src.read(path.combine(physical,"wood.json"),1048576))),standards)
+    previous = path.combine(stage,"previous")
+    replaced = false
+    if existing_alias != "" and path_exists(final):
+        host.call("rename",{"from":json(final),"to":json(previous)})
+        replaced = true
+    fs.make_dirs(path.parent(final))
+    host.call("rename",{"from":json(target),"to":json(final)})
+    item: dict[str,json] = {"path":json(final_relative),"version":json(installed.version),"source":json(spec_text(spec))}
+    if existing_alias != "" and alias != existing_alias:
+        remove(dependencies,existing_alias)
+    dependencies[alias] = json(item)
+    current.manifest["dependencies"] = json(dependencies)
+    try:
+        host.atomic(current.file,json_dump(current.manifest)+"\n")
+        write_lock(current.file,kept+graph.rows,standards)
+    except err:
+        host.atomic(current.file,current.text)
+        if current.lock_text != "":
+            host.atomic(path.combine(current.root,"wood.lock"),current.lock_text)
+        host.call("rename",{"from":json(final),"to":json(target)})
+        if replaced:
+            host.call("rename",{"from":json(previous),"to":json(final)})
+        raise err
+    host.release(stage)
+    host.release(graph.client.logs)
+    print("Added "+installed.name+" "+installed.version+" from "+installed.label)
+    print("  pinned: "+installed.commit)
+    print("  location: "+final_relative)
+    print("  modules: "+join(installed.modules,", "))
+    if len(installed.dependencies) > 0:
+        print("  dependencies: "+join(installed.dependencies,", "))
+    print("Updated wood.json and wood.lock.")
+    if len(installed.modules) > 0:
+        print("Import with: import "+alias+"."+installed.modules[0]+" as "+split(installed.modules[0],".")[0])
+    print("Third-party code: review it before running. Commit wood.json and wood.lock; 'wood install' restores vendor/.")
+    return 0
+
+fn verify_existing(target: str, row: dict[str,json], children: list[str]):
+    source = project.string(row["source"])
+    receipt_file = path.combine(target,"wood-source.json")
+    if fs.kind(receipt_file) != "file":
+        raise problem("D5105",source+": installed package has no receipt; remove "+target+" and run 'wood install'")
+    receipt = src.read(receipt_file,16777216)
+    if sha.digest(receipt) != project.string(row["receipt_sha256"]):
+        raise problem("D5105",source+": installed receipt differs from wood.lock; remove "+target+" and run 'wood install'")
+    files = project.object(project.object(json_parse(receipt))["files"])
+    for name in files:
+        data = project.object(files[name])
+        file = path.combine(target,name)
+        if fs.kind(file) != "file" or fs.size(file) != json_int(data["size"]) or sha.digest(src.read(file,16777216)) != project.string(data["sha256"]):
+            raise problem("D5105",source+": installed file was changed or removed: "+name+"; remove "+target+" and run 'wood install'")
+    pending = [""]
+    while len(pending) > 0:
+        relative = pop(pending)
+        directory = target if relative == "" else path.combine(target,relative)
+        for name in fs.entries(directory,65536):
+            child = name if relative == "" else relative+"/"+name
+            full = path.combine(target,child)
+            kind = fs.kind(full)
+            if kind == "symlink":
+                raise problem("D5107",source+": filesystem link in installed package: "+child)
+            if child in children or child == "wood-source.json":
+                continue
+            if kind == "directory":
+                append(pending,child)
+            elif child not in files:
+                raise problem("D5105",source+": unexpected file in installed package: "+child+"; remove "+target+" and run 'wood install'")
+
+fn _pin(row: dict[str,json]) -> str:
+    source = project.object(project.member(row,"source"))
+    if "sha256" in source:
+        return "sha256:"+project.string(source["sha256"])
+    return project.string(source["commit"]) if "commit" in source else ""
+
+# A lock keeps working after a revocation, so it warns instead of failing. The catalog can be
+# unreachable or not list the package, and neither may stop a restore.
+fn revocation_notices(work: Client, rows: list[json], index: str):
+    for value in rows:
+        data = project.object(value)
+        if "identity" not in data:
+            continue
+        identity = project.string(data["identity"])
+        try:
+            for item in json_list(project.member(work.entry(identity,index),"versions")):
+                row = project.object(item)
+                if "revoked" in row and _pin(row) == project.string(data["commit"]):
+                    print("warning: "+identity+" "+project.string(project.member(row,"version"))+" was revoked: "+scrub(project.string(row["revoked"])))
+        except err:
+            pass
+
+fn restore(options: Options, standards: dict[str,str], assets: str = "") -> int:
+    current = open_project(options.start)
+    if current.lock_text == "":
+        raise problem("D5101","wood.lock is required to restore dependencies; run 'wood lock' or 'wood add'")
+    work = open_client(options.offline,assets,len(current.rows) > 0)
+    restored = 0
+    revocation_notices(work,current.rows,options.index)
+    # Sorted rows place each parent before packages nested inside it.
+    roots = [project.string(project.object(row)["root"]) for row in current.rows]
+    for row in current.rows:
+        data = project.object(row)
+        root = project.string(data["root"])
+        if not safe_relative(root):
+            raise problem("D5107","wood.lock contains an unsafe package root: "+root)
+        commit = project.string(data["commit"])
+        spec = parse_source(project.string(data["source"]),project.string(data["directory"]) if "directory" in data else "")
+        if spec.directory != "" and not safe_relative(spec.directory):
+            raise problem("D5107","wood.lock contains an unsafe package directory: "+root)
+        if "identity" in data:
+            spec.identity = project.string(data["identity"])
+        children: list[str] = []
+        for other in roots:
+            if starts_with(other,root+"/"):
+                append(children,other[len(root)+1:])
+        target = path.combine(current.root,root)
+        if path_exists(target):
+            verify_existing(target,data,children)
+            continue
+        fs.make_dirs(path.parent(target))
+        stage = host.temporary(path.parent(target))
+        staged = path.combine(stage,"package")
+        exported = Exported("","",{})
+        if starts_with(commit,"sha256:"):
+            spec.sha256 = commit[7:]
+            if not digest_id(spec.sha256):
+                raise problem("D5105","wood.lock contains an invalid archive digest for "+root)
+            exported = export_archive(work,spec,staged,project.string(data["requested"]))
+        else:
+            if not commit_id(commit):
+                raise problem("D5105","wood.lock contains an invalid commit for "+root)
+            requested = project.string(data["requested"])
+            directory = work.ensure(spec,commit,commit,requested if valid_ref(requested) and not commit_id(requested) else "")
+            exported = export_commit(work,directory,commit,staged,spec,requested)
+        if exported.tree != project.string(data["tree"]) or exported.receipt != project.string(data["receipt_sha256"]):
+            raise problem("D5105",root+": fetched content differs from wood.lock")
+        host.call("rename",{"from":json(staged),"to":json(target)})
+        host.release(stage)
+        restored += 1
+    snapshot = project.snapshot(current.file,false)
+    if snapshot.configured.diagnostic.code != "":
+        raise problem("D5105",snapshot.configured.diagnostic.message)
+    trust.prepare(snapshot,standards,true)
+    host.release(work.logs)
+    print("Restored "+str(restored)+" and verified "+str(len(current.rows))+" external package(s) from wood.lock.")
+    return 0
+
+fn remove_package(alias: str, options: Options, standards: dict[str,str]) -> int:
+    current = open_project(options.start)
+    dependencies: dict[str,json] = {}
+    if "dependencies" in current.manifest:
+        dependencies = project.object(current.manifest["dependencies"])
+    if alias not in dependencies:
+        raise problem("D5101","'"+alias+"' is not a dependency of this project")
+    item = project.object(dependencies[alias])
+    location = project.string(item["path"])
+    if "source" not in item:
+        raise problem("D5101","'"+alias+"' is a local dependency; edit wood.json to remove it")
+    if not safe_relative(location):
+        raise problem("D5107","refusing to remove an unsafe dependency path: "+location)
+    target = path.combine(current.root,location)
+    if path_exists(target):
+        stage = host.temporary(path.parent(target))
+        host.call("rename",{"from":json(target),"to":json(path.combine(stage,"removed"))})
+        host.release(stage)
+    kept: list[json] = []
+    for row in current.rows:
+        root = project.string(project.object(row)["root"])
+        if root != location and not starts_with(root,location+"/"):
+            append(kept,row)
+    remove(dependencies,alias)
+    current.manifest["dependencies"] = json(dependencies)
+    host.atomic(current.file,json_dump(current.manifest)+"\n")
+    write_lock(current.file,kept,standards)
+    print("Removed "+alias+". Updated wood.json and wood.lock.")
+    return 0
+
+fn update(alias_filter: str, options: Options, standards: dict[str,str], assets: str) -> int:
+    current = open_project(options.start)
+    dependencies: dict[str,json] = {}
+    if "dependencies" in current.manifest:
+        dependencies = project.object(current.manifest["dependencies"])
+    updated = 0
+    if alias_filter != "" and alias_filter not in dependencies:
+        raise problem("D5101","'"+alias_filter+"' is not a dependency of this project")
+    for alias in dependencies:
+        item = project.object(dependencies[alias])
+        if (alias_filter != "" and alias != alias_filter) or "source" not in item:
+            continue
+        text = split(project.string(item["source"]),"#")[0]
+        refreshed = options
+        refreshed.update = true
+        refreshed.alias = alias
+        add_package(text,refreshed,standards,assets)
+        updated += 1
+    return 0
+
+fn report_lines(start: str) -> list[str]:
+    current = open_project(start)
+    lines: list[str] = []
+    dependencies: dict[str,json] = {}
+    if "dependencies" in current.manifest:
+        dependencies = project.object(current.manifest["dependencies"])
+    pins: dict[str,str] = {}
+    labels: dict[str,str] = {}
+    for row in current.rows:
+        data = project.object(row)
+        root = project.string(data["root"])
+        pins[root] = project.string(data["commit"])[:12]
+        labels[root] = project.string(data["identity"]) if "identity" in data else project.string(data["source"])
+    direct: dict[str,int] = {}
+    if len(dependencies) > 0:
+        append(lines, "wood packages")
+    for alias in dependencies:
+        item = project.object(dependencies[alias])
+        location = project.string(item["path"])
+        direct[location] = 0
+        origin = labels[location] if location in labels else ("local path "+location)
+        append(lines, "  "+alias+"  "+project.string(item["version"])+"  "+origin+("  pinned "+pins[location] if location in pins else ""))
+    for root in pins:
+        if root not in direct:
+            append(lines, "  "+labels[root]+"  dependency of another package  pinned "+pins[root])
+    return lines
+
+fn info(identity: str, options: Options, assets: str) -> int:
+    if not is_identity(identity):
+        raise problem("D5101","expected owner@package")
+    work = open_client(options.offline,assets)
+    row = work.entry(split(identity,"#")[0],options.index)
+    print(json_dump(json(row)))
+    host.release(work.logs)
+    return 0
+
+fn parse_options(arguments: list[str], usage: str) -> Options:
+    result = Options(".","",false,false,false,"",[])
+    i = 0
+    while i < len(arguments):
+        argument = arguments[i]
+        if argument == "--offline":
+            result.offline = true
+        elif argument == "--update":
+            result.update = true
+        elif argument == "--locked":
+            result.locked = true
+        elif argument == "--diagnostics=json":
+            pass
+        elif argument in ["--as","--project","--index"]:
+            i += 1
+            if i == len(arguments):
+                raise problem("D5101","missing value for '"+argument+"'")
+            if argument == "--as":
+                result.alias = arguments[i]
+            elif argument == "--project":
+                result.start = arguments[i]
+            else:
+                result.index = arguments[i]
+        elif starts_with(argument,"-"):
+            raise problem("D5101","unknown option '"+argument+"'. "+usage)
+        else:
+            append(result.positional,argument)
+        i += 1
+    return result

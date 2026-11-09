@@ -1,0 +1,37 @@
+# Linux CLI frontend and explicit scripted qualification interface.
+import installer.bundle as bundle
+import installer.engine as engine
+import installer._native as native
+import std.path as path
+
+fn progress(done: int, total: int, operation: str) -> bool:
+    return true
+
+fn usage():
+    name = path.name(native.executable())
+    print("Usage: " + name + " install DESTINATION")
+    print("       " + name + " uninstall DESTINATION APPLICATION-ID")
+    print("       " + name + " install BUNDLE DESTINATION")
+
+arguments = args()
+if len(arguments) == 3 and arguments[0] == "uninstall":
+    preserved = engine.uninstall(arguments[1], arguments[2])
+    print("Uninstalled owned files; preserved items: " + str(preserved))
+elif len(arguments) in [2, 3] and arguments[0] == "install":
+    file = arguments[1] if len(arguments) == 3 else native.executable()
+    destination = arguments[-1]
+    payload = bundle.load(file)
+    print("Verifying and installing " + payload.app.name + " " + payload.app.version)
+    installed = engine.install(payload, destination, progress)
+    print("Installed " + payload.app.name + " in " + installed)
+    executable = path.combine(installed, payload.app.command)
+    print("")
+    print("Setup edits no shell files. Add this line to your shell profile to keep it:")
+    print("  export PATH=\"" + path.parent(executable) + ":$PATH\"")
+    if payload.app.id == "wood":
+        print("Then open a new terminal and run: wood --version")
+elif len(arguments) == 1 and arguments[0] in ["--help", "-h", "help"]:
+    usage()
+else:
+    usage()
+    exit(2)

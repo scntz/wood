@@ -1,0 +1,131 @@
+# Monomorphic native primitives used by the hosted compiler. Polymorphic rules
+# live in body_semantics; this table contains only fixed signatures/mappings.
+record Native:
+    name: str
+    parameters: list[str]
+    result: str
+    native: str
+    site: bool
+
+fn polymorphic() -> list[str]:
+    return ["print","eprint","len","str","int","float","assert","append","pop","range","args","keys","values","get","remove","slice","split","fs_list","json_list","json_dict","json","json_dump","unwrap","iter","next","yielded","finished","has_item","step_value","array_full","array_from_list","array_shape","array_rank","array_contiguous","array_copy","array_to_list","array_reshape","array_transpose","array_slice","array_sum","array_dot","array_matmul","array_affine","array_floats","array_integers"]
+
+fn fixed() -> dict[str,Native]:
+    result: dict[str,Native] = {}
+    groups = [
+        ("math_sqrt math_sin math_cos",["Float"],"Float"),
+        ("math_finite",["Float"],"Bool"),
+        ("stream_open",["Str","Str"],"Stream"),
+        ("stream_read stream_read_line",["Stream","Int"],"Str"),
+        ("stream_write",["Stream","Str"],"Void"),
+        ("stream_flush stream_close",["Stream"],"Void"),
+        ("stream_closed",["Stream"],"Bool"),
+        ("stream_seek",["Stream","Int"],"Void"),
+        ("stream_tell",["Stream"],"Int"),
+        ("stream_timeout",["Stream","Int"],"Void"),
+        ("tcp_connect tcp_listen",["Str","Int","Int"],"Stream"),
+        ("tcp_accept",["Stream"],"Stream"),
+        ("tcp_port",["Stream"],"Int"),
+        ("tcp_shutdown_write",["Stream"],"Void"),
+        ("db_open",["Str","Int"],"Database"),
+        ("db_close",["Database"],"Void"),
+        ("db_closed",["Database"],"Bool"),
+        ("db_changes db_last_id",["Database"],"Int"),
+        ("db_prepare",["Database","Str"],"Statement"),
+        ("db_begin",["Database"],"Transaction"),
+        ("db_commit db_rollback",["Transaction"],"Void"),
+        ("db_version tls_version",[],"Str"),
+        ("stmt_close stmt_reset",["Statement"],"Void"),
+        ("stmt_step",["Statement"],"Bool"),
+        ("stmt_bind_int",["Statement","Int","Int"],"Void"),
+        ("stmt_bind_float",["Statement","Int","Float"],"Void"),
+        ("stmt_bind_text stmt_bind_blob",["Statement","Int","Str"],"Void"),
+        ("stmt_bind_null",["Statement","Int"],"Void"),
+        ("stmt_columns",["Statement"],"Int"),
+        ("stmt_name stmt_kind stmt_text stmt_blob",["Statement","Int"],"Str"),
+        ("stmt_int",["Statement","Int"],"Int"),
+        ("stmt_float",["Statement","Int"],"Float"),
+        ("tls_context_new",["Str","Str"],"TlsContext"),
+        ("tls_context_close",["TlsContext"],"Void"),
+        ("tls_accept",["Stream","TlsContext"],"Stream"),
+        ("tls_connect",["Str","Int","Str","Int"],"Stream"),
+        ("task_spawn",["Job","Json"],"Task"),
+        ("task_spawn_io",["IoJob","Stream","Json"],"Task"),
+        ("task_wait",["Task","Int"],"Json"),
+        ("task_done",["Task"],"Bool"),
+        ("task_cancel task_close",["Task"],"Void"),
+        ("task_cancelled",[],"Bool"),
+        ("task_checkpoint",[],"Void"),
+        ("path_join",["Str","Str"],"Str"),
+        ("path_name path_parent path_absolute path_normalize path_identity fs_kind",["Str"],"Str"),
+        ("path_resolve",["Str","Bool"],"Str"),
+        ("path_within",["Str","Str"],"Bool"),
+        ("path_is_absolute fs_mkdirs fs_remove path_exists",["Str"],"Bool"),
+        ("fs_size",["Str"],"Int"),
+        ("time_sleep",["Float"],"Void"),
+        ("env_get",["Str"],"OptionalStr"),
+        ("random_bytes",["Int"],"Str"),
+        ("time_monotonic",[],"Float"),
+        ("time_monotonic_ns",[],"Int"),
+        ("json_parse",["Str"],"Json"),
+        ("json_kind json_str",["Json"],"Str"),
+        ("json_int",["Json"],"Int"),
+        ("json_float",["Json"],"Float"),
+        ("json_bool",["Json"],"Bool"),
+        ("json_null",[],"Json"),
+        ("strip read_text",["Str"],"Str"),
+        ("write_text",["Str","Str"],"Void"),
+        ("find",["Str","Str"],"Int"),
+        ("starts_with ends_with",["Str","Str"],"Bool"),
+        ("replace",["Str","Str","Str"],"Str"),
+        ("join",["ListStr","Str"],"Str"),
+        ("byte_value",["Str"],"Int"),
+        ("byte_string",["Int"],"Str"),
+        ("char_count",["Str"],"Int"),
+        ("chars",["Str"],"ListStr"),
+        ("char_slice",["Str","Int","Int"],"Str"),
+        ("exit",["Int"],"Void"),
+        ("error",["Str","Str"],"Error"),
+        ("read_line",[],"Str"),
+        ("eof",[],"Bool")]
+    for group in groups:
+        for name in split(group[0]," "):
+            result[name] = Native(name,group[1],group[2],name,true)
+    for name in ["math_finite","stream_closed","time_monotonic","json_kind","json_null","strip","starts_with","ends_with"]:
+        result[name].site = false
+    result["exit"].native = "exit_program"
+    result["error"].native = "make_error"
+    return result
+
+# These production primitives diagnose arguments at the value, after evaluating
+# all argument expressions, including when the written arity is incorrect.
+fn service(name: str) -> bool:
+    return starts_with(name,"py_") or name == "stream_timeout" or name == "random_bytes" or starts_with(name,"tcp_") or starts_with(name,"db_") or starts_with(name,"stmt_") or starts_with(name,"tls_") or starts_with(name,"task_")
+
+# Vocabulary snapshot, verified against the production registry by CTest.
+fn known() -> list[str]:
+    return ["array_full", "array_from_list", "array_shape", "array_rank", "array_contiguous", "array_copy", "array_to_list", "array_reshape", "array_transpose", "array_slice", "array_sum", "array_dot", "array_matmul", "array_affine", "array_floats", "array_integers", "math_sqrt", "math_sin", "math_cos", "math_finite", "print", "eprint", "exit", "error", "len", "str", "int", "float", "assert", "append", "pop", "range", "iter", "next", "yielded", "finished", "has_item", "step_value", "unwrap", "keys", "values", "get", "remove", "slice", "byte_value", "byte_string", "char_count", "chars", "char_slice", "json", "json_parse", "json_dump", "json_null", "json_kind", "json_int", "json_float", "json_bool", "json_str", "json_list", "json_dict", "split", "join", "strip", "find", "replace", "starts_with", "ends_with", "read_text", "write_text", "path_exists", "fs_kind", "fs_list", "fs_size", "fs_mkdirs", "fs_remove", "path_join", "path_name", "path_parent", "path_absolute", "path_normalize", "path_resolve", "path_identity", "path_within", "path_is_absolute", "time_sleep", "env_get", "random_bytes", "time_monotonic", "time_monotonic_ns", "stream_open", "stream_read", "stream_read_line", "stream_write", "stream_flush", "stream_close", "stream_closed", "stream_seek", "stream_tell", "stream_timeout", "tcp_connect", "tcp_listen", "tcp_accept", "tcp_port", "tcp_shutdown_write", "db_open", "db_close", "db_closed", "db_changes", "db_last_id", "db_prepare", "db_begin", "db_commit", "db_rollback", "db_version", "stmt_close", "stmt_step", "stmt_reset", "stmt_bind_int", "stmt_bind_float", "stmt_bind_text", "stmt_bind_blob", "stmt_bind_null", "stmt_columns", "stmt_name", "stmt_kind", "stmt_int", "stmt_float", "stmt_text", "stmt_blob", "task_spawn", "task_spawn_io", "task_wait", "task_done", "task_cancel", "task_close", "task_cancelled", "task_checkpoint", "tls_context_new", "tls_context_close", "tls_accept", "tls_connect", "tls_version", "args", "read_line", "eof"]
+
+# Explicit optional LLVM profile. Keep fixed()/known() as the independently
+# verified C++ reference vocabulary, rather than claiming reference parity for
+# a new service which that backend does not implement.
+fn with_python() -> dict[str,Native]:
+    result = fixed()
+    groups = [
+        ("py_import",["Str"],"PythonObject"),
+        ("py_attr",["PythonObject","Str"],"PythonObject"),
+        ("py_call",["PythonObject","ListPythonObject","DictPythonObject"],"PythonObject"),
+        ("py_value",["Json"],"PythonObject"),
+        ("py_json",["PythonObject"],"Json"),
+        ("py_bytes",["Str"],"PythonObject"),
+        ("py_tuple",["ListPythonObject"],"PythonObject"),
+        ("py_text py_to_bytes",["PythonObject"],"Str"),
+        ("py_int",["PythonObject"],"Int"),
+        ("py_float",["PythonObject"],"Float"),
+        ("py_bool py_closed",["PythonObject"],"Bool"),
+        ("py_close",["PythonObject"],"Void"),
+        ("py_finish",[],"Void")]
+    for group in groups:
+        for name in split(group[0]," "):
+            result[name] = Native(name,group[1],group[2],name,true)
+    return result

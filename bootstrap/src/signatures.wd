@@ -1,0 +1,340 @@
+# Declaration semantics. Function bodies and concrete specialization are later passes.
+import type_system as ts
+import modules as mod
+import bindings as bind
+import syntax as ast
+import sources as src
+import lexer as lx
+
+record Parameter:
+    name: str
+    type: int
+    mode: str
+    mutable_borrow: bool
+    field: int
+    default_value: int
+
+record Declaration:
+    module: int
+    statement: int
+    symbol: int
+    parent: int
+    result: int
+    parameters: list[Parameter]
+
+record Result:
+    compilation: mod.Compilation
+    pool: ts.Pool
+    declarations: list[Declaration]
+    diagnostic: src.Diagnostic
+
+record Resolver:
+    compilation: mod.Compilation
+    bindings: bind.Result
+    pool: ts.Pool
+    declarations: list[Declaration]
+    indices: list[dict[int,int]]
+    symbols: dict[int,int]
+    problem: src.Diagnostic | None
+    current_module: int
+    current_token: lx.Token
+
+    fn fail(mut self, code: str, message: str, module: int, token: lx.Token):
+        self.problem = src.located(code,message,self.compilation.modules[module].file,module,token)
+        raise "bootstrap signature rejection"
+
+    fn raw(mut self, tree: ast.Tree, value: int) -> int:
+        node = tree.types[value]
+        element = -1
+        key = -1
+        if node.element >= 0:
+            element = self.raw(tree,node.element)
+        if node.key >= 0:
+            key = self.raw(tree,node.key)
+        parameters: list[int] = []
+        for item in node.parameters:
+            append(parameters,self.raw(tree,item))
+        return self.pool.intern(node.kind,node.name,element,key,parameters)
+
+    fn register(mut self, module: int, statement: int, symbol: int, parent: int):
+        tree = self.compilation.modules[module].tree
+        stmt = tree.statements[statement]
+        self.current_module = module
+        self.current_token = stmt.token
+        result = self.raw(tree,stmt.return_type)
+        parameters: list[Parameter] = []
+        for parameter in stmt.parameters:
+            append(parameters,Parameter(parameter.name,self.raw(tree,parameter.type),parameter.mode,parameter.mutable_borrow,-1,parameter.default_value))
+        self.indices[module][statement] = len(self.declarations)
+        if symbol > 0:
+            self.symbols[symbol] = len(self.declarations)
+        append(self.declarations,Declaration(module,statement,symbol,parent,result,parameters))
+
+    fn resolve_type(mut self, value: int, module: int, token: lx.Token, arguments: dict[str,int], depth: int = 0) -> int:
+        self.current_module = module
+        self.current_token = token
+        if depth > 128:
+            self.fail("E3029","recursive or excessively deep associated type",module,token)
+        node = self.pool.types[value]
+        kind = node.kind
+        env = self.bindings.environments[module].names
+        if kind in ["Named","Parameter"] and node.name in arguments:
+            if len(node.parameters) != 0:
+                self.fail("E3024","type parameter '"+node.name+"' does not accept type arguments",module,token)
+            return arguments[node.name]
+        if kind == "Signature":
+            if node.name not in arguments:
+                self.fail("E3028","callable pattern requires a declared type parameter '"+node.name+"'",module,token)
+            actual = arguments[node.name]
+            if self.pool.types[actual].kind != "Parameter":
+                return actual
+        if kind == "Tuple" or kind in ["Function","Callable","Closure","Signature"]:
+            parameters: list[int] = []
+            for item in node.parameters:
+                append(parameters,self.resolve_type(item,module,token,arguments,depth+1))
+            element = node.element
+            if kind != "Tuple":
+                element = self.resolve_type(element,module,token,arguments,depth+1)
+            return self.pool.intern(kind,node.name,element,node.key,parameters,node.declaration)
+        if kind == "Optional":
+            element = self.resolve_type(node.element,module,token,arguments,depth+1)
+            return self.pool.intern("Optional",element=element)
+        if kind == "Named" and "." in node.name and node.name not in env:
+            parts = split(node.name,".")
+            member = parts[len(parts)-1]
+            prefix = join(parts[:len(parts)-1],".")
+            if prefix in arguments and member in ["Result","Item","Iterator"]:
+                kind = "Projection"
+                node = ts.Type(kind,member,arguments[prefix],-1,[],0)
+        if kind in ["Step","Cursor","Array","List"]:
+            element = self.resolve_type(node.element,module,token,arguments,depth+1)
+            return self.pool.intern(kind,element=element)
+        if kind == "Projection":
+            base = self.resolve_type(node.element,module,token,arguments,depth+1)
+            actual = self.pool.types[base]
+            if actual.kind in ["Parameter","Projection"]:
+                return self.pool.intern("Projection",node.name,base)
+            if node.name == "Result" and actual.kind in ["Function","Callable","Closure"]:
+                return actual.element
+            if node.name == "Iterator":
+                if actual.kind in ["List","Array","Dict","Str","Range"]:
+                    return self.pool.intern("Cursor",element=base)
+                if actual.kind == "Cursor":
+                    return base
+            if node.name == "Item":
+                if actual.kind in ["List","Array"]:
+                    return actual.element
+                if actual.kind == "Dict":
+                    return actual.key
+                if actual.kind == "Str":
+                    return self.pool.intern("Str")
+                if actual.kind == "Range":
+                    return self.pool.intern("Int")
+                if actual.kind == "Cursor":
+                    source = self.pool.types[actual.element]
+                    if source.kind in ["List","Array"]:
+                        return source.element
+                    if source.kind == "Dict":
+                        return source.key
+                    if source.kind == "Str":
+                        return self.pool.intern("Str")
+                    if source.kind == "Range":
+                        return self.pool.intern("Int")
+            if actual.kind == "Record" and node.name in ["Iterator","Item"]:
+                owner = self.declarations[self.symbols[actual.declaration]]
+                record = self.compilation.modules[owner.module].tree.statements[owner.statement]
+                bound: dict[str,int] = {}
+                for index in range(len(record.type_parameters)):
+                    bound[record.type_parameters[index]] = actual.parameters[index]
+                names = ["iter","next"]
+                if node.name == "Item":
+                    names = ["next","iter"]
+                for name in names:
+                    for method in record.body:
+                        declaration = self.compilation.modules[owner.module].tree.statements[method]
+                        if declaration.name != name:
+                            continue
+                        if node.name == "Iterator" and name == "next":
+                            return base
+                        result = self.declarations[self.indices[owner.module][method]].result
+                        if self.pool.types[result].kind == "Unknown":
+                            return self.pool.intern("Projection",node.name,base)
+                        result = self.pool.substitute(result,bound)
+                        result = self.resolve_type(result,module,token,arguments,depth+1)
+                        if node.name == "Iterator":
+                            return result
+                        if name == "next":
+                            if self.pool.types[result].kind == "Step":
+                                return self.pool.types[result].element
+                        else:
+                            projection = self.pool.intern("Projection","Item",result)
+                            return self.resolve_type(projection,module,token,arguments,depth+1)
+            self.fail("E3029","type "+self.pool.display(base)+" does not provide ."+node.name,module,token)
+        if kind == "Named":
+            symbol = 0
+            if node.name in env:
+                candidate = env[node.name]
+                if self.bindings.symbols[candidate-1].kind == "Record":
+                    symbol = candidate
+            if symbol == 0:
+                if node.name in ["step","cursor","array"]:
+                    if len(node.parameters) != 1:
+                        self.fail("E3024","native step/cursor annotations require one type argument",module,token)
+                    names = {"step":"Step","cursor":"Cursor","array":"Array"}
+                    element = self.resolve_type(node.parameters[0],module,token,arguments,depth+1)
+                    return self.pool.intern(names[node.name],element=element)
+                if len(node.parameters) != 0:
+                    self.fail("E3024","unknown generic record type '"+node.name+"'",module,token)
+                native = {"None":"None","range":"Range","stream":"Stream","database":"Database","statement":"Statement","transaction":"Transaction","tls_context":"TlsContext","py_object":"PythonObject","task":"Task"}
+                if node.name in native:
+                    return self.pool.intern(native[node.name])
+                self.fail("E2003","unknown or invalid type '"+node.name+"'",module,token)
+            owner = self.bindings.symbols[symbol-1]
+            record = self.compilation.modules[owner.module].tree.statements[owner.statement]
+            if len(node.parameters) != len(record.type_parameters):
+                self.fail("E3024","record '"+node.name+"' expects "+str(len(record.type_parameters))+" type arguments",module,token)
+            parameters: list[int] = []
+            for item in node.parameters:
+                append(parameters,self.resolve_type(item,module,token,arguments,depth+1))
+            return self.pool.intern("Record",record.name,parameters=parameters,declaration=symbol)
+        if kind == "Dict":
+            key = self.resolve_type(node.key,module,token,arguments,depth+1)
+            if self.pool.types[key].kind not in ["Int","Str","Bool","Parameter"]:
+                self.fail("E3020","dictionary keys must be int, str, or bool",module,token)
+            element = self.resolve_type(node.element,module,token,arguments,depth+1)
+            return self.pool.intern("Dict",element=element,key=key)
+        return value
+
+    fn constant(self, module: int, value: int) -> bool:
+        expr = self.compilation.modules[module].tree.expressions[value]
+        if expr.kind in ["Integer","Float","String","Bool","None"]:
+            return true
+        if expr.kind == "Name":
+            return expr.token.text in ["None","True","False"]
+        if expr.kind in ["Tuple","List","Dict"]:
+            for child in expr.children:
+                if not self.constant(module,child):
+                    return false
+            return true
+        if expr.kind == "Unary":
+            return expr.token.text in ["-","+","~","not"] and self.constant(module,expr.children[0])
+        return false
+
+    fn normalize(mut self, module: int, value: int):
+        expr = self.compilation.modules[module].tree.expressions[value]
+        if expr.kind == "Name":
+            if expr.token.text in self.bindings.environments[module].names:
+                self.fail("E3026","default literal name is shadowed by a declaration",module,expr.token)
+            kind = "None"
+            text = expr.token.text
+            if text != "None":
+                kind = "Bool"
+                text = "false"
+                if expr.token.text == "True":
+                    text = "true"
+            self.compilation.modules[module].tree.expressions[value].kind = kind
+            self.compilation.modules[module].tree.expressions[value].token.text = text
+        for child in expr.children:
+            self.normalize(module,child)
+
+    fn signature(mut self, index: int, arguments: dict[str,int]):
+        declaration = self.declarations[index]
+        module = declaration.module
+        stmt = self.compilation.modules[module].tree.statements[declaration.statement]
+        self.current_module = module
+        self.current_token = stmt.token
+        env = self.bindings.environments[module].names
+        for name in stmt.type_parameters:
+            if bind.reserved(name) or name in ["int","float","str","dict","tuple","None","json"] or name in env or name in arguments:
+                self.fail("E3024","duplicate or reserved type parameter '"+name+"'",module,stmt.token)
+            arguments[name] = self.pool.intern("Parameter",name)
+        result = self.resolve_type(declaration.result,module,stmt.token,arguments)
+        if not self.pool.depth_valid(result):
+            self.fail("E2002","type nesting exceeds 64 levels",module,stmt.token)
+        self.declarations[index].result = result
+        fields: list[str] = []
+        for position in range(len(stmt.parameters)):
+            parameter = stmt.parameters[position]
+            if parameter.name in fields:
+                self.fail("E3001","duplicate parameter or field '"+parameter.name+"'",module,parameter.token)
+            append(fields,parameter.name)
+            if parameter.default_value >= 0:
+                if not self.constant(module,parameter.default_value):
+                    self.fail("E3026","default arguments require literal values, containers of literals, or unary literal expressions",module,parameter.token)
+                self.normalize(module,parameter.default_value)
+            result = self.resolve_type(self.declarations[index].parameters[position].type,module,parameter.token,arguments)
+            if not self.pool.depth_valid(result):
+                self.fail("E2002","type nesting exceeds 64 levels",module,parameter.token)
+            self.declarations[index].parameters[position].type = result
+            if stmt.kind == "Record":
+                self.declarations[index].parameters[position].field = position
+        if stmt.kind == "Record":
+            for method in stmt.body:
+                member = self.compilation.modules[module].tree.statements[method]
+                if member.name in fields:
+                    self.fail("E3001","duplicate record member '"+member.name+"'",module,member.token)
+                append(fields,member.name)
+                parameters: list[int] = []
+                for name in stmt.type_parameters:
+                    append(parameters,arguments[name])
+                receiver = self.pool.intern("Record",stmt.name,parameters=parameters,declaration=declaration.symbol)
+                child = self.indices[module][method]
+                self.declarations[child].parameters[0].type = receiver
+                self.signature(child,arguments)
+        if stmt.external:
+            return_node = self.pool.types[self.declarations[index].result]
+            if return_node.kind not in ["Void","Int","Float"]:
+                self.fail("E3023","external functions return only int, float, or void",module,stmt.token)
+            for position in range(len(stmt.parameters)):
+                parameter = stmt.parameters[position]
+                node = self.pool.types[self.declarations[index].parameters[position].type]
+                if parameter.mutable_borrow and (node.kind != "Array" or parameter.default_value >= 0):
+                    self.fail("E3023","mut native parameters require an array and cannot have defaults",module,parameter.token)
+                valid = node.kind in ["Int","Float","Str"]
+                if node.kind == "Array":
+                    valid = self.pool.types[node.element].kind in ["Int","Float"]
+                if not valid and node.kind == "Function":
+                    valid = self.pool.types[node.element].kind in ["Int","Float","Void"]
+                    for item in node.parameters:
+                        if self.pool.types[item].kind not in ["Int","Float"]:
+                            valid = false
+                if not valid:
+                    self.fail("E3023","external parameters require scalars, borrowed bytes or scalar callbacks",module,parameter.token)
+            keywords = split("alignas alignof and_eq asm atomic_cancel atomic_commit atomic_noexcept auto bitand bitor bool catch char char8_t char16_t char32_t class co_await co_return co_yield compl concept const consteval constexpr constinit const_cast decltype default delete do double dynamic_cast enum explicit export extern false float friend goto inline int long mutable namespace new noexcept not_eq nullptr operator private protected public register reinterpret_cast requires short signed sizeof static static_assert static_cast struct switch synchronized template this thread_local throw true typedef typeid typename union unsigned using virtual void volatile wchar_t xor xor_eq"," ")
+            if stmt.name in keywords or starts_with(stmt.name,"_") or "__" in stmt.name:
+                self.fail("E3023","external symbol must be a non-reserved C identifier",module,stmt.token)
+
+fn rejected(diagnostic: src.Diagnostic) -> Result:
+    return Result(mod.Compilation([],0),ts.pool(),[],diagnostic)
+
+fn resolve(compilation: mod.Compilation, bindings: bind.Result, max_types: int = 1048576) -> Result:
+    if max_types < 2 or max_types > 1048576:
+        return rejected(src.Diagnostic("B3201","invalid semantic type budget","",0,0,0,0))
+    if bindings.diagnostic.code != "":
+        return rejected(bindings.diagnostic)
+    resolver = Resolver(compilation,bindings,ts.pool(max_types),[],[],{},None,0,src.origin())
+    try:
+        for module in compilation.modules:
+            append(resolver.indices,{})
+        # Register all global declarations first, keeping the binder's IDs.
+        for symbol in range(len(bindings.symbols)):
+            owner = bindings.symbols[symbol]
+            resolver.current_module = owner.module
+            resolver.current_token = compilation.modules[owner.module].tree.statements[owner.statement].token
+            resolver.register(owner.module,owner.statement,symbol+1,-1)
+        for index in range(len(bindings.symbols)):
+            declaration = resolver.declarations[index]
+            stmt = compilation.modules[declaration.module].tree.statements[declaration.statement]
+            if stmt.kind == "Record":
+                for method in stmt.body:
+                    resolver.register(declaration.module,method,0,index)
+        for index in range(len(bindings.symbols)):
+            resolver.signature(index,{})
+        return Result(resolver.compilation,resolver.pool,resolver.declarations,src.success())
+    except err:
+        if resolver.problem is not None:
+            return rejected(unwrap(resolver.problem))
+        if err.code == "R4010" and err.message == "bootstrap semantic type budget exceeded":
+            module = resolver.current_module
+            return rejected(src.located("B3202",err.message,compilation.modules[module].file,module,resolver.current_token))
+        raise err

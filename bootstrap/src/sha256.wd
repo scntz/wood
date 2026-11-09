@@ -1,0 +1,63 @@
+# Internal bounded SHA-256 for format-1 project content integrity.
+# No padded input copy; arithmetic stays within signed 64-bit Wood integers.
+fn rotate(value: int, count: int) -> int:
+    return ((value >> count) | (value << (32-count))) & 4294967295
+
+fn digest(text: str) -> str:
+    if len(text) > 16777216:
+        raise "SHA-256 input exceeds 16 MiB"
+    constants = [1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298]
+    state = [1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225]
+    words: list[int] = []
+    for i in range(64):
+        append(words,0)
+    padded = ((len(text)+72)//64)*64
+    bits = len(text)*8
+    for block in range(0,padded,64):
+        for j in range(16):
+            word = 0
+            for byte in range(4):
+                offset = block+j*4+byte
+                value = 0
+                if offset < len(text):
+                    value = byte_value(text[offset])
+                elif offset == len(text):
+                    value = 128
+                elif offset >= padded-8:
+                    value = (bits >> ((padded-1-offset)*8)) & 255
+                word = (word << 8) | value
+            words[j] = word
+        for j in range(16,64):
+            x = words[j-15]
+            y = words[j-2]
+            first = rotate(x,7) ^ rotate(x,18) ^ (x >> 3)
+            second = rotate(y,17) ^ rotate(y,19) ^ (y >> 10)
+            words[j] = (words[j-16]+first+words[j-7]+second) & 4294967295
+        a = state[0]
+        b = state[1]
+        c = state[2]
+        d = state[3]
+        e = state[4]
+        f = state[5]
+        g = state[6]
+        h = state[7]
+        for j in range(64):
+            first = h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e & f)^((~e) & g))+constants[j]+words[j]
+            second = (rotate(a,2)^rotate(a,13)^rotate(a,22))+((a & b)^(a & c)^(b & c))
+            h = g
+            g = f
+            f = e
+            e = (d+first) & 4294967295
+            d = c
+            c = b
+            b = a
+            a = (first+second) & 4294967295
+        values = [a,b,c,d,e,f,g,h]
+        for j in range(8):
+            state[j] = (state[j]+values[j]) & 4294967295
+    hex = "0123456789abcdef"
+    result: list[str] = []
+    for word in state:
+        for shift in range(28,-1,-4):
+            append(result,hex[(word >> shift) & 15])
+    return join(result,"")

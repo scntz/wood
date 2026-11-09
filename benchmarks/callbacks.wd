@@ -1,0 +1,16 @@
+fn square_plus(value: int) -> int:
+    return value * value + 1
+
+fn square_minus(value: int) -> int:
+    return value * value - 1
+
+arguments = args()
+count = int(arguments[0])
+callback = square_plus
+if count < 0:
+    callback = square_minus
+    count = -count
+total = 0
+for i in range(count):
+    total = total + callback(i % 256)
+print(total)

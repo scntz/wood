@@ -1,0 +1,41 @@
+# Actual device I/O through the optional Windows adapter. Import this module only
+# when linking the adapter; buffer and wav stay pure Wood on every platform.
+import _native as native
+import buffer as audio
+
+fn output_devices() -> int:
+    return native.wood_audio_output_count()
+
+fn input_devices() -> int:
+    return native.wood_audio_input_count()
+
+fn _status(code: int):
+    if code == -1:
+        raise "no audio device is available"
+    if code == -2:
+        raise "the audio format was rejected by the device"
+    if code == -3:
+        raise "invalid audio arguments"
+    if code == -4:
+        raise "audio is unavailable: winmm.dll could not be loaded"
+    if code < 0:
+        raise "audio device failure"
+
+fn play(buffer: audio.Buffer, volume: float = 1.0):
+    # Blocks until playback finishes; the device is closed on every path.
+    if volume < 0.0 or volume > 1.0:
+        raise "volume must be between 0.0 and 1.0"
+    pcm = array_full(len(buffer.samples), 0)
+    for i in range(len(buffer.samples)):
+        sample = buffer.samples[i]
+        value = 1.0 if sample > 1.0 else (-1.0 if sample < -1.0 else sample)
+        pcm[i] = int(value*32767.0)
+    _status(native.wood_audio_play(pcm, buffer.channels, buffer.rate, int(volume*65535.0)))
+
+fn record(seconds: float, rate: int = 44100, channels: int = 1) -> audio.Buffer:
+    # Only ever called explicitly by the application; nothing records implicitly.
+    if seconds <= 0.0 or seconds > 3600.0:
+        raise "recording length must be between 0 and 3600 seconds"
+    pcm = array_full(int(seconds*float(rate))*channels, 0)
+    _status(native.wood_audio_record(pcm, channels, rate))
+    return audio.Buffer(rate, channels, [float(pcm[i])/32768.0 for i in range(len(pcm))])

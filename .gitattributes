@@ -1,0 +1,26 @@
+* text=auto eol=lf
+*.wd text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.md text eol=lf
+*.cmake text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.in text eol=lf
+*.ll text eol=lf
+*.ps1 text eol=lf
+*.jsonl text eol=lf
+*.ebnf text eol=lf
+*.pem text eol=lf
+LICENSE* text eol=lf
+tests/fixtures/obj/*.obj text eol=lf
+# Keep intentional blank final lines in the imported upstream notice text.
+third_party/llvm-19.1.7/LICENSE.txt whitespace=-blank-at-eof
+third_party/llvm-19.1.7/SHA1-NOTICE.txt whitespace=-blank-at-eof
+third_party/llvm-19.1.7/rpmalloc-NOTICE.txt whitespace=-blank-at-eof
+*.png binary

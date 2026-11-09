@@ -1,0 +1,147 @@
+# Pure argument parsing: no process execution, environment mutation or global state.
+record Option:
+    name: str
+    short: str
+    takes_value: bool
+    repeat: bool
+    description: str
+
+fn flag(name: str, short: str = "", description: str = "") -> Option:
+    return Option(name, short, false, false, description)
+
+fn value(name: str, short: str = "", repeat: bool = false, description: str = "") -> Option:
+    return Option(name, short, true, repeat, description)
+
+record Arguments:
+    options: dict[str,list[str]]
+    positionals: list[str]
+
+    fn has(self, name: str) -> bool:
+        return name in self.options
+
+    fn optional(self, name: str) -> str | None:
+        if name in self.options:
+            return self.options[name][-1]
+        return None
+
+    fn one(self, name: str, fallback: str = "") -> str:
+        if name in self.options:
+            return self.options[name][-1]
+        return fallback
+
+    fn many(self, name: str) -> list[str]:
+        if name in self.options:
+            return self.options[name]
+        return []
+
+    fn _add(mut self, option: Option, text: str):
+        if option.name in self.options and not option.repeat:
+            raise "option --" + option.name + " was supplied more than once"
+        if option.name not in self.options:
+            self.options[option.name] = []
+        append(self.options[option.name], text)
+
+fn _letter(text: str) -> bool:
+    return len(text) == 1 and ((text >= "a" and text <= "z") or (text >= "A" and text <= "Z"))
+
+fn _definitions(options: list[Option]) -> tuple[dict[str,Option],dict[str,Option]]:
+    if len(options) > 256:
+        raise "at most 256 option definitions are supported"
+    long: dict[str,Option] = {}
+    short: dict[str,Option] = {}
+    for option in options:
+        if len(option.name) == 0 or not _letter(option.name[0]):
+            raise "option names must start with an ASCII letter"
+        for part in option.name:
+            if not _letter(part) and not (part >= "0" and part <= "9") and part != "-":
+                raise "option names accept only ASCII letters, digits and '-'"
+        if option.name in long:
+            raise "duplicate option --" + option.name
+        if option.short != "":
+            if not _letter(option.short):
+                raise "short options must be one ASCII letter"
+            if option.short in short:
+                raise "duplicate short option -" + option.short
+            short[option.short] = option
+        long[option.name] = option
+    return (long, short)
+
+fn parse(arguments: list[str], options: list[Option]) -> Arguments:
+    definitions = _definitions(options)
+    long = definitions[0]
+    short = definitions[1]
+    if len(arguments) > 4096:
+        raise "at most 4096 arguments are supported"
+    size = 0
+    for argument in arguments:
+        size += len(argument)
+        if size > 16777216:
+            raise "argument data exceeds 16 MiB"
+    result = Arguments({}, [])
+    positional = false
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        if positional:
+            append(result.positionals, argument)
+        elif argument == "--":
+            positional = true
+        elif starts_with(argument, "--"):
+            split_at = find(argument, "=")
+            name = argument[2:] if split_at < 0 else argument[2:split_at]
+            if name not in long:
+                raise "unknown option --" + name
+            option = long[name]
+            text = "true"
+            if option.takes_value:
+                if split_at >= 0:
+                    text = argument[split_at+1:]
+                elif index < len(arguments):
+                    text = arguments[index]
+                    index += 1
+                else:
+                    raise "option --" + name + " requires a value"
+            elif split_at >= 0:
+                raise "flag --" + name + " does not accept a value"
+            result._add(option, text)
+        elif len(argument) > 1 and argument[0] == "-" and _letter(argument[1]):
+            offset = 1
+            while offset < len(argument):
+                name = argument[offset]
+                if name not in short:
+                    raise "unknown short option -" + name
+                option = short[name]
+                offset += 1
+                text = "true"
+                if option.takes_value:
+                    if offset < len(argument):
+                        text = argument[offset:]
+                    elif index < len(arguments):
+                        text = arguments[index]
+                        index += 1
+                    else:
+                        raise "option --" + option.name + " requires a value"
+                    offset = len(argument)
+                result._add(option, text)
+        else:
+            append(result.positionals, argument)
+    return result
+
+fn help(program: str, options: list[Option]) -> str:
+    _definitions(options)
+    lines = ["Usage: " + program + " [options] [arguments...]", "", "Options:"]
+    for option in options:
+        label = "  "
+        if option.short != "":
+            label += "-" + option.short + ", "
+        label += "--" + option.name
+        if option.takes_value:
+            label += " VALUE"
+        if option.repeat:
+            label += "..."
+        if option.description != "":
+            label += "  " + option.description
+        append(lines, label)
+    append(lines, "  --  End option parsing")
+    return join(lines, "\n")

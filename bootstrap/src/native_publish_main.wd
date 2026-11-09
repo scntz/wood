@@ -1,0 +1,8 @@
+# Installer utility: use the native bridge's atomic, no-replace directory rename.
+# It runs outside the directory being published; no shell or CMake hard-link
+# approximation is involved. Never delete or replace an existing destination.
+import driver_host as host
+arguments = args()
+assert(len(arguments) == 2,"expected staged source and absent destination")
+host.call("rename",{"from":json(arguments[0]),"to":json(arguments[1])})
+host.call("cleanup")

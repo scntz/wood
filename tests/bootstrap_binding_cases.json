@@ -1,0 +1,18 @@
+[
+  {"source":"value=[['old']]\nvalue=[[str(i)] for i in range(2)]\n"},
+  {"source":"value=([['old']],7)\nvalue=([[str(i)] for i in range(2)],8)\n"},
+  {"source":"value={'key':[['old']]}\nvalue={str(j):[[str(i)] for i in range(2)] for j in range(2)}\n"},
+  {"source":"value=[['old']]\nif true:\n    value=[[str(i)] for i in range(2)]\n"},
+  {"source":"fn change(value:list[list[str]])->list[list[str]]:\n    value=[[str(i)] for i in range(2)]\n    return value\nchange([['old']])\n"},
+  {"source":"fn change[T](value:T)->T:\n    value=[[str(i)] for i in range(2)]\n    return value\nchange([['old']])\n"},
+  {"source":"fn outer():\n    value=[['old']]\n    fn change[mut value]():\n        value=[[str(i)] for i in range(2)]\n    change()\nouter()\n"},
+  {"source":"fn outer():\n    value=[['old']]\n    fn change():\n        value=[[str(i)] for i in range(2)]\n    change()\nouter()\n"},
+  {"source":"fn outer():\n    value=[['old']]\n    fn change[mut value]():\n        value=[i for i in range(2)]\n    change()\nouter()\n"},
+  {"source":"value=[['old']]\nvalue=[[str(i)] for i in range(2)]\nprint(i)\n"},
+  {"source":"value=[['old']]\nvalue=[i for i in range(2)]\n"},
+  {"source":"fn values():\n    return ['long value']\nfor item in values():\n    print(len(item))\n"},
+  {"source":"for item in ['long value']:\n    if true:\n        item+='!'\n"},
+  {"source":"for item in ['long value']:\n    fn change[mut item]():\n        item+='!'\n    change()\n"},
+  {"source":"fn copies(items:list[str])->list[callable()->str]:\n    return [fn()=>item for item in items]\ncopies(['long value'])\n"},
+  {"source":"value=[['old']]\ntry:\n    value=[[str(i)] for i in range(2)]\nexcept err:\n    print(err.code)\n"}
+]

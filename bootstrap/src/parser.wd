@@ -1,0 +1,997 @@
+# A separate frontend stage; normal Wood compilation still uses src/parser.cpp.
+import lexer as lx
+import syntax as ast
+
+record Parser:
+    tokens: list[lx.Token]
+    tree: ast.Tree
+    pos: int
+    recursion: int
+    conditional_depth: int
+    type_depth: int
+    problem: lx.Problem | None
+    max_nodes: int
+    # Statements an unpacking assignment adds after itself, collected by the enclosing block.
+    pending: list[int]
+    hidden: int
+    # Error bindings of the except blocks around the current statement, innermost last.
+    handlers: list[str]
+
+    fn peek(mut self, distance: int = 0) -> lx.Token:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            index = len(self.tokens)-1
+        return self.tokens[index]
+
+    fn at(mut self, kind: str) -> bool:
+        return self.kind() == kind
+
+    fn kind(mut self, distance: int = 0) -> str:
+        index = self.pos + distance
+        if index >= len(self.tokens):
+            index = len(self.tokens)-1
+        return self.tokens[index].kind
+
+    fn take(mut self) -> lx.Token:
+        token = self.peek()
+        self.pos += 1
+        return token
+
+    fn accept(mut self, kind: str) -> bool:
+        if not self.at(kind):
+            return false
+        self.pos += 1
+        return true
+
+    fn habit_hint(self, token: lx.Token) -> str:
+        # Spellings from other languages. Only called on an error path, and it only adds advice.
+        # The failing token may already have been taken, so find it by where it starts.
+        at = self.pos
+        while at > 0 and self.tokens[at-1].offset >= token.offset:
+            at -= 1
+        if at == 0:
+            return ""
+        previous = self.tokens[at-1]
+        before = self.tokens[at-2] if at > 1 else token
+        if token.kind == "BitAnd" and previous.kind == "BitAnd":
+            return "; wood spells this 'and'"
+        if token.kind == "BitOr" and previous.kind == "BitOr":
+            return "; wood spells this 'or'"
+        if previous.kind == "Plus" and before.kind == "Plus":
+            return "; wood has no ++, so write x += 1"
+        if previous.kind == "Minus" and before.kind == "Minus":
+            return "; wood has no --, so write x -= 1"
+        if token.kind == "String" and previous.kind == "Identifier" and previous.text == "f":
+            return "; wood has no f-strings, so join with + and str(value)"
+        if previous.kind == "Identifier":
+            if previous.text in ["let","var","const","val","auto"]:
+                return "; declare a variable by assigning to it, as in x = 1"
+            if previous.text in ["class","struct","interface","type"]:
+                return "; declare a type with 'record'"
+            if previous.text in ["function","func","fun","def"]:
+                return "; declare a function with 'fn'"
+            if previous.text == "print" and token.kind in ["String","Integer","Identifier"]:
+                return "; print is a function, so write print(value)"
+        return ""
+
+    fn fail(mut self, code: str, token: lx.Token, message: str):
+        text = message
+        if code in ["E2001","E2004"]:
+            text += self.habit_hint(token)
+        self.problem = lx.Problem(code,text,lx.Position(token.offset,token.line,token.column))
+        raise "bootstrap parser rejection"
+
+    fn expect(mut self, kind: str, message: str) -> lx.Token:
+        if not self.at(kind):
+            self.fail("E2001",self.peek(),message)
+        return self.take()
+
+    fn budget(mut self, token: lx.Token):
+        if len(self.tree.types)+len(self.tree.expressions)+len(self.tree.statements) >= self.max_nodes:
+            self.fail("B2002",token,"syntax node budget exceeded")
+
+    fn type_node(mut self, kind: str, name: str = "", element: int = -1, key: int = -1, parameters: list[int] = []) -> int:
+        self.budget(self.peek())
+        append(self.tree.types,ast.TypeNode(kind,name,element,key,parameters))
+        return len(self.tree.types)-1
+
+    fn node(mut self, kind: str, token: lx.Token, children: list[int] = []) -> int:
+        depth = 1
+        for child in children:
+            if child >= 0:
+                if self.tree.expressions[child].depth + 1 > depth:
+                    depth = self.tree.expressions[child].depth + 1
+        if depth > 256:
+            self.fail("E2002",token,"expression nesting exceeds 256 levels")
+        self.budget(token)
+        append(self.tree.expressions,ast.Expr(kind,token,children,[],[],[],[],-1,depth))
+        return len(self.tree.expressions)-1
+
+    fn stmt(mut self, kind: str, token: lx.Token) -> int:
+        self.budget(token)
+        append(self.tree.statements,ast.Stmt(kind,token,"",[],[],[],[],[],[],[],"",0,1,0,false,false,false,false,false))
+        return len(self.tree.statements)-1
+
+    fn annotation(mut self, allow_void: bool = false) -> int:
+        result = self.primary_annotation(allow_void)
+        if self.accept("BitOr"):
+            none = self.expect("Identifier","expected None after '|' in optional type")
+            if none.text != "None" or self.tree.types[result].kind == "Void":
+                self.fail("E2003",none,"only T | None optional unions are supported")
+            if self.tree.types[result].kind != "Optional":
+                result = self.type_node("Optional",element=result)
+        return result
+
+    fn enter_type(mut self, token: lx.Token):
+        self.type_depth += 1
+        if self.type_depth > 64:
+            self.fail("E2002",token,"type nesting exceeds 64 levels")
+
+    fn primary_annotation(mut self, allow_void: bool) -> int:
+        if self.accept("LParen"):
+            self.enter_type(self.peek())
+            grouped = self.annotation(allow_void)
+            self.expect("RParen","expected ')' after grouped type")
+            self.type_depth -= 1
+            return grouped
+        erased = self.at("Identifier") and self.peek().text == "callable" and self.kind(1) == "LParen"
+        if self.at("Fn") or erased:
+            token = self.take()
+            self.enter_type(token)
+            self.expect("LParen","expected '(' in function type")
+            parameters: list[int] = []
+            if not self.at("RParen"):
+                append(parameters,self.annotation())
+                while self.accept("Comma") and not self.at("RParen"):
+                    append(parameters,self.annotation())
+                    if len(parameters) > 255:
+                        self.fail("E2002",self.peek(),"function types support at most 255 parameters")
+            self.expect("RParen","expected ')' in function type")
+            self.expect("Arrow","expected '->' and function result type")
+            result = self.annotation(true)
+            self.type_depth -= 1
+            kind = "Function"
+            if erased:
+                kind = "Callable"
+            return self.type_node(kind,element=result,parameters=parameters)
+        token = self.expect("Identifier","expected a type name")
+        if token.text == "tuple" and self.accept("LBracket"):
+            self.enter_type(token)
+            elements: list[int] = []
+            if self.accept("LParen"):
+                self.expect("RParen","empty tuple type is tuple[()]")
+            else:
+                append(elements,self.annotation())
+                while self.accept("Comma") and not self.at("RBracket"):
+                    append(elements,self.annotation())
+                    if len(elements) > 255:
+                        self.fail("E2002",token,"tuples support at most 255 elements")
+            self.expect("RBracket","expected ']' after tuple types")
+            self.type_depth -= 1
+            return self.type_node("Tuple",parameters=elements)
+        if token.text in ["list","dict"] and not self.at("Dot"):
+            self.enter_type(token)
+            self.expect("LBracket","expected '[' and list element type")
+            element = self.annotation()
+            if token.text == "dict":
+                self.expect("Comma","expected ',' between dictionary key and value types")
+                value = self.annotation()
+                self.expect("RBracket","expected ']' after dictionary types")
+                self.type_depth -= 1
+                if self.tree.types[element].kind not in ["Int","Str","Bool","Named"]:
+                    self.fail("E3020",token,"dictionary keys must be int, str, or bool")
+                return self.type_node("Dict",element=value,key=element)
+            self.expect("RBracket","expected ']' after list element type")
+            self.type_depth -= 1
+            return self.type_node("List",element=element)
+        if self.accept("LParen"):
+            self.enter_type(token)
+            parameters: list[int] = []
+            if not self.at("RParen"):
+                append(parameters,self.annotation())
+                while self.accept("Comma") and not self.at("RParen"):
+                    append(parameters,self.annotation())
+                    if len(parameters) > 255:
+                        self.fail("E2002",token,"callable patterns support at most 255 parameters")
+            self.expect("RParen","expected ')' after callable pattern")
+            result = 0
+            if self.accept("Arrow"):
+                result = self.annotation(true)
+            self.type_depth -= 1
+            return self.type_node("Signature",token.text,result,parameters=parameters)
+        primitives = {"int":"Int","float":"Float","bool":"Bool","str":"Str","error":"Error"}
+        if token.text in primitives:
+            return self.type_node(primitives[token.text])
+        if token.text == "json" and not self.at("Dot"):
+            return self.type_node("Json")
+        if token.text == "void":
+            if not allow_void:
+                self.fail("E2003",token,"void is only a function return type")
+            return 1
+        while self.accept("Dot"):
+            token.text += "." + self.expect("Identifier","expected type name after '.'").text
+        parameters: list[int] = []
+        if self.accept("LBracket"):
+            self.enter_type(token)
+            append(parameters,self.annotation())
+            while self.accept("Comma") and not self.at("RBracket"):
+                append(parameters,self.annotation())
+                if len(parameters) > 32:
+                    self.fail("E2002",token,"records support at most 32 type arguments")
+            self.expect("RBracket","expected ']' after record type arguments")
+            self.type_depth -= 1
+        return self.type_node("Named",token.text,parameters=parameters)
+
+    fn precedence(mut self) -> int:
+        kind = self.kind()
+        if kind == "Identifier" and self.tokens[self.pos].text == "is":
+            return 4
+        if kind == "Or":
+            return 1
+        if kind == "And":
+            return 2
+        if kind == "EqualEqual" or kind == "BangEqual" or kind == "Less" or kind == "LessEqual" or kind == "Greater" or kind == "GreaterEqual" or kind == "In" or kind == "Not":
+            return 4
+        if kind == "BitOr":
+            return 5
+        if kind == "BitXor":
+            return 6
+        if kind == "BitAnd":
+            return 7
+        if kind == "ShiftLeft" or kind == "ShiftRight":
+            return 8
+        if kind == "Plus" or kind == "Minus":
+            return 9
+        if kind == "Star" or kind == "Slash" or kind == "FloorDiv" or kind == "Percent":
+            return 10
+        return 0
+
+    fn call_node(mut self, kind: str, token: lx.Token, arguments: list[int] = []) -> int:
+        keywords: list[str] = []
+        named = false
+        if not self.at("RParen"):
+            more = true
+            while more:
+                keyword = ""
+                if self.at("Identifier") and self.kind(1) == "Equal":
+                    keyword = self.take().text
+                    self.take()
+                    named = true
+                elif named:
+                    self.fail("E2001",self.peek(),"positional argument follows keyword argument")
+                append(keywords,keyword)
+                append(arguments,self.expression())
+                if len(keywords) > 255:
+                    self.fail("E2002",token,"calls support at most 255 arguments")
+                more = self.accept("Comma") and not self.at("RParen")
+        self.expect("RParen","expected ')' after arguments")
+        result = self.node(kind,token,arguments)
+        self.tree.expressions[result].keywords = keywords
+        return result
+
+    fn comprehension(mut self, kind: str, token: lx.Token, children: list[int], closing: str) -> int:
+        clauses: list[ast.Clause] = []
+        while self.at("For") or self.at("If"):
+            clause = self.take()
+            name = ""
+            if clause.kind == "For":
+                name = self.expect("Identifier","expected comprehension binding").text
+                self.expect("In","expected 'in' after comprehension binding")
+            append(children,self.expression(1,false))
+            append(clauses,ast.Clause(name,clause))
+            if len(clauses) > 64:
+                self.fail("E2002",clause,"comprehensions support at most 64 clauses")
+        self.expect(closing,"expected closing delimiter after comprehension")
+        result = self.node(kind,token,children)
+        self.tree.expressions[result].clauses = clauses
+        return result
+
+    fn closure(mut self, token: lx.Token) -> int:
+        function = self.stmt("Function",token)
+        self.tree.statements[function].name = "<closure>"
+        self.tree.statements[function].return_type = 0
+        self.tree.statements[function].inferred_return = true
+        self.tree.statements[function].expression_body = true
+        if self.accept("LBracket"):
+            more = true
+            while more:
+                mut = self.expect("Identifier","expected mut capture")
+                if mut.text != "mut":
+                    self.fail("E3028",mut,"explicit captures use mut name; other names capture immutable snapshots automatically")
+                append(self.tree.statements[function].mutable_captures,self.expect("Identifier","expected capture name").text)
+                more = self.accept("Comma") and not self.at("RBracket")
+            self.expect("RBracket","expected ']' after captures")
+        self.expect("LParen","expected '(' after fn in a closure expression")
+        if not self.at("RParen"):
+            more = true
+            while more:
+                parameter = self.expect("Identifier","expected closure parameter")
+                type = 0
+                if self.accept("Colon"):
+                    type = self.annotation()
+                append(self.tree.statements[function].parameters,ast.Parameter(parameter.text,type,parameter,"Positional",-1,false))
+                if len(self.tree.statements[function].parameters) > 255:
+                    self.fail("E2002",token,"closures support at most 255 parameters")
+                more = self.accept("Comma") and not self.at("RParen")
+        self.expect("RParen","expected ')' after closure parameters")
+        if self.accept("Arrow"):
+            self.tree.statements[function].return_type = self.annotation(true)
+            self.tree.statements[function].inferred_return = false
+        self.expect("FatArrow","expected '=>' and closure result expression")
+        result = self.stmt("Return",token)
+        append(self.tree.statements[result].expressions,self.expression())
+        append(self.tree.statements[function].body,result)
+        value = self.node("Closure",token)
+        self.tree.expressions[value].function = function
+        return value
+
+    # Speculative generic syntax is transactional: rejected probes retain no nodes.
+    fn type_apply(mut self, left: int, token: lx.Token) -> int:
+        start = self.pos
+        depth = self.type_depth
+        types_start = len(self.tree.types)
+        expr_start = len(self.tree.expressions)
+        stmt_start = len(self.tree.statements)
+        types: list[int] = []
+        end = start
+        try:
+            self.take()
+            append(types,self.annotation())
+            while self.accept("Comma") and not self.at("RBracket"):
+                append(types,self.annotation())
+                if len(types) > 32:
+                    self.fail("E2002",token,"records support at most 32 type arguments")
+            self.expect("RBracket","expected ']' after type arguments")
+            if self.at("LParen"):
+                end = self.pos
+        except err:
+            if self.problem is None:
+                raise err
+            if unwrap(self.problem).code == "B2002":
+                raise err
+            self.problem = None
+        self.pos = start
+        self.type_depth = depth
+        if end == start:
+            while len(self.tree.types) > types_start:
+                pop(self.tree.types)
+            return left
+        types_end = len(self.tree.types)
+        index = -1
+        recursion = self.recursion
+        try:
+            self.take()
+            index = self.expression()
+            self.expect("RBracket","expected ']' after index")
+            if self.pos != end:
+                index = -1
+        except err:
+            if self.problem is None:
+                raise err
+            if unwrap(self.problem).code == "B2002":
+                raise err
+            self.problem = None
+            index = -1
+        self.recursion = recursion
+        self.pos = end
+        if index < 0:
+            while len(self.tree.expressions) > expr_start:
+                pop(self.tree.expressions)
+            while len(self.tree.statements) > stmt_start:
+                pop(self.tree.statements)
+            while len(self.tree.types) > types_end:
+                pop(self.tree.types)
+        # The fallback index may itself contain speculative type nodes.
+        self.type_depth = depth
+        result = self.node("TypeApply",token,[left,index])
+        self.tree.expressions[result].type_arguments = types
+        return result
+
+    fn prefix(mut self, token: lx.Token, minimum: int) -> int:
+        if token.kind in ["Integer","Float","String"]:
+            return self.node(token.kind,token)
+        if token.kind in ["True","False"]:
+            return self.node("Bool",token)
+        if token.kind == "Fn":
+            return self.closure(token)
+        if token.kind == "Identifier":
+            while self.accept("Dot"):
+                token.text += "." + self.expect("Identifier","expected a name after '.'").text
+            left = -1
+            if self.accept("LParen"):
+                left = self.call_node("Call",token)
+            else:
+                names = split(token.text,".")
+                token.text = names[0]
+                left = self.node("Name",token)
+                for name in names[1:]:
+                    token.text = name
+                    left = self.node("Member",token,[left])
+            if self.at("LBracket"):
+                left = self.type_apply(left,token)
+            return left
+        if token.kind == "LParen":
+            elements: list[int] = []
+            if not self.at("RParen"):
+                append(elements,self.expression())
+                if not self.accept("Comma"):
+                    self.expect("RParen","expected ')' after expression")
+                    return elements[0]
+                while not self.at("RParen"):
+                    append(elements,self.expression())
+                    if len(elements) > 255:
+                        self.fail("E2002",token,"tuples support at most 255 elements")
+                    if not self.accept("Comma"):
+                        break
+            self.expect("RParen","expected ')' after tuple")
+            return self.node("Tuple",token,elements)
+        if token.kind == "LBracket":
+            elements: list[int] = []
+            if not self.at("RBracket"):
+                append(elements,self.expression())
+                if self.at("For"):
+                    return self.comprehension("ListComprehension",token,elements,"RBracket")
+                while self.accept("Comma") and not self.at("RBracket"):
+                    append(elements,self.expression())
+            self.expect("RBracket","expected ']' after list elements")
+            return self.node("List",token,elements)
+        if token.kind == "LBrace":
+            elements: list[int] = []
+            if not self.at("RBrace"):
+                more = true
+                while more:
+                    append(elements,self.expression())
+                    self.expect("Colon","expected ':' between dictionary key and value")
+                    append(elements,self.expression())
+                    if len(elements) == 2 and self.at("For"):
+                        return self.comprehension("DictComprehension",token,elements,"RBrace")
+                    more = self.accept("Comma") and not self.at("RBrace")
+            self.expect("RBrace","expected '}' after dictionary elements")
+            return self.node("Dict",token,elements)
+        if token.kind in ["Minus","Plus","BitNot","Not"]:
+            if token.kind == "Not" and minimum > 3:
+                self.fail("E2004",token,"parenthesize 'not' when used as an operand")
+            level = 11
+            if token.kind == "Not":
+                level = 3
+            return self.node("Unary",token,[self.expression(level)])
+        self.fail("E2004",token,"expected an expression")
+        return -1
+
+    fn postfix(mut self, left: int) -> int:
+        while self.kind() in ["LBracket","Dot","LParen"]:
+            if self.accept("LParen"):
+                left = self.call_node("Invoke",self.tokens[self.pos-1],[left])
+            elif self.accept("Dot"):
+                field = self.expect("Identifier","expected field name")
+                left = self.node("Member",field,[left])
+            else:
+                bracket = self.take()
+                index = -1
+                if not self.at("Colon"):
+                    index = self.expression()
+                if self.accept("Comma"):
+                    indices = [index]
+                    while not self.at("RBracket"):
+                        append(indices,self.expression())
+                        if len(indices) > 8:
+                            self.fail("E2002",bracket,"array indexes support at most 8 axes")
+                        if not self.accept("Comma"):
+                            break
+                    index = self.node("Tuple",bracket,indices)
+                if self.accept("Colon"):
+                    stop = -1
+                    stride = -1
+                    if not self.at("Colon") and not self.at("RBracket"):
+                        stop = self.expression()
+                    if self.accept("Colon") and not self.at("RBracket"):
+                        stride = self.expression()
+                    self.expect("RBracket","expected ']' after slice")
+                    left = self.node("Slice",bracket,[left,index,stop,stride])
+                else:
+                    self.expect("RBracket","expected ']' after index")
+                    left = self.node("Index",bracket,[left,index])
+        return left
+
+    fn comparison_op(mut self) -> lx.Token:
+        op = self.take()
+        if op.kind == "Identifier" and op.text == "is" and self.accept("Not"):
+            op.text = "is not"
+        if op.kind == "Not":
+            self.expect("In","expected 'in' after comparison 'not'")
+            op.text = "not in"
+        return op
+
+    fn expression(mut self, minimum: int = 1, conditional: bool = true) -> int:
+        self.recursion += 1
+        if self.recursion > 256:
+            self.fail("E2002",self.peek(),"expression nesting exceeds 256 levels")
+        left = self.postfix(self.prefix(self.take(),minimum))
+        while self.precedence() >= minimum:
+            level = self.precedence()
+            op = self.comparison_op()
+            if level == 4:
+                operands = [left]
+                operators: list[str] = []
+                first = op
+                more = true
+                while more:
+                    append(operators,op.text)
+                    append(operands,self.expression(5))
+                    more = self.precedence() == 4
+                    if more:
+                        op = self.comparison_op()
+                        if len(operators) >= 255:
+                            self.fail("E2002",op,"comparison chains support at most 255 operators")
+                left = self.node("CompareChain",first,operands)
+                self.tree.expressions[left].operators = operators
+            else:
+                left = self.node("Binary",op,[left,self.expression(level+1)])
+        if minimum == 1 and conditional and self.accept("If"):
+            keyword = self.tokens[self.pos-1]
+            condition = self.expression(1,false)
+            self.expect("Else","expected 'else' in conditional expression")
+            left = self.node("Conditional",keyword,[left,condition,self.expression()])
+        self.recursion -= 1
+        return left
+
+    fn suite(mut self) -> list[int]:
+        if self.at("Equal"):
+            self.fail("E2001",self.peek(),"expected ':' before indented block; use '==' to compare")
+        if self.at("If"):
+            self.fail("E2001",self.peek(),"expected ':' before indented block; write 'elif' rather than 'else if'")
+        self.expect("Colon","expected ':' before indented block")
+        self.expect("Newline","expected a newline after ':'")
+        self.expect("Indent","expected an indented block (use 'pass' for an empty block)")
+        result: list[int] = []
+        while not self.at("Dedent") and not self.at("Eof"):
+            append(result,self.statement(false))
+            result = result+self.take_pending()
+        self.expect("Dedent","expected end of indented block")
+        return result
+
+    # 'finally' is a word only after a try block, followed by ':' and a block, so it stays a valid name.
+    fn finally_clause(mut self) -> bool:
+        return self.at("Identifier") and self.peek().text == "finally" and self.kind(1) == "Colon" and self.kind(2) == "Newline"
+
+    fn take_pending(mut self) -> list[int]:
+        result = self.pending
+        self.pending = []
+        return result
+
+    # A local name for the unpacked value that no identifier in the file can collide with.
+    fn hidden_name(mut self) -> str:
+        while true:
+            name = "wood_unpack_"+str(self.hidden)
+            self.hidden += 1
+            taken = false
+            for token in self.tokens:
+                if token.kind == "Identifier" and token.text == name:
+                    taken = true
+                    break
+            if not taken:
+                return name
+        return ""
+
+    fn unpack_names(mut self, first: lx.Token, stop: str) -> list[lx.Token]:
+        names: list[lx.Token] = [first]
+        while self.accept("Comma") and not self.at(stop):
+            name = self.expect("Identifier","expected a name to unpack into")
+            for seen in names:
+                if seen.text == name.text:
+                    self.fail("E2001",name,"'"+name.text+"' appears twice in the names to unpack into")
+            append(names,name)
+            if len(names) > 255:
+                self.fail("E2002",name,"unpacking supports at most 255 names")
+        return names
+
+    # name = hidden[i] for each target, positioned at the target so errors point at it.
+    fn unpack_into(mut self, names: list[lx.Token], hidden: str) -> list[int]:
+        result: list[int] = []
+        for i in range(len(names)):
+            name = names[i]
+            source = self.node("Name",lx.Token("Identifier",hidden,name.offset,name.line,name.column))
+            number = self.node("Integer",lx.Token("Integer",str(i),name.offset,name.line,name.column))
+            assignment = self.stmt("Assign",name)
+            self.tree.statements[assignment].name = name.text
+            append(self.tree.statements[assignment].expressions,self.node("Index",name,[source,number]))
+            append(result,assignment)
+        return result
+
+    fn conditional(mut self, token: lx.Token, chained: bool = false) -> int:
+        self.conditional_depth += 1
+        if self.conditional_depth > 256:
+            self.fail("E2002",token,"conditional nesting exceeds 256 levels")
+        result = self.stmt("If",token)
+        condition = self.expression()
+        append(self.tree.statements[result].expressions,condition)
+        body = self.suite()
+        present = self.none_check(condition,true)
+        if present is not None:
+            body = [self.narrowing(unwrap(present),false)]+body
+        self.tree.statements[result].body = body
+        absent = self.none_check(condition,false)
+        if self.at("Elif"):
+            append(self.tree.statements[result].otherwise,self.conditional(self.take(),true))
+        elif self.accept("Else"):
+            otherwise = self.suite()
+            if absent is not None:
+                otherwise = [self.narrowing(unwrap(absent),false)]+otherwise
+            self.tree.statements[result].otherwise = otherwise
+        elif absent is not None and not chained:
+            append(self.pending,self.narrowing(unwrap(absent),true))
+        self.conditional_depth -= 1
+        return result
+
+    # The name in `name is not None` (positive, also as the first operand of `and`) or `name is None`.
+    fn none_check(mut self, value: int, positive: bool) -> lx.Token | None:
+        node = self.tree.expressions[value]
+        if positive and node.kind == "Binary" and node.token.kind == "And":
+            return self.none_check(node.children[0],true)
+        if node.kind != "CompareChain" or len(node.operators) != 1:
+            return None
+        if node.operators[0] != ("is not" if positive else "is"):
+            return None
+        left = self.tree.expressions[node.children[0]]
+        right = self.tree.expressions[node.children[1]]
+        if left.kind != "Name" or left.token.text == "None" or right.kind != "Name" or right.token.text != "None":
+            return None
+        return left.token
+
+    # name = unwrap(name), marked with expression_body so the checker narrows name to its payload,
+    # or turns this into pass when name is not optional. relative 1 means it follows an if whose
+    # body must not fall through, as in: if name is None: return
+    fn narrowing(mut self, name: lx.Token, after: bool) -> int:
+        source = self.node("Name",lx.Token("Identifier",name.text,name.offset,name.line,name.column))
+        call = self.node("Call",lx.Token("Identifier","unwrap",name.offset,name.line,name.column),[source])
+        self.tree.expressions[call].keywords = [""]
+        result = self.stmt("Assign",name)
+        self.tree.statements[result].name = name.text
+        self.tree.statements[result].expression_body = true
+        self.tree.statements[result].relative = 1 if after else 0
+        append(self.tree.statements[result].expressions,call)
+        return result
+
+    fn record_statement(mut self, token: lx.Token, top_level: bool) -> int:
+        self.take()
+        if not top_level:
+            self.fail("E2012",token,"records must be declared at file scope")
+        result = self.stmt("Record",token)
+        self.tree.statements[result].name = self.expect("Identifier","expected record name").text
+        if self.accept("LBracket"):
+            more = true
+            while more:
+                append(self.tree.statements[result].type_parameters,self.expect("Identifier","expected type parameter").text)
+                if len(self.tree.statements[result].type_parameters) > 32:
+                    self.fail("E2002",token,"records support at most 32 type parameters")
+                more = self.accept("Comma") and not self.at("RBracket")
+            self.expect("RBracket","expected ']' after type parameters")
+        self.expect("Colon","expected ':' after record name")
+        self.expect("Newline","expected newline after record name")
+        self.expect("Indent","expected record fields or pass")
+        if self.accept("Pass"):
+            self.expect("Newline","expected newline after pass")
+        else:
+            while not self.at("Dedent") and not self.at("Eof"):
+                if self.at("Fn") or (self.at("Identifier") and self.peek().text == "def" and self.kind(1) == "Identifier"):
+                    append(self.tree.statements[result].body,self.statement(true,true))
+                else:
+                    field = self.expect("Identifier","expected field name")
+                    self.expect("Colon","expected ':' and field type")
+                    type = self.annotation()
+                    append(self.tree.statements[result].parameters,ast.Parameter(field.text,type,field,"Positional",-1,false))
+                    if len(self.tree.statements[result].parameters) > 255:
+                        self.fail("E2002",token,"records support at most 255 fields")
+                    self.expect("Newline","expected end of field declaration")
+        self.expect("Dedent","expected end of record")
+        return result
+
+    fn import_statement(mut self, token: lx.Token, top_level: bool) -> int:
+        from_import = self.take().kind == "From"
+        if not top_level:
+            self.fail("E2011",token,"imports must be at file scope")
+        result = self.stmt("Import",token)
+        if from_import:
+            while self.accept("Dot"):
+                self.tree.statements[result].relative += 1
+        self.tree.statements[result].module = self.expect("Identifier","expected module name").text
+        provider = false
+        if self.accept("At"):
+            if from_import or self.tree.statements[result].module != "python":
+                self.fail("E2011",token,"only 'import python@module' supports a provider")
+            provider = true
+            self.tree.statements[result].module = "python@" + self.expect("Identifier","expected Python module after '@'").text
+        while self.accept("Dot"):
+            self.tree.statements[result].module += "." + self.expect("Identifier","expected module name after '.'").text
+        if from_import:
+            self.expect("Import","expected 'import' after module")
+            more = true
+            while more:
+                name = self.expect("Identifier","expected imported function name")
+                alias = name.text
+                if self.accept("As"):
+                    alias = self.expect("Identifier","expected import alias").text
+                append(self.tree.statements[result].imports,ast.ImportName(name.text,alias,name))
+                more = self.accept("Comma")
+        else:
+            self.tree.statements[result].name = self.tree.statements[result].module[7:] if provider else self.tree.statements[result].module
+            if self.accept("As"):
+                self.tree.statements[result].name = self.expect("Identifier","expected module alias").text
+        self.expect("Newline","expected end of import")
+        return result
+
+    fn returns_value(mut self, body: list[int]) -> bool:
+        # Iterative traversal; nested declarations own their return statements.
+        pending = body
+        while len(pending) > 0:
+            current = pop(pending)
+            stmt = self.tree.statements[current]
+            if stmt.kind not in ["Function","Record"]:
+                if stmt.kind == "Return" and len(stmt.expressions) > 0:
+                    return true
+                for child in stmt.body:
+                    append(pending,child)
+                for child in stmt.otherwise:
+                    append(pending,child)
+        return false
+
+    fn function_statement(mut self, token: lx.Token, top_level: bool, method: bool, external: bool) -> int:
+        self.take()
+        if not top_level and external:
+            self.fail("E2006",token,"external functions must be declared at file scope")
+        result = self.stmt("Function",token)
+        self.tree.statements[result].external = external
+        self.tree.statements[result].method = method
+        self.tree.statements[result].name = self.expect("Identifier","expected function name").text
+        if self.at("LBracket") and self.kind(1) == "Identifier" and self.peek(1).text == "mut":
+            self.take()
+            if top_level:
+                self.fail("E3028",token,"owned mutable captures belong to local functions")
+            more = true
+            while more:
+                mut = self.expect("Identifier","expected mut capture")
+                if mut.text != "mut":
+                    self.fail("E3028",mut,"each mutable capture requires mut")
+                append(self.tree.statements[result].mutable_captures,self.expect("Identifier","expected capture name").text)
+                more = self.accept("Comma") and not self.at("RBracket")
+            self.expect("RBracket","expected ']' after captures")
+        if self.accept("LBracket"):
+            more = true
+            while more:
+                append(self.tree.statements[result].type_parameters,self.expect("Identifier","expected type parameter").text)
+                if len(self.tree.statements[result].type_parameters) > 32:
+                    self.fail("E2002",token,"functions support at most 32 type parameters")
+                more = self.accept("Comma") and not self.at("RBracket")
+            self.expect("RBracket","expected ']' after type parameters")
+            if external:
+                self.fail("E3023",token,"external functions cannot be generic")
+        self.expect("LParen","expected '(' after function name")
+        if method:
+            if self.at("Identifier") and self.peek().text == "mut":
+                self.take()
+                self.tree.statements[result].mutating = true
+            receiver = self.expect("Identifier","method requires self or mut self as first parameter")
+            if receiver.text != "self":
+                self.fail("E3027",receiver,"method requires self or mut self as first parameter")
+            append(self.tree.statements[result].parameters,ast.Parameter("self",0,receiver,"PositionalOnly",-1,false))
+            if not self.at("RParen"):
+                self.expect("Comma","expected ',' after self")
+        keyword_only = false
+        slash = false
+        default_seen = false
+        star_pending = false
+        while not self.at("RParen"):
+            if self.accept("Slash"):
+                if slash or keyword_only or len(self.tree.statements[result].parameters) == 0:
+                    self.fail("E2001",self.peek(),"invalid positional-only marker")
+                slash = true
+                for i in range(len(self.tree.statements[result].parameters)):
+                    self.tree.statements[result].parameters[i].mode = "PositionalOnly"
+            elif self.accept("Star"):
+                if keyword_only:
+                    self.fail("E2001",self.peek(),"duplicate keyword-only marker")
+                keyword_only = true
+                star_pending = true
+            else:
+                mutable_borrow = false
+                if self.at("Identifier") and self.peek().text == "mut" and self.kind(1) == "Identifier":
+                    if not external:
+                        self.fail("E3023",self.peek(),"mut parameters are limited to native array imports")
+                    self.take()
+                    mutable_borrow = true
+                name = self.expect("Identifier","expected parameter name")
+                self.expect("Colon","expected ':' and parameter type")
+                type = self.annotation()
+                mode = "Positional"
+                if keyword_only:
+                    mode = "KeywordOnly"
+                default_value = -1
+                if self.accept("Equal"):
+                    default_value = self.expression()
+                    if not keyword_only:
+                        default_seen = true
+                elif not keyword_only and default_seen:
+                    self.fail("E2001",name,"required positional parameter follows default")
+                append(self.tree.statements[result].parameters,ast.Parameter(name.text,type,name,mode,default_value,mutable_borrow))
+                star_pending = false
+                if len(self.tree.statements[result].parameters) > 255:
+                    self.fail("E2002",name,"functions support at most 255 parameters")
+            if not self.accept("Comma"):
+                break
+        if star_pending:
+            self.fail("E2001",self.peek(),"'*' requires a keyword-only parameter")
+        self.expect("RParen","expected ')' after parameters")
+        if self.accept("Arrow"):
+            self.tree.statements[result].return_type = self.annotation(true)
+        elif not external:
+            self.tree.statements[result].inferred_return = true
+        if external:
+            self.expect("Newline","expected end of external function declaration")
+        else:
+            # A bare raise never reaches an except block outside its own function.
+            outer = self.handlers
+            self.handlers = []
+            self.tree.statements[result].body = self.suite()
+            self.handlers = outer
+        if self.tree.statements[result].inferred_return and self.returns_value(self.tree.statements[result].body):
+            self.tree.statements[result].return_type = 0
+        if not top_level:
+            if len(self.tree.statements[result].type_parameters) > 0:
+                self.fail("E3028",token,"local functions cannot declare type parameters")
+            closure = self.node("Closure",token)
+            assignment = self.stmt("Assign",token)
+            self.tree.statements[assignment].name = self.tree.statements[result].name
+            self.tree.expressions[closure].function = result
+            append(self.tree.statements[assignment].expressions,closure)
+            return assignment
+        return result
+
+    fn simple_statement(mut self, token: lx.Token) -> int:
+        result = self.stmt("Expression",token)
+        if self.accept("Raise"):
+            self.tree.statements[result].kind = "Raise"
+            if not self.at("Newline"):
+                append(self.tree.statements[result].expressions,self.expression())
+            elif len(self.handlers) > 0:
+                # A bare raise re-raises the error of the innermost except block. The checker binds
+                # the name to that handler's error even where another variable shadows it.
+                handler = self.node("Name",lx.Token("Identifier",self.handlers[-1],token.offset,token.line,token.column))
+                append(self.tree.statements[result].expressions,handler)
+                self.tree.statements[result].relative = 1
+        elif self.accept("Return"):
+            self.tree.statements[result].kind = "Return"
+            if not self.at("Newline"):
+                append(self.tree.statements[result].expressions,self.expression())
+        elif self.kind() in ["Break","Continue","Pass"]:
+            self.tree.statements[result].kind = self.take().kind
+        elif self.at("Identifier") and self.kind(1) == "Comma":
+            names = self.unpack_names(self.take(),"Equal")
+            self.expect("Equal","expected '=' after the names to unpack into")
+            value = self.expression()
+            if self.at("Comma"):
+                elements: list[int] = [value]
+                while self.accept("Comma") and not self.at("Newline"):
+                    append(elements,self.expression())
+                    if len(elements) > 255:
+                        self.fail("E2002",token,"tuples support at most 255 elements")
+                value = self.node("Tuple",token,elements)
+            hidden = self.hidden_name()
+            # relative carries the required tuple size for the checker; it is otherwise only used by imports.
+            self.tree.statements[result].kind = "Assign"
+            self.tree.statements[result].name = hidden
+            self.tree.statements[result].relative = len(names)
+            append(self.tree.statements[result].expressions,value)
+            self.pending = self.pending+self.unpack_into(names,hidden)
+        elif self.at("Identifier") and self.kind(1) in ["Equal","Colon"]:
+            self.tree.statements[result].kind = "Assign"
+            self.tree.statements[result].name = self.take().text
+            if self.accept("Colon"):
+                self.tree.statements[result].annotation = self.annotation()
+            self.expect("Equal","expected '=' and initializer")
+            append(self.tree.statements[result].expressions,self.expression())
+        else:
+            append(self.tree.statements[result].expressions,self.expression())
+            if self.at("Augment"):
+                self.tree.statements[result].kind = "AugAssign"
+                self.tree.statements[result].name = self.take().text
+                append(self.tree.statements[result].expressions,self.expression())
+            elif self.accept("Equal"):
+                first = self.tree.statements[result].expressions[0]
+                if self.tree.expressions[first].kind not in ["Index","Member"]:
+                    self.fail("E2010",token,"assignment requires a variable or list index")
+                self.tree.statements[result].kind = "IndexAssign"
+                append(self.tree.statements[result].expressions,self.expression())
+        self.expect("Newline","expected end of statement")
+        return result
+
+    fn statement(mut self, top_level: bool, method: bool = false) -> int:
+        token = self.peek()
+        if token.kind == "Identifier" and token.text == "record" and self.kind(1) == "Identifier":
+            return self.record_statement(token,top_level)
+        if token.kind in ["Import","From"]:
+            return self.import_statement(token,top_level)
+        scoped = false
+        if token.kind == "Identifier" and token.text == "with":
+            cursor = self.pos + 1
+            while self.tokens[cursor].kind not in ["Newline","Eof"]:
+                if self.tokens[cursor].kind == "As":
+                    scoped = true
+                    break
+                cursor += 1
+        if scoped:
+            self.take()
+            result = self.stmt("With",token)
+            append(self.tree.statements[result].expressions,self.expression())
+            self.expect("As","expected 'as' and stream binding")
+            self.tree.statements[result].name = self.expect("Identifier","expected stream binding").text
+            self.tree.statements[result].body = self.suite()
+            return result
+        if self.accept("Try"):
+            result = self.stmt("Try",token)
+            self.tree.statements[result].body = self.suite()
+            if not self.finally_clause():
+                self.expect("Except","expected 'except name:' or 'finally:' after try block")
+                self.tree.statements[result].name = self.expect("Identifier","expected error binding after 'except'").text
+                append(self.handlers,self.tree.statements[result].name)
+                self.tree.statements[result].otherwise = self.suite()
+                pop(self.handlers)
+                if not self.finally_clause():
+                    return result
+            wrapper = self.stmt("Finally",token)
+            self.take()
+            self.tree.statements[wrapper].otherwise = self.suite()
+            if self.tree.statements[result].name == "":
+                self.tree.statements[wrapper].body = self.tree.statements[result].body
+                self.tree.statements[result].body = []
+            else:
+                self.tree.statements[wrapper].body = [result]
+            return wrapper
+        external = token.kind == "Identifier" and token.text == "extern" and (self.kind(1) == "Fn" or (self.kind(1) == "Identifier" and self.peek(1).text == "def" and self.kind(2) == "Identifier"))
+        if external:
+            self.take()
+        python_function = self.at("Identifier") and self.peek().text == "def" and self.kind(1) == "Identifier"
+        if self.at("Fn") or python_function:
+            return self.function_statement(token,top_level,method,external)
+        if self.accept("If"):
+            return self.conditional(token)
+        if self.at("While") or self.at("For"):
+            kind = self.take().kind
+            result = self.stmt(kind,token)
+            prelude: list[int] = []
+            if kind == "For":
+                first = self.expect("Identifier","expected loop variable")
+                self.tree.statements[result].name = first.text
+                if self.at("Comma"):
+                    names = self.unpack_names(first,"In")
+                    hidden = self.hidden_name()
+                    self.tree.statements[result].name = hidden
+                    self.tree.statements[result].relative = len(names)
+                    prelude = self.unpack_into(names,hidden)
+                self.expect("In","expected 'in' after loop variable")
+            append(self.tree.statements[result].expressions,self.expression())
+            self.tree.statements[result].body = prelude+self.suite()
+            return result
+        return self.simple_statement(token)
+
+    fn run(mut self) -> ast.Result:
+        try:
+            while not self.at("Eof"):
+                append(self.tree.roots,self.statement(true))
+                self.tree.roots = self.tree.roots+self.take_pending()
+        except err:
+            if self.problem is None:
+                raise err
+            problem = unwrap(self.problem)
+            return ast.Result(ast.empty(),problem.code,problem.message,problem.position.offset,problem.position.line,problem.position.column)
+        ending = self.peek()
+        return ast.Result(self.tree,"","",ending.offset,ending.line,ending.column)
+
+fn parse(source: str, max_nodes: int = 262144) -> ast.Result:
+    if max_nodes < 2 or max_nodes > 1048576:
+        return ast.Result(ast.empty(),"B2001","syntax node budget must be between 2 and 1048576",0,1,1)
+    lexical = lx.lex(source)
+    if lexical.code != "":
+        return ast.Result(ast.empty(),lexical.code,lexical.message,lexical.offset,lexical.line,lexical.column)
+    tree = ast.Tree([ast.TypeNode("Unknown","",-1,-1,[]),ast.TypeNode("Void","",-1,-1,[])],[],[],[])
+    parser = Parser(lexical.tokens,tree,0,0,0,0,None,max_nodes,[],0,[])
+    return parser.run()

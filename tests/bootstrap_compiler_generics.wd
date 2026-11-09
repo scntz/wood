@@ -1,0 +1,64 @@
+# Native end-to-end validation of existing generic libraries, not replacements.
+from std.collections import Queue, Stack, heap
+from bootstrap_generic_models import Job, Box, identity, apply, optional, earlier, collect
+from bootstrap_generic_models import integer_items, item_count, forwarded, from_result, transformed
+
+pending: Queue[Job] = Queue([],[])
+for id in range(80):
+    pending.push(Job(id,(id*17)%13,1+id%7))
+snapshot = pending
+jobs: list[Job] = []
+ready = heap(jobs,earlier)
+while pending.size() > 0:
+    ready.push(pending.pop())
+assert(snapshot.size() == 80)
+assert(unwrap(snapshot.peek()).id == 0)
+assert(pending.peek() is None)
+
+history: Stack[int] = Stack([])
+clock = 0
+checksum = 0
+previous: Job | None = None
+while ready.size() > 0:
+    job = ready.pop()
+    if previous is not None:
+        assert(not earlier(job,unwrap(previous)))
+    clock += job.cost
+    checksum += (job.id+1)*clock
+    history.push(job.id)
+    previous = job
+assert(ready.peek() is None)
+assert(history.size() == 80)
+saved = history
+while history.size() > 0:
+    last = history.pop()
+assert(saved.size() == 80)
+
+integer = Box(5)
+text = Box("wood")
+pair = integer.pair("native")
+reverse = text.pair(7)
+assert(pair == (5,"native"))
+assert(reverse == ("wood",7))
+copy = integer.copy()
+integer.replace(9)
+assert(copy.value == 5)
+assert(integer.value == 9)
+assert(text.value == "wood")
+f: fn(int)->int = identity
+assert(f(8) == 8)
+assert(apply(identity,12) == 12)
+assert(apply(identity,"independent") == "independent")
+assert(unwrap(optional(3)) == 3)
+assert(Box[float](2).value == 2.0)
+assert(collect(1) == [1])
+assert(collect("x") == ["x"])
+assert(integer.empty() == [])
+assert(text.empty() == [])
+assert(json_int(json_dict(json_parse(json_dump(Box(3))))["value"]) == 3)
+assert(forwarded(integer_items,item_count) == 3)
+assert(from_result(integer_items) == [])
+assert(from_result(integer_items,[7]) == [7])
+assert(transformed(integer_items,identity) == [1,2,3])
+print("native generic scheduler",clock,checksum,saved.size())
+print(Box(3),Box("ok"),pair,reverse)

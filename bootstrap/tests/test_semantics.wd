@@ -1,0 +1,126 @@
+import parser as parser
+import modules as mod
+import bindings as bind
+import signatures as sig
+import expressions as expr
+import semantic_preparation as prep
+import control_flow as flow
+import return_types as returns
+import semantic_queries as queries
+import type_system as ts
+import sources as src
+
+fn resolve(text: str) -> sig.Result:
+    parsed = parser.parse(text)
+    assert(parsed.code == "",parsed.message)
+    graph = mod.Compilation([mod.Unit("unit.wd",text,0,parsed.tree,[])],0)
+    return sig.resolve(graph,bind.bind(graph))
+
+fn test_budgets():
+    input = resolve("fn f(x:list[int]=[1,2]):\n    pass\n")
+    snapshot = input
+    result = prep.check(input)
+    assert(result.diagnostic.code == "" and len(result.defaults) == 1)
+    root = result.defaults[0].expression
+    assert(result.signatures.pool.display(result.expression_types[0][root]) == "list[int]")
+    assert(input == snapshot)
+    assert(prep.check(input,0).diagnostic.code == "B3301")
+    assert(prep.check(input,1048577).diagnostic.code == "B3301")
+    rejected = prep.check(input,1)
+    assert(rejected.diagnostic.code == "B3302")
+    assert(len(rejected.defaults) == 0 and len(rejected.signatures.compilation.modules) == 0)
+    tree = parser.parse("fn f():\n    pass\n").tree
+    assert(flow.check(tree,limit=0).diagnostic.code == "B3301")
+    assert(flow.check(tree,limit=1).diagnostic.code == "B3302")
+    tree = parser.parse("x = [1,2]\n").tree
+    pool = ts.pool(2)
+    checker = expr.checker(tree,pool)
+    exceeded = false
+    try:
+        checker.expression(tree.statements[tree.roots[0]].expressions[0])
+    except err:
+        exceeded = err.message == "bootstrap semantic type budget exceeded"
+    assert(exceeded and len(pool.types) == 2)
+
+fn test_boundaries():
+    text = "fn f[T](x:int='bad'):\n    return x\nrecord R[T]:\n    value:T\n    fn method(self,x:int='bad'):\n        pass\n"
+    result = prep.check(resolve(text))
+    assert(result.diagnostic.code == "" and result.deferred_defaults == 2 and len(result.defaults) == 0)
+    assert(len(result.flows[0].functions) == 0)
+    result = prep.check(resolve("fn f(x:int=True):\n    pass\n"))
+    assert(result.diagnostic.code == "E3002" and result.diagnostic.line == 1 and result.diagnostic.column == 12)
+    assert(len(result.expression_types) == 0)
+    text = "fn f():\n    if true:\n        return 1\n"
+    checked = flow.check(parser.parse(text).tree)
+    assert(checked.diagnostic.code == "" and checked.functions[0].return_check_deferred)
+    query = queries.inspect(text,"returns")
+    assert(query.diagnostic.code == "E3013")
+    tree = parser.parse("x = len([])\n").tree
+    checker = expr.checker(tree,ts.pool())
+    unsupported = false
+    try:
+        checker.expression(tree.statements[tree.roots[0]].expressions[0])
+    except err:
+        unsupported = checker.problem is not None and unwrap(checker.problem).code == "B3303"
+    assert(unsupported)
+
+fn test_flow_masks():
+    cases = [
+        ("fn f()->int:\n    return 1\n",2),
+        ("fn f()->int:\n    raise 'bad'\n",16),
+        ("fn f():\n    while true:\n        break\n",1),
+        ("fn f():\n    if true:\n        return\n",3),
+        ("fn f()->int:\n    try:\n        raise 'bad'\n    except err:\n        return 1\n",2),
+        ("fn f()->int:\n    if true:\n        raise 'bad'\n    else:\n        return 1\n",18)]
+    for item in cases:
+        checked = flow.check(parser.parse(item[0]).tree)
+        assert(checked.diagnostic.code == "" and checked.functions[0].exits == item[1])
+    text = "fn f():\n    while true:\n        fn inner():\n            break\n"
+    assert(flow.check(parser.parse(text).tree).diagnostic.code == "E3012")
+
+fn test_nominal_types():
+    pool = ts.pool()
+    a = pool.intern("Record","Same",declaration=1)
+    b = pool.intern("Record","Same",declaration=2)
+    checker = expr.checker(parser.parse("pass\n").tree,pool)
+    rejected = false
+    try:
+        checker.require(a,b,src.origin())
+    except err:
+        rejected = checker.problem is not None and "distinct nominal" in unwrap(checker.problem).message
+    assert(rejected)
+    assert(expr.similar("vlaue","value") and expr.similar("valu","value") and not expr.similar("ab","abc"))
+
+fn test_integer_canonicalization():
+    for case in [("0","0"),("00","0"),("7","7"),("0007","7"),("9223372036854775807","9223372036854775807")]:
+        tree = parser.parse("x = "+case[0]+"\n").tree
+        snapshot = tree
+        root = tree.statements[tree.roots[0]].expressions[0]
+        checker = expr.checker(tree,ts.pool())
+        type = checker.expression(root)
+        assert(checker.problem is None and checker.pool.display(type) == "int")
+        assert(checker.tree.expressions[root].token.text == case[1])
+        assert(checker.expression(root) == type)
+        assert(tree == snapshot and tree.expressions[root].token.text == case[0])
+        # Delaying a no-op write must still isolate a later real mutation.
+        checker.tree.expressions[root].token.text = "changed"
+        assert(tree == snapshot and tree.expressions[root].token.text == case[0])
+    for spelling in ["9223372036854775808","999999999999999999999999"]:
+        tree = parser.parse("x = "+spelling+"\n").tree
+        snapshot = tree
+        root = tree.statements[tree.roots[0]].expressions[0]
+        checker = expr.checker(tree,ts.pool())
+        rejected = false
+        try:
+            checker.expression(root)
+        except err:
+            rejected = checker.problem is not None and unwrap(checker.problem).code == "E3006"
+        assert(rejected and unwrap(checker.problem).line == 1 and unwrap(checker.problem).column == 5)
+        assert(tree == snapshot)
+
+test_budgets()
+test_boundaries()
+test_flow_masks()
+test_nominal_types()
+test_integer_canonicalization()
+print("bootstrap semantic kernel unit checks passed")

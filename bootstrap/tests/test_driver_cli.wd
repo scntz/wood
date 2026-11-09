@@ -1,0 +1,27 @@
+import driver_cli as cli
+assert(cli.diagnostic_text("árbol 🌳") == "árbol 🌳")
+assert(cli.diagnostic_text("a\0b") == "a\0b")
+assert(cli.diagnostic_text("bad"+byte_string(255)) == "bad\\xff")
+assert(cli.diagnostic_text(byte_string(195)) == "\\xc3")
+assert(cli.number("86400000","--timeout-ms") == 86400000)
+assert(cli.number("16777216","--max-output-bytes") == 16777216)
+for value in ["","-1","+1","86400001","999999999999999999999999"]:
+    rejected = false
+    try:
+        cli.number(value,"--timeout-ms")
+    except err:
+        rejected = true
+    assert(rejected)
+assert(cli.parse(["run","sample.wd","--","","--locked"]).program_args == ["","--locked"])
+assert(not cli.json_requested(["run","sample.wd","--","--diagnostics=json"]))
+assert(cli.parse(["build","sample.wd","--backend=llvm"]).backend == "llvm")
+assert(cli.parse(["emit-llvm","sample.wd"]).command == "emit-llvm")
+assert(cli.parse(["build","sample.wd","--llvm-wsl","Debian"]).llvm_wsl == "Debian")
+for arguments in [["build","sample.wd","--backend=unknown"],["emit-cpp","sample.wd","--backend=llvm"],["emit-llvm","sample.wd","--backend=cpp"]]:
+    rejected = false
+    try:
+        cli.parse(arguments)
+    except err:
+        rejected = true
+    assert(rejected)
+print("driver CLI checks passed")

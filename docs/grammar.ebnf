@@ -1,0 +1,98 @@
+(* Wood 0.4; INDENT/DEDENT/NEWLINE are produced by the lexer. *)
+(* The python@ import alternative is an optional LLVM-only profile. '@' is
+   accepted only after import python; ordinary unexpected '@' retains E1007. *)
+(* Omitted ordinary/local/method return annotations infer value returns; no-value
+   functions remain void. External declarations without an arrow remain void.
+   Return inference is a semantic rule; it adds no grammar production. *)
+program        = { function | external | record | import , NEWLINE | statement } , EOF ;
+record         = "record" , NAME , [ generic_parameters ] , ":" , NEWLINE , INDENT ,
+                 ( "pass" , NEWLINE | record_member , { record_member } ) , DEDENT ;
+record_member  = field | method ;
+generic_parameters = "[" , NAME , { "," , NAME } , [ "," ] , "]" ;
+method         = function_word , NAME , [ generic_parameters ] , "(" , [ "mut" ] , "self" ,
+                 [ "," , parameters ] , ")" , [ "->" , return_type ] , suite ;
+field          = NAME , ":" , value_type , NEWLINE ;
+module_name    = NAME , { "." , NAME } ;
+import_name    = NAME , [ "as" , NAME ] ;
+import         = "import" , module_name , [ "as" , NAME ]
+               | "import" , "python" , "@" , module_name , [ "as" , NAME ]
+               | "from" , [ "." , { "." } ] , module_name , "import" , import_name , { "," , import_name } ;
+function_word  = "fn" | "def" ;
+function       = function_word , NAME , [ "[" , NAME , { "," , NAME } , [ "," ] , "]" ] , "(" , [ parameters ] , ")" , [ "->" , return_type ] , suite ;
+external       = "extern" , function_word , NAME , "(" , [ parameters ] , ")" , [ "->" , return_type ] , NEWLINE ;
+parameters     = ( parameter | "/" | "*" ) , { "," , ( parameter | "/" | "*" ) } , [ "," ] ;
+parameter      = [ "mut" ] , NAME , ":" , value_type , [ "=" , expression ] ;
+(* mut parameters are restricted to array types on extern declarations and cannot have defaults. *)
+value_type     = primary_type , [ "|" , "None" ] ;
+primary_type   = "(" , value_type , ")" | "range" | "step" , "[" , value_type , "]" | "cursor" , "[" , value_type , "]"
+               | "callable" , "(" , [ type_arguments ] , ")" , "->" , return_type
+               | NAME , "(" , [ type_arguments ] , ")" , [ "->" , return_type ]
+               | "int" | "float" | "bool" | "str" | "error" | "json" | "stream" | "None" | module_name
+               | module_name , "[" , type_arguments , "]"
+               | "database" | "statement" | "transaction" | "tls_context" | "task"
+               | "list" , "[" , value_type , "]"
+               | "dict" , "[" , value_type , "," , value_type , "]"
+               | "tuple" , "[" , ( "(" , ")" | type_arguments ) , "]"
+               | "fn" , "(" , [ type_arguments ] , ")" , "->" , return_type ;
+type_arguments = value_type , { "," , value_type } , [ "," ] ;
+return_type    = value_type | "void" ;
+suite          = ":" , NEWLINE , INDENT , statement , { statement } , DEDENT ;
+statement      = local_function | assignment , NEWLINE | unpacking , NEWLINE | augmented , NEWLINE | expression , NEWLINE
+               | "return" , [ expression ] , NEWLINE
+               | "raise" , [ expression ] , NEWLINE
+               | ( "break" | "continue" | "pass" ) , NEWLINE
+               | "if" , expression , suite , { "elif" , expression , suite } , [ "else" , suite ]
+               | "while" , expression , suite
+               | "for" , NAME , { "," , NAME } , [ "," ] , "in" , expression , suite
+               | "try" , suite , ( "except" , NAME , suite , [ "finally" , suite ] | "finally" , suite )
+               | "with" , expression , "as" , NAME , suite ;
+assignment     = NAME , [ ":" , value_type ] , "=" , expression
+               | mutation_target , "=" , expression ;
+unpacking      = NAME , "," , [ NAME , { "," , NAME } , [ "," ] ] , "=" , expression , { "," , expression } ;
+mutation_target = NAME , ( "[" , expression , "]" | "." , NAME ) , { "[" , expression , "]" | "." , NAME } ;
+augmented      = ( NAME | mutation_target ) , augmented_op , expression ;
+augmented_op   = "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+expression     = disjunction , [ "if" , disjunction , "else" , expression ] ;
+disjunction    = conjunction , { "or" , conjunction } ;
+conjunction    = negation , { "and" , negation } ;
+negation       = "not" , negation | comparison ;
+comparison     = bit_or , { ( "==" | "!=" | "<" | "<=" | ">" | ">=" | "in" | "not" , "in" | "is" , [ "not" ] ) , bit_or } ;
+bit_or         = bit_xor , { "|" , bit_xor } ;
+bit_xor        = bit_and , { "^" , bit_and } ;
+bit_and        = shift , { "&" , shift } ;
+shift          = sum , { ( "<<" | ">>" ) , sum } ;
+sum            = product , { ( "+" | "-" ) , product } ;
+product        = unary , { ( "*" | "/" | "//" | "%" ) , unary } ;
+unary          = ( "+" | "-" | "~" ) , unary | postfix ;
+postfix        = atom , { subscription | "." , NAME | "(" , [ arguments ] , ")" } ;
+subscription   = "[" , ( expression , { "," , expression } , [ "," ] | [ expression ] , ":" , [ expression ] , [ ":" , [ expression ] ] ) , "]" ;
+record_construction = module_name , "[" , type_arguments , "]" , "(" , [ arguments ] , ")" ;
+atom           = closure | record_construction | INTEGER | FLOAT | STRING | "true" | "false" | "True" | "False" | "None" | NAME
+               | module_name , "(" , [ arguments ] , ")"
+               | "(" , expression , ")" | tuple_display | list_display | dict_display ;
+tuple_display  = "(" , [ expression , "," , [ elements ] ] , ")" ;
+list_display   = "[" , ( [ elements ] | expression , comprehension ) , "]" ;
+dict_display   = "{" , ( [ entries ] | expression , ":" , expression , comprehension ) , "}" ;
+comprehension  = "for" , NAME , "in" , disjunction ,
+                 { "for" , NAME , "in" , disjunction | "if" , disjunction } ;
+entries        = expression , ":" , expression , { "," , expression , ":" , expression } , [ "," ] ;
+elements       = expression , { "," , expression } , [ "," ] ;
+arguments      = argument , { "," , argument } , [ "," ] ;
+argument       = [ NAME , "=" ] , expression ;
+(* Semantic rules constrain marker placement, literal defaults, positional-before-
+   keyword arguments and generic inference. Tuples require literal indexes. *)
+(* Imports and generic/external functions are file-scope only. Local functions own captures.
+   Records contain methods. Iterables include collections, ranges and iter/next protocols. Analysis enforces types,
+   rooted mutation targets, and control-flow rules. List literals do not share
+   the 255-argument call limit. *)
+(* Native resources support with. External parameters are int/float, borrowed
+   str (pointer + int64 byte length), or synchronous scalar function pointers;
+   external results remain int/float/void. See docs/backend.md for C ABI rules. *)
+(* def/True/False are contextual compatibility spellings. Explicit bindings
+   retain precedence for boolean names. Comprehensions allow at most 64 clauses;
+   comparison chains allow at most 255 operators. Slice stores are unsupported. *)
+
+mutable_captures = "[" , "mut" , NAME , { "," , "mut" , NAME } , [ "," ] , "]" ;
+closure = "fn" , [ mutable_captures ] , "(" , [ closure_parameters ] , ")" , [ "->" , return_type ] , "=>" , expression ;
+closure_parameters = NAME , [ ":" , value_type ] , { "," , NAME , [ ":" , value_type ] } , [ "," ] ;
+local_function = function_word , NAME , [ mutable_captures ] , "(" , [ parameters ] , ")" , [ "->" , return_type ] , suite ;

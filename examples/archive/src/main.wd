@@ -1,0 +1,17 @@
+from codec import pack_text, unpack_data
+
+if len(args()) != 3:
+    eprint("usage: archive pack|unpack input output")
+    exit(2)
+try:
+    mode = args()[0]
+    source = read_text(args()[1])
+    if mode == "pack":
+        write_text(args()[2], pack_text(source))
+    elif mode == "unpack":
+        write_text(args()[2], json_dump(unpack_data(source)) + "\n")
+    else:
+        raise "mode must be pack or unpack"
+except err:
+    eprint(err.code, err.message)
+    exit(1)

@@ -1,0 +1,8 @@
+import std.csv as csv
+
+while not eof():
+    request = json_dict(json_parse(read_line()))
+    delimiter = json_str(request["delimiter"])
+    rows = csv.parse(json_str(request["text"]), delimiter)
+    response = {"rows": json(rows), "encoded": json(csv.dump(rows, delimiter))}
+    print(json_dump(response))

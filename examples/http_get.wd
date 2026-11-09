@@ -1,0 +1,10 @@
+import std.http as http
+
+arguments = args()
+if len(arguments) != 3:
+    eprint("usage: http_get host port /path")
+    exit(1)
+response = http.get(arguments[0], int(arguments[1]), arguments[2], http.Limits(16384, 1048576, 10000))
+print(json_dump(response))
+if response.status >= 400:
+    exit(1)

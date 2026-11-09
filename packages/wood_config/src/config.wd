@@ -1,0 +1,76 @@
+# Application configuration: a small INI-style file, overridden by environment
+# variables. Typed getters report the offending key instead of guessing.
+import std.env as env
+
+record Config:
+    values: dict[str,str]
+    prefix: str
+
+fn parse(source: str, prefix: str = "") -> Config:
+    values: dict[str,str] = {}
+    section = ""
+    line_number = 0
+    for raw in split(source, "\n"):
+        line_number += 1
+        line = strip(raw)
+        if line == "" or line[0] == "#" or line[0] == ";":
+            continue
+        if line[0] == "[":
+            if line[len(line)-1] != "]":
+                raise "config line "+str(line_number)+": unterminated section"
+            section = strip(line[1:len(line)-1])
+            continue
+        pieces = split(line, "=")
+        if len(pieces) < 2 or strip(pieces[0]) == "":
+            raise "config line "+str(line_number)+": expected key = value"
+        key = strip(pieces[0])
+        values[section+"."+key if section != "" else key] = strip(line[len(pieces[0])+1:])
+    return Config(values, prefix)
+
+fn load(file: str, prefix: str = "") -> Config:
+    return parse(read_text(file) if path_exists(file) else "", prefix)
+
+fn _environment_name(config: Config, key: str) -> str:
+    pieces: list[str] = []
+    for byte in key:
+        code = byte_value(byte)
+        if code >= 97 and code <= 122:
+            append(pieces, byte_string(code-32))
+        elif byte == ".":
+            append(pieces, "_")
+        else:
+            append(pieces, byte)
+    return config.prefix+join(pieces, "")
+
+fn lookup(config: Config, key: str) -> str | None:
+    if config.prefix != "":
+        value = env.get(_environment_name(config, key))
+        if value is not None:
+            return value
+    if key in config.values:
+        return config.values[key]
+    return None
+
+fn text(config: Config, key: str, fallback: str = "") -> str:
+    value = lookup(config, key)
+    return fallback if value is None else unwrap(value)
+
+fn number(config: Config, key: str, fallback: int = 0) -> int:
+    value = lookup(config, key)
+    if value is None:
+        return fallback
+    try:
+        return int(unwrap(value))
+    except err:
+        raise "config key "+key+" must be an integer"
+
+fn flag(config: Config, key: str, fallback: bool = false) -> bool:
+    value = lookup(config, key)
+    if value is None:
+        return fallback
+    item = unwrap(value)
+    if item in ["true", "yes", "on", "1"]:
+        return true
+    if item in ["false", "no", "off", "0"]:
+        return false
+    raise "config key "+key+" must be a boolean"

@@ -1,0 +1,7 @@
+# No integer literal: JSON's Error descriptor still needs the int field type.
+try:
+    raise "message"
+except err:
+    value = json_parse(json_dump(err))
+    assert(json_str(json_dict(value)["message"]) == "message")
+print("native error JSON passed")

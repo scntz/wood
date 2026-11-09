@@ -1,0 +1,46 @@
+import std.random as random
+import std.task as task
+
+assert(random.bytes(0) == "")
+for size in [1, 7, 8, 16, 255, 256, 257, 1024, 1048576]:
+    value = random.bytes(size)
+    saved = value
+    assert(len(value) == size)
+    if size > 0:
+        value = value[1:]
+        assert(len(saved) == size)
+    for byte in saved[:64]:
+        assert(byte_value(byte) >= 0 and byte_value(byte) <= 255)
+for bad in [-1, 1048577, 9223372036854775807]:
+    caught = false
+    try:
+        random.bytes(bad)
+    except err:
+        caught = err.code == "R4003"
+    assert(caught)
+for bound in [1, 2, 3, 7, 255, 256, 257, 65537, 4611686018427387905, 9223372036854775807]:
+    for i in range(32):
+        value = random.below(bound)
+        assert(value >= 0 and value < bound)
+assert(random.below(1) == 0)
+for bad in [0, -1, -9223372036854775807 - 1]:
+    caught = false
+    try:
+        random.below(bad)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+
+fn sample(payload: json) -> json:
+    for i in range(16):
+        assert(len(random.bytes(32)) == 32)
+        assert(random.below(256) >= 0)
+    return json(true)
+
+with task.spawn(sample, json_null()) as first:
+    with task.spawn(sample, json_null()) as second:
+        assert(json_bool(task.wait(first, 10000)))
+        assert(json_bool(task.wait(second, 10000)))
+        assert(json_bool(task.wait(first, 10000)))
+# These are contract tests, not a statistical certification of entropy quality.
+print("secure random contracts passed")

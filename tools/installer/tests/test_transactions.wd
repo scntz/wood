@@ -1,0 +1,58 @@
+import installer.bundle as bundle
+import installer.engine as engine
+import std.path as path
+import std.fs as fs
+
+fn cancel(done: int, total: int, operation: str) -> bool:
+    return not starts_with(operation, "Install docs/")
+
+fn allow(done: int, total: int, operation: str) -> bool:
+    return true
+
+arguments = args()
+payload = bundle.load(arguments[0])
+root = path.absolute(arguments[1])
+caught = false
+try:
+    engine.install(payload, root, cancel)
+except err:
+    caught = "cancelled" in err.message
+    if not caught:
+        raise err
+assert(caught)
+assert(fs.entries(root, 16) == [".setup-lock"])
+installed = engine.install(payload, root, allow)
+assert(fs.kind(path.combine(installed, payload.app.command)) == "file")
+engine.uninstall(root, payload.app.id)
+# A previously uninstalled destination with its retained lock is reusable.
+engine.install(payload, root, allow)
+engine.uninstall(root, payload.app.id)
+assert(fs.entries(root, 16) == [".setup-lock"])
+
+# Reconstruct a process interruption after a journalled file deployment.
+generation = "versions/" + payload.digest
+fs.make_dirs(path.combine(root, generation + "/bin"))
+file = payload.app.files[0]
+assert(file.name == "bin/sample.exe")
+name = generation + "/" + file.name
+write_text(path.combine(root, name), read_text(arguments[2]))
+empty: list[json] = []
+journal = {"format": json(1), "id": json(payload.app.id), "digest": json(payload.digest), "transaction": json("1" * 64), "files": json([json({"name": json(name), "sha256": json(file.digest)})]), "directories": json([json("versions"), json(generation), json(generation + "/bin")])}
+write_text(path.combine(root, "journal.json"), json_dump(journal))
+engine.install(payload, root, allow)
+assert(fs.kind(path.combine(root, "journal.json")) == "missing")
+engine.uninstall(root, payload.app.id)
+
+# Recovery must NOT erase a modified, interrupted deployment.
+fs.make_dirs(path.combine(root, generation + "/bin"))
+write_text(path.combine(root, name), "user modification")
+write_text(path.combine(root, "journal.json"), json_dump(journal))
+caught = false
+try:
+    engine.install(payload, root, allow)
+except err:
+    caught = "preserved modified/unknown files" in err.message
+assert(caught)
+assert(read_text(path.combine(root, name)) == "user modification")
+assert(fs.kind(path.combine(root, "journal.json")) == "file")
+print("installer transaction contracts passed")

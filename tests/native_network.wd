@@ -1,0 +1,180 @@
+# Shared C++/LLVM network corpus. No remote servers, sleep-based races or speed
+# assertions: ownership/EOF, OS readiness and task messages provide ordering.
+import std.net as net
+import std.io as io
+import std.task as tasks
+import std.time as time
+
+fn cold_worker(message: json) -> json:
+    with net.listen("127.0.0.1", 0, 10000) as listener:
+        with net.connect("127.0.0.1", net.port(listener), 10000) as client:
+            with net.accept(listener) as peer:
+                io.write(client, "cold\0")
+                net.shutdown_write(client)
+                assert(io.read_all(peer, 5) == "cold\0")
+    return message
+
+fn bulk_worker(message: json) -> json:
+    with net.connect("localhost", json_int(message), 30000) as connection:
+        io.write(connection, "a\0b\n" * 131072)
+        net.shutdown_write(connection)
+        assert(io.read_all(connection, 3) == "ack")
+    return json("bulk complete")
+
+fn cancel_worker(message: json) -> json:
+    with net.connect("127.0.0.1", json_int(message), 120000) as connection:
+        io.write(connection, "ready")
+        try:
+            io.line(connection, 20)
+            assert(false)
+        except err:
+            assert(err.code == "R4022" and err.message == "socket operation cancelled")
+    return json("cancelled")
+
+# Cold library publication and DNS in independent native workers/contexts.
+jobs = [tasks.spawn(cold_worker, json(index)) for index in range(8)]
+for index in range(8):
+    assert(json_int(tasks.wait(jobs[index], 120000)) == index)
+    tasks.close(jobs[index])
+
+for address in ["127.0.0.1", "::1"]:
+    with net.listen(address, 0, 10000) as listener:
+        port = net.port(listener)
+        assert(port >= 1 and port <= 65535)
+        hosts = [address]
+        # Name resolution follows OS policy. IPv6 numeric I/O is mandatory;
+        # exercise localhost against IPv6 only when the independent OS probe
+        # reports that family. Some WSL resolvers expose localhost as IPv4 only.
+        if address == "127.0.0.1" or len(args()) > 0:
+            append(hosts, "localhost")
+        for host in hosts:
+            alias = listener
+            with net.connect(host, port, 10000) as client:
+                with net.accept(listener) as peer:
+                    alias = client
+                    assert(alias == client and str(alias) == "<stream:open>")
+                    assert(io.read(client, 0) == "")
+                    net.set_timeout(peer, 1)
+                    for action in range(2):
+                        try:
+                            if action == 0:
+                                io.read(peer, 1)
+                            else:
+                                io.line(peer, 4)
+                            assert(false)
+                        except err:
+                            assert(err.code == "R4018")
+                    net.set_timeout(peer, 10000)
+                    io.write(client, "one\r\nlast\0")
+                    net.shutdown_write(client)
+                    net.shutdown_write(client)
+                    assert(io.line(peer, 5) == "one\r\n")
+                    assert(io.read_exact(peer, 5) == "last\0")
+                    assert(io.line(peer, 0) == "")
+                    io.write(peer, "reply")
+                    net.shutdown_write(peer)
+                    assert(io.read_all(client, 5) == "reply")
+                    for action in range(5):
+                        try:
+                            if action == 0:
+                                io.write(client, "closed write")
+                            elif action == 1:
+                                io.flush(peer)
+                            elif action == 2:
+                                io.seek(peer, 0)
+                            elif action == 3:
+                                io.tell(peer)
+                            else:
+                                net.accept(peer)
+                            assert(false)
+                        except err:
+                            assert(err.code == ("R4017" if action == 4 else "R4016"))
+                    io.close(alias)
+                    assert(io.closed(client))
+            assert(io.closed(alias))
+        # Listener byte operations and half-close are invalid.
+        for action in range(3):
+            try:
+                if action == 0:
+                    io.read(listener, 0)
+                elif action == 1:
+                    io.write(listener, "")
+                else:
+                    net.shutdown_write(listener)
+                assert(false)
+            except err:
+                assert(err.code == ("R4017" if action == 2 else "R4016"))
+        net.set_timeout(listener, 1)
+        try:
+            net.accept(listener)
+            assert(false)
+        except err:
+            assert(err.code == "R4018")
+
+# Independent address families on the same bound port (IPv6-only policy).
+with net.listen("127.0.0.1", 0, 10000) as ipv4:
+    with net.listen("::1", net.port(ipv4), 10000) as ipv6:
+        with net.connect("127.0.0.1", net.port(ipv4), 10000) as client4:
+            with net.connect("::1", net.port(ipv6), 10000) as client6:
+                with net.accept(ipv4) as peer4:
+                    with net.accept(ipv6) as peer6:
+                        io.write(client4, "4")
+                        io.write(client6, "6")
+                        assert(io.read(peer4, 1) == "4" and io.read(peer6, 1) == "6")
+
+with net.listen("127.0.0.1", 0, 30000) as listener:
+    work = tasks.spawn(bulk_worker, json(net.port(listener)))
+    with net.accept(listener) as peer:
+        body = io.read_all(peer, 524288)
+        assert(body == "a\0b\n" * 131072)
+        io.write(peer, "ack")
+        net.shutdown_write(peer)
+    assert(json_str(tasks.wait(work, 120000)) == "bulk complete")
+    tasks.close(work)
+
+with net.listen("127.0.0.1", 0, 10000) as listener:
+    work = tasks.spawn(cancel_worker, json(net.port(listener)))
+    with net.accept(listener) as peer:
+        assert(io.read_exact(peer, 5) == "ready")
+        tasks.cancel(work)
+        assert(json_str(tasks.wait(work, 10000)) == "cancelled")
+        assert(json_str(tasks.wait(work, 10000)) == "cancelled")
+        assert(io.read(peer, 1) == "")
+    tasks.close(work)
+
+for address in ["", "localhost", "127.0.0.1\0bad"]:
+    try:
+        net.listen(address, 0, 1000)
+        assert(false)
+    except err:
+        assert(err.code == "R4017")
+for timeout in [0, 86400001]:
+    try:
+        net.connect("127.0.0.1", 1, timeout)
+        assert(false)
+    except err:
+        assert(err.message == "socket timeout must be in 1..86400000 milliseconds")
+for port in [0, -1, 65536]:
+    try:
+        net.connect("127.0.0.1", port, 1000)
+        assert(false)
+    except err:
+        assert(err.code == "R4017")
+
+# Closed listeners must release the port and reject all old aliases.
+closed = net.listen("127.0.0.1", 0, 10000)
+number = net.port(closed)
+io.close(closed)
+try:
+    net.connect("127.0.0.1", number, 1000)
+    assert(false)
+except err:
+    # OS refusal can arrive after the requested deadline (notably Windows).
+    # The reference backend also permits either network failure or timeout.
+    assert(err.code == "R4017" or err.code == "R4018")
+try:
+    net.port(closed)
+    assert(false)
+except err:
+    assert(err.code == "R4016" and err.message == "stream is closed")
+print("native network lifecycle passed")

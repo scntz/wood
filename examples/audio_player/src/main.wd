@@ -1,0 +1,28 @@
+# A small audio player using wood@audio's real device API.
+#   audio_player FILE.wav [--volume 0.0-1.0]   Play a WAV file
+#   audio_player --tone FILE.wav               Write a demo tone, then inspect it
+#   audio_player --devices                     List device counts
+import audio.buffer as audio
+import audio.device as device
+import audio.wav as wav
+
+fn describe(name: str, sound: audio.Buffer):
+    print(name+": "+str(sound.rate)+" Hz, "+str(sound.channels)+" channel(s), "+str(audio.duration(sound))+" s, peak "+str(audio.peak(sound)))
+
+arguments = args()
+if len(arguments) == 1 and arguments[0] == "--devices":
+    print("output devices: "+str(device.output_devices()))
+    print("input devices: "+str(device.input_devices()))
+elif len(arguments) == 2 and arguments[0] == "--tone":
+    # Mixes two real tones, fades the ends and normalizes before saving.
+    chord = audio.mix(audio.tone(440.0, 0.5, 44100, 0.4), audio.tone(660.0, 0.5, 44100, 0.3))
+    wav.save(arguments[1], audio.fade(audio.normalize(chord, 0.8), 0.02))
+    describe(arguments[1], wav.load(arguments[1]))
+elif len(arguments) == 1 or (len(arguments) == 3 and arguments[1] == "--volume"):
+    sound = wav.load(arguments[0])
+    describe(arguments[0], sound)
+    device.play(sound, float(arguments[2]) if len(arguments) == 3 else 1.0)
+    print("finished")
+else:
+    eprint("usage: audio_player FILE.wav [--volume 0.0-1.0] | --tone FILE.wav | --devices")
+    exit(2)

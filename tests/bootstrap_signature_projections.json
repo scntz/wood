@@ -1,0 +1,242 @@
+[
+  {
+    "source": "fn query(x:int)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:int)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:int)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:str)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:str)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:str)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:range)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:range)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:range)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:list[float])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:list[float])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:list[float])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:dict[str,float])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:dict[str,float])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:dict[str,float])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:array[float])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:array[float])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:array[float])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:cursor[list[int]])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:cursor[list[int]])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:cursor[list[int]])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:cursor[dict[bool,str]])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:cursor[dict[bool,str]])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:cursor[dict[bool,str]])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:cursor[str])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:cursor[str])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:cursor[str])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:cursor[range])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:cursor[range])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:cursor[range])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:fn(int)->str)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:fn(int)->str)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:fn(int)->str)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "fn query(x:callable(int)->float)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "fn query(x:callable(int)->float)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "fn query(x:callable(int)->float)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn next(mut self)->step[int]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn next(mut self)->step[int]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn next(mut self)->step[int]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->cursor[list[float]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->cursor[list[float]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->cursor[list[float]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn next(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn next(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn next(self):\n    return 1\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn next(self)->str:\n    pass\n  fn iter(self)->cursor[list[int]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn next(self)->str:\n    pass\n  fn iter(self)->cursor[list[int]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn next(self)->str:\n    pass\n  fn iter(self)->cursor[list[int]]:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->Iter:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->Iter:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter:\n  fn iter(self)->Iter:\n    pass\nfn query(x:Iter)->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter[T]:\n  fn next(self)->step[T]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter[T]:\n  fn next(self)->step[T]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter[T]:\n  fn next(self)->step[T]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Result"
+  },
+  {
+    "source": "record Iter[T]:\n  fn iter(self)->cursor[list[T]]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Item"
+  },
+  {
+    "source": "record Iter[T]:\n  fn iter(self)->cursor[list[T]]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Iterator"
+  },
+  {
+    "source": "record Iter[T]:\n  fn iter(self)->cursor[list[T]]:\n    pass\nfn query(x:Iter[int])->void:\n  pass\n",
+    "member": "Result"
+  }
+]

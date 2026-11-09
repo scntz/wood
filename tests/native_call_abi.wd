@@ -1,0 +1,28 @@
+# Large value arguments, defaults and a mutating receiver cross stack/register
+# boundaries. In particular, retain/drop calls must preserve every scalar field.
+record Registry:
+    values: list[int]
+    names: dict[str,int]
+    limit: int
+
+    fn intern(mut self, kind: str, name: str = "", element: int = -1, key: int = -1, parameters: list[int] = [], declaration: int = 0) -> int:
+        assert(self.limit == 1048576)
+        assert(kind == "Unknown" or kind == "Void")
+        assert(name == "" and element == -1 and key == -1 and parameters == [] and declaration == 0)
+        result = len(self.values)
+        append(self.values,result)
+        self.names[kind] = result
+        return result
+
+fn registry(limit: int = 1048576) -> Registry:
+    result = Registry([],{},limit)
+    assert(result.limit == limit and limit == 1048576)
+    assert(result.intern("Unknown") == 0)
+    assert(result.intern("Void") == 1)
+    return result
+
+for i in range(100):
+    value = registry()
+    assert(value.limit == 1048576 and value.values == [0,1])
+    assert(value.names["Void"] == 1)
+print("native aggregate calls passed")

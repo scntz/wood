@@ -1,0 +1,118 @@
+import std.math as math
+fn fibonacci(n: int) -> int:
+    if n < 2:
+        return n
+    return fibonacci(n-1)+fibonacci(n-2)
+record Box[T]:
+    value: T
+    fn get(self):
+        return self.value
+    fn replace(mut self, value: T):
+        self.value = value
+fn identity[T](value: T) -> T:
+    return value
+fn add(a: int, b: int = 3):
+    return a+b
+fn quotient(a: int, b: int):
+    return a//b
+fn maybe(flag: bool) -> Box[int] | None:
+    if flag:
+        return Box(9)
+    return None
+fn halve(value: float):
+    return value/2
+pointer: fn(float)->float = halve
+assert(pointer(7) == 3.5)
+assert(math.gcd(84,30) == 6 and math.lcm(12,18) == 36)
+assert(math.pow_int(3,7) == 2187 and math.clamp_int(14,2,9) == 9)
+record Vector:
+    x: float
+    y: float
+    z: float
+    fn dot(self, other: Vector):
+        return self.x*other.x+self.y*other.y+self.z*other.z
+assert(Vector(1,2,3).dot(Vector(4,5,6)) == 32.0)
+assert(fibonacci(12) == 144)
+box = Box(3)
+snapshot = box
+box.replace(9)
+assert(box.get() == 9 and snapshot.get() == 3)
+assert(identity(7) == 7)
+assert(unwrap(maybe(true)).get() == 9 and maybe(false) is None)
+assert(add(b=8,a=2) == 10 and add(4) == 7)
+pair = (5,"bytes",2.5)
+assert(pair[0] == 5 and pair[1] == "bytes" and pair[2] == 2.5)
+assert("abc"[-1] == "c" and len("á") == 2)
+assert("a" < "b" and "aa" > "a")
+assert(-7//3 == -3 and -7%3 == 2)
+assert(7//-3 == -3 and 7%-3 == -2)
+assert(-9223372036854775808%-1 == 0)
+assert(-1 << 63 == -9223372036854775808)
+assert(-3 >> 1 == -2)
+checks = 0
+for a in range(-40,41):
+    for b in range(-9,10):
+        if b == 0:
+            continue
+        q = a//b
+        r = a%b
+        assert(q*b+r == a)
+        assert((r if r >= 0 else -r) < (b if b >= 0 else -b))
+        assert(r == 0 or (r < 0) == (b < 0))
+        checks += 1
+assert(checks == 1458)
+assert(3.0/2 == 1.5 and int(-2.75) == -2)
+assert(0.1+0.2 > 0.3 and int(-0.0) == 0)
+infinity = 1e308*1e308
+not_a_number = infinity-infinity
+assert(not_a_number != not_a_number and not (not_a_number < 0.0))
+assert((4,"x") == (4,"x") and Box(4) != Box(5))
+absent_box: Box[int] | None = None
+assert(absent_box == maybe(false) and maybe(true) == Box(9))
+optional: int | None = None
+assert(optional is None)
+optional = 4
+assert(optional is not None and unwrap(optional) == 4)
+sum = 0
+for i in range(0,20,2):
+    if i == 4:
+        continue
+    if i == 14:
+        break
+    sum += i
+assert(sum == 38)
+count = 0
+for i in range(9223372036854775806,9223372036854775807,2):
+    count += 1
+for i in range(-9223372036854775807,-9223372036854775808,-2):
+    count += 1
+assert(count == 2)
+while count < 5:
+    count += 1
+assert(count == 5)
+assert((8 if count == 5 else 1) == 8)
+assert(false and 1//0 == 0 or true)
+assert(0 < count < 10)
+try:
+    bad = 9223372036854775807+count
+    assert(false)
+except err:
+    assert(err.code == "R4001" and err.message == "integer overflow in addition")
+    copy = err
+    assert(copy == err and not (copy != err))
+    assert((copy,9) == (err,9))
+    optional_error: error | None = copy
+    assert(optional_error == err and unwrap(optional_error) == copy)
+try:
+    ignored = quotient(1,0)
+    assert(false)
+except err:
+    assert(err.code == "R4002" and err.message == "division by zero")
+try:
+    try:
+        raise "native recovery"
+    except original:
+        raise original
+except outer:
+    assert(outer.code == "R4010" and outer.message == "native recovery")
+print("independent native core passed",fibonacci(10),true,None)

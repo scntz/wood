@@ -1,0 +1,11 @@
+# Local GUI qualification helper: create only a fresh caller-named test database.
+import notes.store as notes
+import std.sqlite as sql
+
+if len(args()) != 1 or path_exists(args()[0]):
+    raise "provide a new test database path"
+with sql.open(args()[0], 5000) as connection:
+    notes.initialize(connection)
+    for i in range(20):
+        notes.add(connection, "a" * 65536)
+print("seeded twenty maximum-size notes")

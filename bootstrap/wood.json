@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "name": "wood_bootstrap",
+  "version": "0.1.0",
+  "source": "src",
+  "entry": "main.wd",
+  "tests": "tests",
+  "dependencies": {}
+}

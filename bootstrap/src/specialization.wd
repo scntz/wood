@@ -1,0 +1,51 @@
+# Specializations own fresh syntax IDs. Raw type nodes remain immutable and are
+# interpreted in the instance's type-argument environment, never rewritten in place.
+import syntax as ast
+
+record Cloner:
+    tree: ast.Tree
+    expressions: dict[int,int]
+    statements: dict[int,int]
+
+    fn expression(mut self, value: int) -> int:
+        if value < 0:
+            return value
+        if value in self.expressions:
+            return self.expressions[value]
+        node = self.tree.expressions[value]
+        index = len(self.tree.expressions)
+        self.expressions[value] = index
+        append(self.tree.expressions,node)
+        children: list[int] = []
+        for child in node.children:
+            append(children,self.expression(child))
+        self.tree.expressions[index].children = children
+        if node.function >= 0:
+            self.tree.expressions[index].function = self.statement(node.function)
+        return index
+
+    fn statement(mut self, value: int) -> int:
+        if value in self.statements:
+            return self.statements[value]
+        node = self.tree.statements[value]
+        index = len(self.tree.statements)
+        self.statements[value] = index
+        append(self.tree.statements,node)
+        expressions: list[int] = []
+        for expression in node.expressions:
+            append(expressions,self.expression(expression))
+        parameters: list[ast.Parameter] = []
+        for parameter in node.parameters:
+            parameter.default_value = self.expression(parameter.default_value)
+            append(parameters,parameter)
+        body: list[int] = []
+        otherwise: list[int] = []
+        for child in node.body:
+            append(body,self.statement(child))
+        for child in node.otherwise:
+            append(otherwise,self.statement(child))
+        self.tree.statements[index].expressions = expressions
+        self.tree.statements[index].parameters = parameters
+        self.tree.statements[index].body = body
+        self.tree.statements[index].otherwise = otherwise
+        return index

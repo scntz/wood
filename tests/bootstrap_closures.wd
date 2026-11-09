@@ -1,0 +1,88 @@
+# Native closure contract tested separately from the iterator protocol.
+import std.functional as eager
+import std.collections as collections
+
+fn factory(base:int):
+    return fn(value:int)=>base+value
+
+fn nested(base:int)->callable(int)->callable(int)->int:
+    return fn(x)=>fn(y)=>base+x+y
+
+fn counter(start:int):
+    fn advance[mut start](amount:int=1,*,scale:int=1):
+        start+=amount*scale
+        return start
+    return advance
+
+fn combine[T,F](callback:F(T),value:T)->F.Result:
+    return callback(value)
+
+record Box[T]:
+    value:T
+    fn clear(mut self)->int:
+        self.value=[]
+        return 4
+    fn replace(mut self,value:T)->int:
+        self.value=value
+        return 4
+
+offset=7
+add=fn(x:int)=>x+offset
+offset=99
+assert(add(x=3)==10)
+assert(factory(8)(2)==10)
+assert(nested(1)(2)(3)==6)
+assert(combine(fn(x)=>x+1,4)==5)
+assert(eager.map(fn(x)=>x+2,[1,2,3])==[3,4,5])
+assert(eager.filter(fn(x)=>x>1,[1,2,3])==[2,3])
+assert(eager.fold(fn(a,b)=>a+b,[1,2,3],0)==6)
+values=[1,2]
+snapshot=fn()=>values
+values[0]=9
+assert(snapshot()==[1,2])
+state=counter(10)
+assert(state()==11)
+copied=state
+assert(copied(2,scale=3)==17)
+assert(state()==12)
+assert(copied()==18)
+pure=Box([add])
+assert(pure.value[0](pure.clear())==11)
+owned=Box([counter(20)])
+try:
+    owned.value[0](owned.clear())
+    assert(false)
+except err:
+    assert(err.code=="R4006")
+assert(len(owned.value)==0)
+replaced=Box([counter(20)])
+alias=replaced
+assert(replaced.value[0](replaced.replace([counter(100)]))==104)
+assert(alias.value[0]()==21)
+wide:callable(int)->float=fn(value)=>value
+assert(wide(2)==2.0)
+erased:list[callable(int)->int]=[add,factory(2)]
+assert(erased[0](1)==8 and erased[1](1)==3)
+optional:(callable(int)->int)|None=add
+assert(unwrap(optional)(2)==9)
+stack:collections.Stack[callable()->int]=collections.Stack([])
+stack.push(fn()=>42)
+assert(stack.pop()()==42)
+for i in range(100):
+    captured="a long owned string exceeding inline storage "+str(i)
+    read=fn()=>captured
+    captured="changed"
+    assert(read()=="a long owned string exceeding inline storage "+str(i))
+# Large captures exercise borrowed stable reads and effectful snapshot fallback.
+text="native wood"*128
+size=fn(x:int)=>len(text)+x
+assert(size(2+3)==1413)
+large=Box([size])
+assert(large.value[0](large.clear())==1412)
+record Holder[F]:
+    callback:F
+fn holder():
+    text="owned temporary large capture "*32
+    return Holder(fn(x:int)=>len(text)+x)
+assert(holder().callback(1)==961)
+print("native self-hosted closures passed")

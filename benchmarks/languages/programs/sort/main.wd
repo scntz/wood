@@ -1,0 +1,35 @@
+fn run(n: int) -> int:
+    values: list[int] = []
+    x = 12345
+    for i in range(n):
+        x = (x * 1664525 + 1013904223) % 4294967296
+        append(values, x)
+    stack: list[int] = [0, n - 1]
+    while len(stack) > 0:
+        high = pop(stack)
+        low = pop(stack)
+        if low < high:
+            pivot = values[(low + high) // 2]
+            i = low
+            j = high
+            while i <= j:
+                while values[i] < pivot:
+                    i = i + 1
+                while values[j] > pivot:
+                    j = j - 1
+                if i <= j:
+                    swap = values[i]
+                    values[i] = values[j]
+                    values[j] = swap
+                    i = i + 1
+                    j = j - 1
+            append(stack, low)
+            append(stack, j)
+            append(stack, i)
+            append(stack, high)
+    checksum = 0
+    for i in range(n):
+        checksum = (checksum + values[i] * (i % 7 + 1)) % 1000000007
+    return checksum
+
+print(run(int(args()[0])))

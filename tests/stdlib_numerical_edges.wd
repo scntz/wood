@@ -1,0 +1,56 @@
+import std.num as num
+import std.linalg as la
+
+# Overflow on both sides must not turn a false comparison into inf <= inf.
+assert(not num.close(1.0e308, -1.0e308, 1.8, 0.0))
+assert(not num.close(-1.0e308, 1.0e308, 1.8, 0.0))
+assert(num.close(1.0e308, -1.0e308, 2.0, 0.0))
+assert(not num.close(1.0e308, -1.0e308, 0.0, 1.7e308))
+assert(num.close(1.0e308, -1.0e308, 1.0, 1.0e308))
+assert(not num.close(1.7e308, -1.0e308, 1.0, 0.9e308))
+assert(num.close(1.0, 1.1, 0.0, 0.11))
+assert(not num.close(1.0, 1.1, 0.0, 0.09))
+assert(num.close(0.0, -0.0, 0.0, 0.0))
+tiny = 4.9406564584124654e-324
+assert(not num.close(tiny, 0.0, 0.0, 0.0))
+assert(num.close(tiny, 0.0, 0.0, tiny))
+infinity = 1.0e308 * 2.0
+nan = infinity - infinity
+assert(num.close(infinity, infinity))
+assert(not num.close(infinity, -infinity))
+assert(not num.close(nan, nan))
+for tolerance in [-1.0, infinity, nan]:
+    caught = false
+    try:
+        num.close(1.0, 1.0, tolerance, 0.0)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+    caught = false
+    try:
+        num.close(1.0, 1.0, 0.0, tolerance)
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+
+# Compare normalized components with an independent analytic direction, not just
+# the norm of a result computed through the same formula.
+inverse_sqrt_two = 0.7071067811865475
+for scale in [tiny, tiny * 2.0, 1.0e-300, 1.0, 1.0e300, 1.0e308]:
+    original = la.Vec3(scale, -scale, 0.0)
+    result = original.normalized()
+    assert(num.close(result.x, inverse_sqrt_two))
+    assert(num.close(result.y, -inverse_sqrt_two))
+    assert(result.z == 0.0)
+    assert(num.close(result.length(), 1.0))
+    assert(original.x == scale and original.y == -scale)
+axis = la.Vec3(0.0, tiny, -0.0).normalized()
+assert(axis.x == 0.0 and axis.y == 1.0 and axis.z == 0.0)
+for invalid in [la.Vec3(0.0,0.0,0.0), la.Vec3(infinity,1.0,0.0), la.Vec3(nan,0.0,0.0), la.Vec3(1.7e308,1.7e308,0.0)]:
+    caught = false
+    try:
+        invalid.normalized()
+    except err:
+        caught = err.code == "R4010"
+    assert(caught)
+print("stdlib numerical edges passed")

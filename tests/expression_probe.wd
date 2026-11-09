@@ -1,0 +1,40 @@
+# Optional differential oracle driver. The executable itself is entirely native.
+def sliced_list(numbers: list[int], start: json, stop: json, step: int) -> list[int]:
+    if json_kind(start) == "null":
+        if json_kind(stop) == "null":
+            return numbers[::step]
+        return numbers[:json_int(stop):step]
+    if json_kind(stop) == "null":
+        return numbers[json_int(start)::step]
+    return numbers[json_int(start):json_int(stop):step]
+
+def sliced_text(text: str, start: json, stop: json, step: int) -> str:
+    if json_kind(start) == "null":
+        if json_kind(stop) == "null":
+            return text[::step]
+        return text[:json_int(stop):step]
+    if json_kind(stop) == "null":
+        return text[json_int(start)::step]
+    return text[json_int(start):json_int(stop):step]
+
+while not eof():
+    line = read_line()
+    if len(strip(line)) > 0:
+        request = json_dict(json_parse(line))
+        numbers = [json_int(item) for item in json_list(request["numbers"])]
+        text = json_str(request["text"])
+        step = json_int(request["step"])
+        repeats = json_int(request["repeats"])
+        count = len(numbers)
+        try:
+            selected = sliced_list(numbers, request["start"], request["stop"], step)
+            selected_text = sliced_text(text, request["start"], request["stop"], step)
+            mapping = {str(i % 3): i for i in range(count)}
+            print(json_dump({"list": json(selected), "text": json(selected_text),
+                "comprehension": json([x * 10 + y for x in range(count) if x % 2 == 0
+                                       for y in range(x) if y % 3 == 0]),
+                "conditional": json(count if count % 2 == 0 else -count),
+                "chain": json(-1 < count < 10), "dictionary": json(mapping),
+                "keys": json(keys(mapping)), "repeat": json(numbers * repeats + numbers[::-1])}))
+        except err:
+            print(json_dump({"error": err.code}))

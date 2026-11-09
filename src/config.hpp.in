@@ -1,0 +1,5 @@
+#pragma once
+#define WOOD_VERSION "@PROJECT_VERSION@"
+namespace wood {
+inline constexpr auto configured_cxx = R"WOOD_CONFIG(@CMAKE_CXX_COMPILER@)WOOD_CONFIG";
+}

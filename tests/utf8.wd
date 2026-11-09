@@ -1,0 +1,50 @@
+import std.utf8 as utf8
+
+assert(utf8.decode("Aá🌳\0") == [65, 225, 127795, 0])
+assert(utf8.encode([65, 225, 127795, 0]) == "Aá🌳\0")
+assert(utf8.length("Aá🌳") == 3 and len("Aá🌳") == 7)
+assert(utf8.characters("Aá🌳") == ["A", "á", "🌳"])
+assert(utf8.slice_text("Aá🌳Z", -3, -1) == "á🌳")
+assert(utf8.decode(utf8.encode([0, 127, 128, 2047, 2048, 55295, 57344, 65535, 65536, 1114111])) == [0, 127, 128, 2047, 2048, 55295, 57344, 65535, 65536, 1114111])
+assert(utf8.is_valid("") and utf8.is_valid("á🌳"))
+assert(utf8.decode("\r\n") == [13, 10])
+assert(utf8.decode("") == [] and utf8.encode([]) == "")
+assert(utf8.decode(utf8.encode([65279])) == [65279])
+for invalid in [[128], [192, 128], [193, 191], [224, 128, 128], [237, 160, 128], [240, 128, 128, 128], [244, 144, 128, 128], [245, 128, 128, 128], [255], [194], [194, 65], [226, 130]]:
+    text = ""
+    for byte in invalid:
+        text = text + byte_string(byte)
+    assert(not utf8.is_valid(text))
+    try:
+        utf8.decode(text)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+for invalid_point in [-1, 55296, 57343, 1114112, 9223372036854775807]:
+    try:
+        utf8.encode([invalid_point])
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+for invalid_byte in [-1, 256, 9223372036854775807]:
+    try:
+        byte_string(invalid_byte)
+        assert(false)
+    except err:
+        assert(err.code == "R4013")
+for invalid_string in ["", "ab", "á"]:
+    try:
+        byte_value(invalid_string)
+        assert(false)
+    except err:
+        assert(err.code == "R4013")
+# Cover all Unicode scalar values in bounded batches, including every boundary.
+points: list[int] = []
+for point in range(1114112):
+    if point < 55296 or point > 57343:
+        append(points, point)
+    if len(points) == 4096:
+        assert(utf8.decode(utf8.encode(points)) == points)
+        points = []
+assert(utf8.decode(utf8.encode(points)) == points)
+print("utf8 ok")

@@ -1,0 +1,66 @@
+# Start other programs and locate the application's own files. There is no shell: each
+# argument reaches the program exactly as given, so user input cannot inject commands.
+import std.fs as fs
+import std.path as path
+
+extern fn wood_driver_call(request: str) -> int
+extern fn wood_driver_response(mut output: array[int]) -> int
+
+record Result:
+    status: int
+    output: str
+
+fn _call(op: str, fields: dict[str,json] = {}) -> json:
+    fields["op"] = json(op)
+    size = wood_driver_call(json_dump(fields))
+    if size < 0 or size > 65536:
+        raise "invalid process bridge response"
+    bytes = array_full(size, 0)
+    if wood_driver_response(bytes) != size:
+        raise "invalid process bridge response"
+    reply = json_dict(json_parse(join([byte_string(value) for value in bytes], "")))
+    if not json_bool(reply["ok"]):
+        raise json_str(reply["message"])
+    return reply["value"]
+
+fn run(arguments: list[str], timeout_ms: int = 60000, output_limit: int = 16777216) -> Result:
+    # Runs a program to completion and returns its exit status and combined output.
+    # Exceeding the deadline or the output limit stops the program and raises an error.
+    if len(arguments) == 0 or arguments[0] == "":
+        raise "run needs a program name"
+    directory = json_str(_call("temp", {"parent":json("")}))
+    file = path.combine(directory, "output.log")
+    status = 2
+    output = ""
+    try:
+        status = json_int(_call("process", {"args":json(arguments),"log":json(file),"timeout":json(timeout_ms),"limit":json(output_limit),"inherit_stdin":json(false)}))
+        output = read_text(file) if path_exists(file) else ""
+    except err:
+        _call("release", {"path":json(directory)})
+        raise err
+    _call("release", {"path":json(directory)})
+    # On Linux the forked child reports a failed launch with this line; Windows raises above.
+    if status == 127 and strip(output) == "wood: could not execute native compiler or program":
+        raise "cannot start "+arguments[0]
+    return Result(status, output)
+
+fn checked(arguments: list[str], timeout_ms: int = 60000) -> str:
+    # Like run, but a nonzero exit status becomes an error that includes the output.
+    result = run(arguments, timeout_ms)
+    if result.status != 0:
+        raise arguments[0]+" exited with status "+str(result.status)+": "+result.output[:2000]
+    return result.output
+
+fn set_environment(name: str, value: str):
+    # Applies to programs started after this call.
+    _call("environment_set", {"name":json(name),"value":json(value)})
+
+fn executable() -> str:
+    # This program's own path, for finding resources that ship beside it.
+    return json_str(_call("executable"))
+
+fn resource(relative: str) -> str:
+    # A file beside the executable. Paths cannot climb out of the application directory.
+    if path.is_absolute(relative) or ".." in split(replace(relative, "\\", "/"), "/"):
+        raise "resource paths must stay inside the application directory"
+    return path.combine(path.parent(executable()), relative)

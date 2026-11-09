@@ -1,0 +1,22 @@
+name: repository-hygiene
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit tracked files, reachable history and documentation links
+        shell: pwsh
+        run: ./tools/release-audit.ps1 -CheckDocs
+      - name: Check documentation anchors, source API index and example inventory
+        run: cmake -P tools/check-docs.cmake

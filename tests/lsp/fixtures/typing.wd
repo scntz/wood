@@ -1,0 +1,33 @@
+# A file with the constructs an editor sees half-typed. Tests replay it in small prefixes.
+import std.path as path
+
+record Item[T]:
+    value: T
+    tags: list[str]
+
+    fn first_tag(self) -> str:
+        return self.tags[0] if len(self.tags) > 0 else ""
+
+fn total(items: list[int], scale: int = 1) -> int:
+    result = 0
+    for item in items:
+        if item > 0 and item != 7:
+            result += item * scale
+        elif item == 0:
+            continue
+        else:
+            result -= 1
+    return result
+
+fn describe(name: str) -> str:
+    try:
+        return path.name(name)
+    except err:
+        return err.message
+
+numbers = [value * 2 for value in [1, 2, 3] if value > 1]
+scores: dict[str, int] = {"a": 1, "b": 2}
+helper = fn(x: int) => x + 1
+print(total(numbers, scale=helper(1)))
+print(describe("some/where"))
+print(Item[int](1, ["x"]).first_tag())

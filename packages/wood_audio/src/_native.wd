@@ -1,0 +1,5 @@
+# Internal adapter ABI, not the application API. Calls are synchronous.
+extern fn wood_audio_output_count() -> int
+extern fn wood_audio_input_count() -> int
+extern fn wood_audio_play(samples: array[int], channels: int, rate: int, volume: int) -> int
+extern fn wood_audio_record(mut samples: array[int], channels: int, rate: int) -> int

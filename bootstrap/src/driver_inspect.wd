@@ -1,0 +1,90 @@
+# Production inspect schema, backed by the integrated checked program.
+import checked_program as ir
+import sha256 as sha
+
+fn declaration(program: ir.Result, symbol: int) -> int:
+    for i in range(len(program.signatures.declarations)):
+        if program.signatures.declarations[i].symbol == symbol:
+            return i
+    raise "inspect references an unknown declaration"
+
+fn type_ref(program: ir.Result, value: int) -> json:
+    pool = program.signatures.pool
+    node = pool.types[value]
+    kind = node.kind
+    result: dict[str,json] = {}
+    if kind == "Parameter":
+        result = {"kind":json("type_parameter"),"name":json(node.name)}
+    elif kind in ["Optional","List","Array","Step","Cursor","Projection"]:
+        names = {"Optional":"optional","List":"list","Array":"array","Step":"step","Cursor":"cursor","Projection":"associated_type"}
+        result["kind"] = json(names[kind])
+        result["base" if kind == "Projection" else "element"] = type_ref(program,node.element)
+        if kind == "Projection":
+            result["name"] = json(node.name)
+    elif kind == "Dict":
+        result = {"kind":json("dict"),"key":type_ref(program,node.key),"value":type_ref(program,node.element)}
+    elif kind == "Tuple":
+        result = {"kind":json("tuple"),"elements":json([type_ref(program,t) for t in node.parameters])}
+    elif kind in ["Function","Callable","Closure","Signature"]:
+        names = {"Function":"function","Callable":"callable","Closure":"closure","Signature":"callable_pattern"}
+        result = {"kind":json(names[kind]),"parameters":json([type_ref(program,t) for t in node.parameters]),"returns":type_ref(program,node.element)}
+        if kind == "Signature":
+            result["name"] = json(node.name)
+    elif kind == "Record":
+        decl = program.signatures.declarations[declaration(program,node.declaration)]
+        module = program.signatures.compilation.modules[decl.module]
+        result = {"kind":json("record"),"module":json(module.file),"name":json(module.tree.statements[decl.statement].name),"arguments":json([type_ref(program,t) for t in node.parameters])}
+    else:
+        result["kind"] = json(pool.display(value))
+    return json(result)
+
+fn function_info(program: ir.Result, index: int) -> json:
+    decl = program.signatures.declarations[index]
+    stmt = program.signatures.compilation.modules[decl.module].tree.statements[decl.statement]
+    parameters: list[json] = []
+    for parameter in decl.parameters:
+        modes = {"PositionalOnly":"positional_only","KeywordOnly":"keyword_only","Positional":"positional_or_keyword"}
+        mode = "positional_or_keyword"
+        if parameter.mode in modes:
+            mode = modes[parameter.mode]
+        row: dict[str,json] = {"name":json(parameter.name),"type":json(program.signatures.pool.display(parameter.type)),"mode":json(mode),"has_default":json(parameter.default_value >= 0),"mutable_borrow":json(parameter.mutable_borrow),"type_ref":type_ref(program,parameter.type)}
+        append(parameters,json(row))
+    row: dict[str,json] = {"name":json(stmt.name),"external":json(stmt.external),"type_parameters":json(stmt.type_parameters),"parameters":json(parameters),"returns":json(program.signatures.pool.display(decl.result)),"returns_ref":type_ref(program,decl.result),"return_inferred":json(stmt.inferred_return),"return_resolved":json(program.signatures.pool.types[decl.result].kind != "Unknown"),"line":json(stmt.token.line),"receiver":json(("mutable" if stmt.mutating else "value") if stmt.method else "none")}
+    return json(row)
+
+fn inspect(program: ir.Result) -> json:
+    modules: list[json] = []
+    for module_index in range(len(program.signatures.compilation.modules)):
+        module = program.signatures.compilation.modules[module_index]
+        indices: dict[int,int] = {}
+        for i in range(len(program.signatures.declarations)):
+            decl = program.signatures.declarations[i]
+            if decl.module == module_index:
+                indices[decl.statement] = i
+        imports: list[str] = []
+        for edge in module.imports:
+            append(imports,program.signatures.compilation.modules[edge.target].file)
+        exports: list[json] = []
+        for root in module.tree.roots:
+            stmt = module.tree.statements[root]
+            if starts_with(stmt.name,"_"):
+                continue
+            if stmt.kind == "Function":
+                append(exports,function_info(program,indices[root]))
+            elif stmt.kind == "Record":
+                decl = program.signatures.declarations[indices[root]]
+                fields: list[json] = []
+                for field in decl.parameters:
+                    row: dict[str,json] = {"name":json(field.name),"type":json(program.signatures.pool.display(field.type)),"type_ref":type_ref(program,field.type)}
+                    append(fields,json(row))
+                methods = [function_info(program,indices[method]) for method in stmt.body]
+                # Public roots describe the unspecialized declaration. Generic
+                # prototypes intentionally have no concrete record_types entry.
+                arguments: list[json] = []
+                record_ref: dict[str,json] = {"kind":json("record"),"module":json(module.file),"name":json(stmt.name),"arguments":json(arguments)}
+                row: dict[str,json] = {"name":json(stmt.name),"kind":json("record"),"type_ref":json(record_ref),"fields":json(fields),"methods":json(methods),"type_parameters":json(stmt.type_parameters),"line":json(stmt.token.line)}
+                append(exports,json(row))
+        row: dict[str,json] = {"file":json(module.file),"sha256":json(sha.digest(module.source)),"imports":json(imports),"exports":json(exports)}
+        append(modules,json(row))
+    result: dict[str,json] = {"schema_version":json(1),"entry":json(program.signatures.compilation.modules[program.signatures.compilation.entry].file),"modules":json(modules)}
+    return json(result)

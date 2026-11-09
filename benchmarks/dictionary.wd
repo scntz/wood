@@ -1,0 +1,10 @@
+requests = int(args()[0])
+assert(requests >= 2 and requests <= 10000000)
+counts: dict[str, int] = {}
+for i in range(requests):
+    key = "key" + str(i % 257)
+    counts[key] = get(counts, key, 0) + 1
+total = 0
+for key in counts:
+    total = total + counts[key]
+print(len(counts), total)

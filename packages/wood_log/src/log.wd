@@ -1,0 +1,46 @@
+# Leveled application logging to stderr and an optional file. One record per line.
+import std.io as io
+
+record Logger:
+    name: str
+    level: int
+    file: str
+
+fn _rank(level: str) -> int:
+    levels = ["debug", "info", "warn", "error"]
+    for i in range(4):
+        if levels[i] == level:
+            return i
+    raise "unknown log level: "+level
+
+fn logger(name: str, level: str = "info", file: str = "") -> Logger:
+    return Logger(name, _rank(level), file)
+
+fn format_line(log: Logger, level: str, message: str, fields: dict[str,str] = {}) -> str:
+    # Control bytes cannot split a record, so logs stay greppable.
+    line = level+" "+log.name+": "+replace(replace(message, "\n", "\\n"), "\r", "\\r")
+    for key in fields:
+        line += " "+key+"="+replace(replace(fields[key], "\n", "\\n"), " ", "_")
+    return line
+
+fn write(log: Logger, level: str, message: str, fields: dict[str,str] = {}):
+    if _rank(level) < log.level:
+        return
+    line = format_line(log, level, message, fields)
+    eprint(line)
+    if log.file != "":
+        output = io.open(log.file, "a")
+        io.write(output, line+"\n")
+        io.close(output)
+
+fn debug(log: Logger, message: str, fields: dict[str,str] = {}):
+    write(log, "debug", message, fields)
+
+fn info(log: Logger, message: str, fields: dict[str,str] = {}):
+    write(log, "info", message, fields)
+
+fn warn(log: Logger, message: str, fields: dict[str,str] = {}):
+    write(log, "warn", message, fields)
+
+fn failure(log: Logger, message: str, fields: dict[str,str] = {}):
+    write(log, "error", message, fields)

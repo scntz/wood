@@ -1,0 +1,396 @@
+# PNG, BMP and binary PPM codecs in pure Wood. Decoders treat input as hostile:
+# every length and dimension is checked before use.
+import image as img
+
+fn _load_u32_be(text: str, at: int) -> int:
+    return byte_value(text[at])*16777216+byte_value(text[at+1])*65536+byte_value(text[at+2])*256+byte_value(text[at+3])
+
+fn _load_u16_le(text: str, at: int) -> int:
+    return byte_value(text[at])+byte_value(text[at+1])*256
+
+fn _load_u32_le(text: str, at: int) -> int:
+    return _load_u16_le(text, at)+_load_u16_le(text, at+2)*65536
+
+fn _be32(value: int) -> str:
+    return byte_string(value//16777216%256)+byte_string(value//65536%256)+byte_string(value//256%256)+byte_string(value%256)
+
+fn _le16(value: int) -> str:
+    return byte_string(value%256)+byte_string(value//256%256)
+
+fn _le32(value: int) -> str:
+    return _le16(value%65536)+_le16(value//65536)
+
+fn _png_signature() -> str:
+    return byte_string(137)+"PNG\r\n"+byte_string(26)+"\n"
+
+fn _crc_table() -> list[int]:
+    table: list[int] = []
+    for n in range(256):
+        c = n
+        for k in range(8):
+            c = 3988292384^(c//2) if c%2 == 1 else c//2
+        append(table, c)
+    return table
+
+fn _crc(text: str, table: list[int]) -> int:
+    c = 4294967295
+    for byte in text:
+        c = table[(c^byte_value(byte))%256]^(c//256)
+    return c^4294967295
+
+fn _adler(text: str) -> int:
+    a = 1
+    b = 0
+    for byte in text:
+        a = (a+byte_value(byte))%65521
+        b = (b+a)%65521
+    return b*65536+a
+
+record _Huffman:
+    counts: list[int]
+    symbols: list[int]
+
+fn _huffman(lengths: list[int]) -> _Huffman:
+    counts = [0 for i in range(16)]
+    for length in lengths:
+        counts[length] = counts[length]+1
+    counts[0] = 0
+    offsets = [0 for i in range(16)]
+    for i in range(1, 15):
+        offsets[i+1] = offsets[i]+counts[i]
+    symbols = [0 for i in range(len(lengths))]
+    for symbol in range(len(lengths)):
+        if lengths[symbol] != 0:
+            symbols[offsets[lengths[symbol]]] = symbol
+            offsets[lengths[symbol]] = offsets[lengths[symbol]]+1
+    return _Huffman(counts, symbols)
+
+record _Reader:
+    data: str
+    at: int
+    bit: int
+    bits: int
+
+    fn take(mut self, count: int) -> int:
+        while self.bits < count:
+            if self.at >= len(self.data):
+                raise "truncated compressed data"
+            self.bit = self.bit+byte_value(self.data[self.at])*_power(self.bits)
+            self.at += 1
+            self.bits += 8
+        value = self.bit%_power(count)
+        self.bit = self.bit//_power(count)
+        self.bits -= count
+        return value
+
+    fn symbol(mut self, table: _Huffman) -> int:
+        code = 0
+        first = 0
+        index = 0
+        for length in range(1, 16):
+            code = code+self.take(1)
+            count = table.counts[length]
+            if code-count < first:
+                return table.symbols[index+code-first]
+            index += count
+            first = (first+count)*2
+            code = code*2
+        raise "invalid Huffman code"
+
+fn _power(count: int) -> int:
+    result = 1
+    for i in range(count):
+        result = result*2
+    return result
+
+fn _inflate(data: str, limit: int) -> str:
+    # RFC 1951. The output limit stops decompression bombs.
+    length_base = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258]
+    length_extra = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]
+    distance_base = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577]
+    distance_extra = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]
+    order = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]
+    reader = _Reader(data, 0, 0, 0)
+    output = array_full(limit, 0)
+    size = 0
+    final = 0
+    while final == 0:
+        final = reader.take(1)
+        kind = reader.take(2)
+        if kind == 0:
+            reader.bit = 0
+            reader.bits = 0
+            if reader.at+4 > len(data):
+                raise "truncated stored block"
+            count = _load_u16_le(data, reader.at)
+            if (count^_load_u16_le(data, reader.at+2)) != 65535:
+                raise "corrupt stored block length"
+            reader.at += 4
+            if reader.at+count > len(data) or size+count > limit:
+                raise "stored block exceeds the image size"
+            for i in range(count):
+                output[size] = byte_value(data[reader.at+i])
+                size += 1
+            reader.at += count
+        elif kind == 1 or kind == 2:
+            literal = _huffman([8 for i in range(144)]+[9 for i in range(112)]+[7 for i in range(24)]+[8 for i in range(8)])
+            distance = _huffman([5 for i in range(30)])
+            if kind == 2:
+                symbols = reader.take(5)+257
+                distances = reader.take(5)+1
+                codes = reader.take(4)+4
+                if symbols > 286 or distances > 30:
+                    raise "invalid dynamic Huffman header"
+                lengths = [0 for i in range(19)]
+                for i in range(codes):
+                    lengths[order[i]] = reader.take(3)
+                table = _huffman(lengths)
+                all = [0 for i in range(symbols+distances)]
+                index = 0
+                while index < symbols+distances:
+                    value = reader.symbol(table)
+                    if value < 16:
+                        all[index] = value
+                        index += 1
+                    else:
+                        previous = 0
+                        repeat = 0
+                        if value == 16:
+                            if index == 0:
+                                raise "invalid code length repeat"
+                            previous = all[index-1]
+                            repeat = 3+reader.take(2)
+                        elif value == 17:
+                            repeat = 3+reader.take(3)
+                        else:
+                            repeat = 11+reader.take(7)
+                        if index+repeat > symbols+distances:
+                            raise "invalid code length repeat"
+                        for i in range(repeat):
+                            all[index] = previous
+                            index += 1
+                literal = _huffman(all[:symbols])
+                distance = _huffman(all[symbols:])
+            while true:
+                value = reader.symbol(literal)
+                if value < 256:
+                    if size >= limit:
+                        raise "compressed data exceeds the image size"
+                    output[size] = value
+                    size += 1
+                elif value == 256:
+                    break
+                else:
+                    if value > 285:
+                        raise "invalid length symbol"
+                    count = length_base[value-257]+reader.take(length_extra[value-257])
+                    code = reader.symbol(distance)
+                    if code > 29:
+                        raise "invalid distance symbol"
+                    back = distance_base[code]+reader.take(distance_extra[code])
+                    if back > size or size+count > limit:
+                        raise "invalid back reference"
+                    for i in range(count):
+                        output[size] = output[size-back]
+                        size += 1
+        else:
+            raise "invalid deflate block type"
+    return join([byte_string(output[i]) for i in range(size)], "")
+
+fn _chunk(name: str, body: str, table: list[int]) -> str:
+    return _be32(len(body))+name+body+_be32(_crc(name+body, table))
+
+fn encode_png(image: img.Image) -> str:
+    # Valid PNG with stored deflate blocks and the None filter: simple and lossless.
+    pieces: list[str] = []
+    stride = image.width*4
+    for y in range(image.height):
+        append(pieces, "\0")
+        append(pieces, join([byte_string(image.pixels[y*stride+x]) for x in range(stride)], ""))
+    raw = join(pieces, "")
+    stream: list[str] = [byte_string(120)+byte_string(1)]
+    at = 0
+    while true:
+        size = len(raw)-at if len(raw)-at < 65535 else 65535
+        last = at+size == len(raw)
+        append(stream, byte_string(1 if last else 0)+_le16(size)+_le16(65535-size)+raw[at:at+size])
+        at += size
+        if last:
+            break
+    append(stream, _be32(_adler(raw)))
+    table = _crc_table()
+    header = _be32(image.width)+_be32(image.height)+byte_string(8)+byte_string(6)+"\0\0\0"
+    return _png_signature()+_chunk("IHDR", header, table)+_chunk("IDAT", join(stream, ""), table)+_chunk("IEND", "", table)
+
+fn decode_png(text: str) -> img.Image:
+    if len(text) < 33 or text[0:8] != _png_signature():
+        raise "not a PNG file"
+    at = 8
+    width = 0
+    height = 0
+    depth = 0
+    color = 0
+    palette = ""
+    transparency = ""
+    data: list[str] = []
+    table = _crc_table()
+    finished = false
+    while at+12 <= len(text):
+        size = _load_u32_be(text, at)
+        name = text[at+4:at+8]
+        if size > len(text)-at-12:
+            raise "truncated PNG chunk"
+        body = text[at+8:at+8+size]
+        if _load_u32_be(text, at+8+size) != _crc(name+body, table):
+            raise "PNG chunk checksum mismatch"
+        if name == "IHDR":
+            if size != 13:
+                raise "invalid PNG header"
+            width = _load_u32_be(body, 0)
+            height = _load_u32_be(body, 4)
+            depth = byte_value(body[8])
+            color = byte_value(body[9])
+            if byte_value(body[12]) != 0:
+                raise "interlaced PNG is not supported"
+            if depth != 8 or color not in [0, 2, 3, 4, 6]:
+                raise "only 8-bit grayscale, RGB, palette and RGBA PNG are supported"
+        elif name == "PLTE":
+            palette = body
+        elif name == "tRNS":
+            transparency = body
+        elif name == "IDAT":
+            append(data, body)
+        elif name == "IEND":
+            finished = true
+            break
+        at += 12+size
+    if not finished or width == 0 or height == 0:
+        raise "incomplete PNG file"
+    channels = {0:1, 2:3, 3:1, 4:2, 6:4}[color]
+    result = img.new(width, height)
+    stride = width*channels
+    stream = join(data, "")
+    if len(stream) < 6:
+        raise "truncated PNG image data"
+    raw = _inflate(stream[2:], (stride+1)*height)
+    if len(raw) != (stride+1)*height:
+        raise "PNG image data has the wrong size"
+    previous = array_full(stride, 0)
+    current = array_full(stride, 0)
+    for y in range(height):
+        start = y*(stride+1)
+        filter = byte_value(raw[start])
+        if filter > 4:
+            raise "invalid PNG filter"
+        for x in range(stride):
+            value = byte_value(raw[start+1+x])
+            left = current[x-channels] if x >= channels else 0
+            up = previous[x]
+            corner = previous[x-channels] if x >= channels else 0
+            if filter == 1:
+                value += left
+            elif filter == 2:
+                value += up
+            elif filter == 3:
+                value += (left+up)//2
+            elif filter == 4:
+                estimate = left+up-corner
+                pa = estimate-left if estimate >= left else left-estimate
+                pb = estimate-up if estimate >= up else up-estimate
+                pc = estimate-corner if estimate >= corner else corner-estimate
+                value += left if pa <= pb and pa <= pc else (up if pb <= pc else corner)
+            current[x] = value%256
+        for x in range(width):
+            at = (y*width+x)*4
+            if color == 6:
+                for channel in range(4):
+                    result.pixels[at+channel] = current[x*4+channel]
+            elif color == 2:
+                for channel in range(3):
+                    result.pixels[at+channel] = current[x*3+channel]
+                result.pixels[at+3] = 255
+            elif color == 0 or color == 4:
+                level = current[x*channels]
+                result.pixels[at] = level
+                result.pixels[at+1] = level
+                result.pixels[at+2] = level
+                result.pixels[at+3] = current[x*2+1] if color == 4 else 255
+            else:
+                index = current[x]
+                if index*3+2 >= len(palette):
+                    raise "PNG palette index out of range"
+                result.pixels[at] = byte_value(palette[index*3])
+                result.pixels[at+1] = byte_value(palette[index*3+1])
+                result.pixels[at+2] = byte_value(palette[index*3+2])
+                result.pixels[at+3] = byte_value(transparency[index]) if index < len(transparency) else 255
+        swap = previous
+        previous = current
+        current = swap
+    return result
+
+fn encode_bmp(image: img.Image) -> str:
+    # 24-bit bottom-up BMP; alpha is discarded.
+    padding = (4-image.width*3%4)%4
+    rows: list[str] = []
+    for y in range(image.height-1, -1, -1):
+        pieces: list[str] = []
+        for x in range(image.width):
+            at = (y*image.width+x)*4
+            append(pieces, byte_string(image.pixels[at+2])+byte_string(image.pixels[at+1])+byte_string(image.pixels[at]))
+        append(pieces, join(["\0" for i in range(padding)], ""))
+        append(rows, join(pieces, ""))
+    data = join(rows, "")
+    return "BM"+_le32(54+len(data))+_le32(0)+_le32(54)+_le32(40)+_le32(image.width)+_le32(image.height)+_le16(1)+_le16(24)+_le32(0)+_le32(len(data))+_le32(2835)+_le32(2835)+_le32(0)+_le32(0)+data
+
+fn decode_bmp(text: str) -> img.Image:
+    if len(text) < 54 or text[0:2] != "BM":
+        raise "not a BMP file"
+    offset = _load_u32_le(text, 10)
+    width = _load_u32_le(text, 18)
+    height = _load_u32_le(text, 22)
+    bits = _load_u16_le(text, 28)
+    if _load_u32_le(text, 30) != 0 or bits not in [24, 32]:
+        raise "only uncompressed 24 and 32-bit BMP are supported"
+    if height > 2147483647:
+        raise "top-down BMP is not supported"
+    if width == 0 or height == 0 or width > 65535 or height > 65535:
+        raise "unsupported BMP dimensions"
+    width_bytes = bits//8
+    stride = (width*width_bytes+3)//4*4
+    if offset+stride*height > len(text):
+        raise "truncated BMP pixel data"
+    result = img.new(width, height)
+    for y in range(height):
+        row = offset+(height-1-y)*stride
+        for x in range(width):
+            at = (y*width+x)*4
+            result.pixels[at] = byte_value(text[row+x*width_bytes+2])
+            result.pixels[at+1] = byte_value(text[row+x*width_bytes+1])
+            result.pixels[at+2] = byte_value(text[row+x*width_bytes])
+            result.pixels[at+3] = byte_value(text[row+x*width_bytes+3]) if bits == 32 else 255
+    return result
+
+fn encode_ppm(image: img.Image) -> str:
+    pieces = ["P6\n"+str(image.width)+" "+str(image.height)+"\n255\n"]
+    for i in range(image.width*image.height):
+        append(pieces, byte_string(image.pixels[i*4])+byte_string(image.pixels[i*4+1])+byte_string(image.pixels[i*4+2]))
+    return join(pieces, "")
+
+fn load(file: str) -> img.Image:
+    text = read_text(file)
+    if text[0:8] == _png_signature():
+        return decode_png(text)
+    if text[0:2] == "BM":
+        return decode_bmp(text)
+    raise "unsupported image format; PNG and BMP are supported for input"
+
+fn save(file: str, image: img.Image):
+    # The format follows the file extension.
+    if ends_with(file, ".png"):
+        write_text(file, encode_png(image))
+    elif ends_with(file, ".bmp"):
+        write_text(file, encode_bmp(image))
+    elif ends_with(file, ".ppm"):
+        write_text(file, encode_ppm(image))
+    else:
+        raise "unsupported output extension; use .png, .bmp or .ppm"

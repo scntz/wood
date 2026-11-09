@@ -1,0 +1,272 @@
+# wood fmt: one layout for wood source. Blocks are indented by four spaces, tokens are spaced
+# the same way everywhere, and comments and line breaks inside brackets are kept. The result
+# must lex to exactly the tokens of the input, so formatting never changes what a program does.
+import lexer as lx
+import parser as parser
+import sources as src
+
+record Piece:
+    kind: str
+    text: str
+    # A prefix -, + or ~, or a * or / marking parameters, which takes no space after it.
+    unary: bool
+
+record Row:
+    indent: int
+    pieces: list[Piece]
+    # Brackets left open by the rows before; above 0 the row continues a statement.
+    open: int
+
+record Group:
+    bracket: str
+    # A [ right after a value indexes or slices it, so its colons take no spaces.
+    index: bool
+    # The parameter in this ( has a type annotation, so its default takes spaces around =.
+    annotated: bool
+
+record Result:
+    text: str
+    problem: src.Diagnostic
+
+fn keyword_set() -> dict[str,bool]:
+    result: dict[str,bool] = {}
+    for word in ["import","from","as","try","except","raise","fn","if","elif","else","while","for","in","return","break","continue","pass","and","or","not"]:
+        result[word] = true
+    return result
+
+fn word_byte(c: str) -> bool:
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn digit(c: str) -> bool:
+    return c >= "0" and c <= "9"
+
+# Splits source the lexer accepted into physical rows of pieces, keeping each piece's own text.
+fn rows(source: str) -> list[Row]:
+    result: list[Row] = []
+    operators = ["<<=",">>=","//=","<<",">>","->","=>","//","==","!=","<=",">=","+=","-=","*=","/=","%=","&=","|=","^="]
+    depth = 0
+    for raw in split(source,"\n"):
+        line = raw[:len(raw)-1] if ends_with(raw,"\r") else raw
+        indent = 0
+        while indent < len(line) and line[indent] == " ":
+            indent += 1
+        pieces: list[Piece] = []
+        open = depth
+        i = indent
+        while i < len(line):
+            c = line[i]
+            start = i
+            kind = "operator"
+            if c == " ":
+                i += 1
+                continue
+            if c == "#":
+                append(pieces,Piece("comment",strip(line[i:]),false))
+                break
+            if c == "'" or c == '"':
+                i += 1
+                while line[i] != c:
+                    if line[i] == "\\":
+                        i += 1
+                    i += 1
+                i += 1
+                kind = "string"
+            elif digit(c):
+                while i < len(line) and digit(line[i]):
+                    i += 1
+                if i + 1 < len(line) and line[i] == "." and digit(line[i+1]):
+                    i += 1
+                    while i < len(line) and digit(line[i]):
+                        i += 1
+                if i < len(line) and (line[i] == "e" or line[i] == "E"):
+                    i += 1
+                    if line[i] == "+" or line[i] == "-":
+                        i += 1
+                    while i < len(line) and digit(line[i]):
+                        i += 1
+                kind = "number"
+            elif word_byte(c):
+                while i < len(line) and word_byte(line[i]):
+                    i += 1
+                kind = "word"
+            elif c == "(" or c == "[" or c == "{":
+                i += 1
+                kind = "open"
+                depth += 1
+            elif c == ")" or c == "]" or c == "}":
+                i += 1
+                kind = "close"
+                depth -= 1
+            elif c == ",":
+                i += 1
+                kind = "comma"
+            elif c == ":":
+                i += 1
+                kind = "colon"
+            elif c == ".":
+                i += 1
+                kind = "dot"
+            else:
+                i += 1
+                for operator in operators:
+                    if line[start:start+len(operator)] == operator:
+                        i = start+len(operator)
+                        break
+            append(pieces,Piece(kind,line[start:i],false))
+        append(result,Row(indent,pieces,open))
+    return result
+
+# Decides the space before each piece of one statement, which may run over several rows.
+record Spacer:
+    keywords: dict[str,bool]
+    groups: list[Group]
+    previous: Piece
+    started: bool
+
+    fn reset(mut self):
+        self.groups = []
+        self.previous = Piece("","",false)
+        self.started = false
+
+    fn value(self, piece: Piece) -> bool:
+        if piece.kind in ["number","string","close"]:
+            return true
+        return piece.kind == "word" and piece.text not in self.keywords
+
+    fn keyword(self, piece: Piece) -> bool:
+        return piece.kind == "word" and piece.text in self.keywords
+
+    fn innermost(self, bracket: str) -> bool:
+        return len(self.groups) > 0 and self.groups[-1].bracket == bracket
+
+    fn space(self, piece: Piece) -> bool:
+        before = self.previous
+        if before.kind == "open" or piece.kind in ["close","comma","colon"]:
+            return false
+        if before.kind == "comma":
+            return true
+        if piece.kind == "dot":
+            return self.keyword(before)
+        if before.kind == "dot":
+            return self.keyword(piece)
+        if piece.text == "@" or before.text == "@" or before.unary:
+            return false
+        if before.kind == "colon":
+            return not (len(self.groups) > 0 and self.groups[-1].index)
+        if piece.kind == "open":
+            return before.text != "fn" and not self.value(before)
+        keyword_argument = self.innermost("(") and not self.groups[-1].annotated
+        if keyword_argument and (piece.text == "=" or before.text == "="):
+            return false
+        return true
+
+    fn take(mut self, piece: Piece):
+        result = piece
+        if piece.kind == "operator":
+            if piece.text in ["-","+","~"]:
+                result.unary = not (self.started and self.value(self.previous))
+            elif piece.text in ["*","/"]:
+                result.unary = self.started and self.previous.kind in ["comma","open"]
+        if piece.kind == "open":
+            append(self.groups,Group(piece.text,piece.text == "[" and self.started and self.value(self.previous),false))
+        elif piece.kind == "close" and len(self.groups) > 0:
+            pop(self.groups)
+        elif piece.kind == "colon" and self.innermost("("):
+            self.groups[-1].annotated = true
+        elif piece.kind == "comma" and len(self.groups) > 0:
+            self.groups[-1].annotated = false
+        self.previous = result
+        self.started = true
+
+fn spaces(count: int) -> str:
+    return join([" " for i in range(count)],"")
+
+# A row that starts a statement, as opposed to a blank, comment-only or continuation row.
+fn statement(row: Row) -> bool:
+    return row.open == 0 and len(row.pieces) > 0 and row.pieces[0].kind != "comment"
+
+fn render(table: list[Row], newline: str) -> str:
+    out: list[str] = []
+    stack = [0]
+    blanks = 0
+    spacer = Spacer(keyword_set(),[],Piece("","",false),false)
+    following: list[int] = [0 for row in table]
+    upcoming = -1
+    for index in range(len(table)-1,-1,-1):
+        following[index] = upcoming
+        if statement(table[index]):
+            upcoming = index
+    depth = 0
+    for index in range(len(table)):
+        row = table[index]
+        if len(row.pieces) == 0:
+            blanks += 1
+            continue
+        level = depth
+        if statement(row):
+            if row.indent > stack[-1]:
+                append(stack,row.indent)
+            while row.indent < stack[-1]:
+                pop(stack)
+            depth = len(stack)-1
+            level = depth
+            spacer.reset()
+        elif row.open == 0:
+            # A comment on its own line belongs to the block its indentation is in. It opens the
+            # next block only when it is indented past the current one and that block starts next.
+            next_indent = table[following[index]].indent if following[index] >= 0 else 0
+            level = 0
+            for position in range(len(stack)):
+                if stack[position] <= row.indent:
+                    level = position
+            if row.indent > stack[-1] and next_indent > stack[-1]:
+                level = len(stack)
+        else:
+            closing = 0
+            while closing < len(row.pieces) and row.pieces[closing].kind == "close":
+                closing += 1
+            level = depth + row.open - closing if row.open > closing else depth
+        if len(out) > 0:
+            for i in range(blanks if blanks < 2 else 2):
+                append(out,"")
+        blanks = 0
+        parts: list[str] = [spaces(level*4)]
+        first = true
+        for piece in row.pieces:
+            if piece.kind == "comment":
+                if not first:
+                    append(parts,"  ")
+                append(parts,piece.text)
+            else:
+                if not first and spacer.space(piece):
+                    append(parts," ")
+                append(parts,piece.text)
+                spacer.take(piece)
+            first = false
+        append(out,join(parts,""))
+    if len(out) == 0:
+        return ""
+    return join(out,newline)+newline
+
+fn same_tokens(left: lx.Result, right: lx.Result) -> bool:
+    if left.code != "" or right.code != "" or len(left.tokens) != len(right.tokens):
+        return false
+    for i in range(len(left.tokens)):
+        if left.tokens[i].kind != right.tokens[i].kind or left.tokens[i].text != right.tokens[i].text:
+            return false
+    return true
+
+# Formats one file's source. A file that does not parse comes back unchanged with its error.
+fn format(source: str, file: str = "") -> Result:
+    checked = parser.parse(source)
+    if checked.code != "":
+        return Result(source,src.Diagnostic(checked.code,checked.message,file,0,checked.offset,checked.line,checked.column))
+    mark = byte_string(239)+byte_string(187)+byte_string(191)
+    prefix = mark if source[:3] == mark else ""
+    # Keep the file's own line ending, taken from its first line.
+    first = find(source,"\n")
+    newline = "\r\n" if first > 0 and source[first-1] == "\r" else "\n"
+    text = prefix+render(rows(source[len(prefix):]),newline)
+    if not same_tokens(lx.lex(source),lx.lex(text)):
+        return Result(source,src.Diagnostic("D5001","formatting would change the program, so the file was left unchanged; please report this",file,0,0,0,0))
+    return Result(text,src.success())

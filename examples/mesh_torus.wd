@@ -1,0 +1,21 @@
+# wood examples/mesh_torus.wd -- torus.obj 64 32
+import std.geometry as geo
+import std.linalg as la
+import std.num as num
+
+record MeshReport:
+    vertices: int
+    triangles: int
+    area: float
+    low: la.Vec3
+    high: la.Vec3
+
+arguments = args()
+if len(arguments) != 3:
+    raise "usage: mesh_torus OUTPUT.obj RINGS SIDES"
+mesh = geo.torus(int(arguments[1]),int(arguments[2]))
+matrix = num.matmul(la.translation(1.0,2.0,-3.0), num.matmul(la.rotation_y(0.4),la.scaling(1.25,0.75,1.5)))
+result = geo.transformed(mesh,matrix)
+geo.write_obj(result,arguments[0])
+limits = geo.bounds(result)
+print(json_dump(MeshReport(num.shape(result.vertices)[0],num.shape(result.triangles)[0],geo.area(result),limits[0],limits[1])))

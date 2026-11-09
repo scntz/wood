@@ -1,0 +1,109 @@
+import std.num as num
+import std.time as time
+
+fn list_of(n: int) -> list[float]:
+    values: list[float] = []
+    for i in range(n):
+        append(values, 1.0)
+    return values
+
+fn list_constant(n: int) -> float:
+    values = list_of(n)
+    for i in range(n):
+        values[i] = 2.0
+    return values[n - 1]
+
+fn list_self(n: int) -> float:
+    values = list_of(n)
+    for i in range(n):
+        values[i] = values[i] + 1.0
+    return values[n - 1]
+
+fn list_temp(n: int) -> float:
+    values = list_of(n)
+    for i in range(n):
+        current = values[i]
+        values[i] = current + 1.0
+    return values[n - 1]
+
+fn list_swap(n: int) -> float:
+    values = list_of(n)
+    for i in range(n - 1):
+        held = values[i]
+        other = values[i + 1]
+        values[i] = other
+        values[i + 1] = held
+    return values[n - 1]
+
+fn array_constant(n: int) -> float:
+    values = num.zeros([n])
+    for i in range(n):
+        values[i] = 2.0
+    return values[n - 1]
+
+fn array_self(n: int) -> float:
+    values = num.zeros([n])
+    for i in range(n):
+        values[i] = values[i] + 1.0
+    return values[n - 1]
+
+fn array_temp(n: int) -> float:
+    values = num.zeros([n])
+    for i in range(n):
+        current = values[i]
+        values[i] = current + 1.0
+    return values[n - 1]
+
+fn dict_self(n: int) -> int:
+    counts: dict[int, int] = {}
+    for i in range(n):
+        counts[i] = 0
+    for i in range(n):
+        counts[i] = counts[i] + 1
+    return counts[n - 1]
+
+fn dict_temp(n: int) -> int:
+    counts: dict[int, int] = {}
+    for i in range(n):
+        counts[i] = 0
+    for i in range(n):
+        current = counts[i]
+        counts[i] = current + 1
+    return counts[n - 1]
+
+fn ms(began: int) -> int:
+    return (time.monotonic_ns() - began) // 1000000
+
+for size in [5000, 10000, 20000, 40000]:
+    a = time.monotonic_ns()
+    r1 = list_constant(size)
+    t1 = ms(a)
+    a = time.monotonic_ns()
+    r2 = list_self(size)
+    t2 = ms(a)
+    a = time.monotonic_ns()
+    r3 = list_temp(size)
+    t3 = ms(a)
+    a = time.monotonic_ns()
+    r4 = list_swap(size)
+    t4 = ms(a)
+    print("list", size, "constant", t1, "self", t2, "temp", t3, "swap", t4, r1 + r2 + r3 + r4)
+for size in [5000, 10000, 20000, 40000]:
+    a = time.monotonic_ns()
+    r1 = array_constant(size)
+    t1 = ms(a)
+    a = time.monotonic_ns()
+    r2 = array_self(size)
+    t2 = ms(a)
+    a = time.monotonic_ns()
+    r3 = array_temp(size)
+    t3 = ms(a)
+    print("array", size, "constant", t1, "self", t2, "temp", t3, r1 + r2 + r3)
+for size in [1000, 2000, 4000]:
+    a = time.monotonic_ns()
+    r1 = dict_self(size)
+    t1 = ms(a)
+    a = time.monotonic_ns()
+    r2 = dict_temp(size)
+    t2 = ms(a)
+    print("dict", size, "self", t1, "temp", t2, r1 + r2)

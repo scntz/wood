@@ -1,0 +1,173 @@
+import std.geometry as geo
+import std.linalg as la
+import std.num as num
+import std.io as io
+
+fn expect_bad(text: str, message: str):
+    write_text("bad.obj",text)
+    failed = false
+    try:
+        geo.read_obj("bad.obj")
+    except err:
+        assert(err.code == "R4010")
+        assert(message in err.message,err.message)
+        failed = true
+    assert(failed,"malformed OBJ accepted")
+
+fn expect_limit(text: str, mode: int, limit: int):
+    write_text("limited.obj",text)
+    failed = false
+    try:
+        if mode == 0:
+            geo.read_obj("limited.obj",max_bytes=limit)
+        elif mode == 1:
+            geo.read_obj("limited.obj",max_line_bytes=limit)
+        elif mode == 2:
+            geo.read_obj("limited.obj",max_vertices=limit)
+        elif mode == 3:
+            geo.read_obj("limited.obj",max_triangles=limit)
+        else:
+            geo.read_obj("limited.obj",max_normals=limit)
+    except err:
+        if mode < 2:
+            assert(err.code == "R4016")
+        else:
+            assert(err.code == "R4010" and "limit exceeded" in err.message)
+        failed = true
+    assert(failed,"OBJ resource limit was not enforced")
+
+fn expect_invalid_limit(mode: int, limit: int):
+    failed = false
+    try:
+        if mode == 0:
+            geo.read_obj("does-not-exist.obj",max_bytes=limit)
+        elif mode == 1:
+            geo.read_obj("does-not-exist.obj",max_line_bytes=limit)
+        elif mode == 2:
+            geo.read_obj("does-not-exist.obj",max_vertices=limit)
+        elif mode == 3:
+            geo.read_obj("does-not-exist.obj",max_triangles=limit)
+        else:
+            geo.read_obj("does-not-exist.obj",max_normals=limit)
+    except err:
+        assert(err.code == "R4010" and "must be in" in err.message)
+        failed = true
+    assert(failed)
+
+arguments = args()
+assert(len(arguments) == 1)
+fixture = geo.read_obj(arguments[0])
+assert(num.shape(fixture.vertices) == [4,3])
+assert(num.shape(fixture.triangles) == [4,3])
+assert(num.to_list(fixture.vertices) == [0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0])
+assert(num.to_list(fixture.triangles) == [0,2,1,0,1,3,0,3,2,1,2,3])
+assert(num.close(geo.area(fixture),1.5+num.sqrt(3.0)*0.5))
+
+geo.write_obj(fixture,"roundtrip.obj")
+roundtrip = geo.read_obj("roundtrip.obj")
+assert(roundtrip == fixture)
+assert(num.close(geo.area(roundtrip),geo.area(fixture)))
+geo.write_obj(roundtrip,"roundtrip-again.obj")
+assert(read_text("roundtrip.obj") == read_text("roundtrip-again.obj"))
+
+# All exporter fields round-trip exactly, including larger curved geometry.
+for rings in [3,8,24]:
+    torus = geo.torus(rings,12)
+    geo.write_obj(torus,"torus.obj")
+    restored = geo.read_obj("torus.obj")
+    assert(restored == torus)
+    assert(num.close(geo.area(restored),geo.area(torus)))
+    saved = restored
+    restored.vertices[0,0] = 99.0
+    assert(saved == torus)
+
+transformed = geo.transformed(fixture,num.matmul(la.translation(1.0,2.0,-3.0),la.scaling(2.0,2.0,2.0)))
+geo.write_obj(transformed,"transformed.obj")
+assert(geo.read_obj("transformed.obj") == transformed)
+assert(num.close(geo.area(transformed),geo.area(fixture)*4.0))
+limits = geo.bounds(transformed)
+assert(limits[0] == la.Vec3(1.0,2.0,-3.0))
+assert(limits[1] == la.Vec3(3.0,4.0,-1.0))
+
+plain = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+write_text("positive.obj",plain)
+positive = geo.read_obj("positive.obj",max_bytes=len(plain),max_vertices=3,max_triangles=1,max_normals=0,max_line_bytes=8)
+assert(num.to_list(positive.triangles) == [0,1,2])
+write_text("relative.obj","# UTF-8 comment: á 🌳\r\n\t v 0. 0 .0 # origin\r\nv +1.e0 -0.0 0\r\nv 0 .5e+1 -.0\r\nf -3 -2 -1")
+relative = geo.read_obj("relative.obj")
+assert(num.to_list(relative.triangles) == [0,1,2])
+assert(relative.vertices[1,0] == 1.0 and relative.vertices[2,1] == 5.0)
+assert(str(relative.vertices[1,1]) == "-0.0")
+write_text("interleaved.obj",plain+"v 0 0 1\nf -4 -2 -1\n")
+assert(num.to_list(geo.read_obj("interleaved.obj").triangles) == [0,1,2,0,2,3])
+
+# Normal indexing is independent from vertex indexing and can be relative.
+with_normals = "v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 -2\nf -3//-1 +2//1 3//-1\n"
+write_text("normals.obj",with_normals)
+assert(geo.read_obj("normals.obj",max_normals=1,max_bytes=len(with_normals)) == positive)
+geo.write_obj(geo.read_obj("normals.obj"),"recomputed.obj")
+assert("vn 0.0 0.0 1.0\n" in read_text("recomputed.obj"))
+assert("vn 0.0 0.0 -2.0\n" not in read_text("recomputed.obj"))
+
+write_text("empty.obj","")
+empty = geo.read_obj("empty.obj",max_bytes=0,max_vertices=0,max_triangles=0,max_normals=0,max_line_bytes=1)
+assert(num.shape(empty.vertices) == [0,3] and num.shape(empty.triangles) == [0,3])
+geo.write_obj(empty,"empty-export.obj")
+assert(geo.read_obj("empty-export.obj") == empty)
+write_text("comments.obj"," # only comments\n\n# more")
+assert(geo.read_obj("comments.obj") == empty)
+write_text("long-comment.obj","#"+"x"*65535)
+assert(geo.read_obj("long-comment.obj",max_line_bytes=65536,max_bytes=65536) == empty)
+assert(geo.read_obj("empty.obj",max_bytes=1073741824,max_line_bytes=65536) == empty)
+write_text("last.obj",plain[:-1])
+assert(geo.read_obj("last.obj",max_bytes=len(plain)-1) == positive)
+write_text("finite-extremes.obj","v 4.9406564584124654e-324 1.7976931348623157e308 -1.0e-300\n")
+extremes = geo.read_obj("finite-extremes.obj")
+assert(extremes.vertices[0,0] == 4.9406564584124654e-324)
+assert(extremes.vertices[0,1] == 1.7976931348623157e308)
+assert(extremes.vertices[0,2] == -1e-300)
+
+expect_bad("\nv 0 1\n","OBJ line 2")
+for record in ["vt 0 0","v 0 0 0 1","f 1 2 3 4","o object","g group","s off","usemtl metal","mtllib external.mtl","call external.obj","csh echo unsafe","l 1 2","p 1"]:
+    expect_bad(record+"\n","OBJ line 1")
+for coordinate in ["nan","inf","-inf","1e9999","1e-9999","0x1","1,5","--1",".","+.e1","1e","1e+","1..0","1_0"]:
+    expect_bad("v "+coordinate+" 0 0\n","invalid finite coordinate")
+    expect_bad("vn 0 "+coordinate+" 0\n","invalid finite coordinate")
+for corner in ["0","-0","4","-4","9223372036854775807","-9223372036854775808","9223372036854775808","-9223372036854775809","1.0","0x1","+","1/1","1/1/1","1///1","//1","1//","1//0","1//-2","1//2"]:
+    expect_bad("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf "+corner+" 2//1 3//1\n","OBJ line 5")
+expect_bad("f 1 2 3\n"+plain,"already defined")
+expect_bad("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1//1 2//1 3//1\nvn 0 0 1\n","already defined")
+expect_bad("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2 3//1\n","same corner syntax")
+expect_bad("# embedded\0NUL\n","NUL")
+expect_bad("v 0\0 0 0\n","NUL")
+expect_bad("v "+"0 "*1000+"\n","at most four fields")
+expect_bad("v 0 0 \\\n0\n","OBJ line 1")
+
+expect_limit(plain,0,len(plain)-1)
+expect_limit("#",0,0)
+expect_limit("# counted comment\n",0,5)
+expect_limit("v 0 0 0\n",1,7)
+expect_limit("#"+"x"*65536,1,65536)
+expect_limit(plain,2,2)
+expect_limit("v 0 0 0\n",2,0)
+expect_limit(plain,3,0)
+expect_limit(plain+"f 1 2 3\n",3,1)
+expect_limit(with_normals,4,0)
+expect_limit("vn 0 0 1\nvn 0 0 1\n",4,1)
+for mode in range(5):
+    expect_invalid_limit(mode,-1)
+    if mode == 0:
+        expect_invalid_limit(mode,1073741825)
+    elif mode == 1:
+        expect_invalid_limit(mode,0)
+        expect_invalid_limit(mode,65537)
+    else:
+        expect_invalid_limit(mode,1000001)
+
+# Repeated exceptional exits exercise stream scope cleanup; the file stays usable.
+for attempt in range(64):
+    expect_bad("v broken 0 0\n","OBJ line 1")
+with io.open("bad.obj","w") as output:
+    io.write(output,plain)
+assert(geo.read_obj("bad.obj") == positive)
+print("OBJ importing passed")

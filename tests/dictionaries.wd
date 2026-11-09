@@ -1,0 +1,56 @@
+counts: dict[str, int] = {}
+for word in split("red blue red green blue red", " "):
+    counts[word] = get(counts, word, 0) + 1
+assert(keys(counts) == ["red", "blue", "green"])
+assert(values(counts) == [3, 2, 1])
+assert("red" in counts and "absent" not in counts)
+assert(2 in [1, 2, 3] and "ab" in "abc")
+assert(1 in [1.0, 2.0])
+assert(counts == {"green": 1, "red": 3, "blue": 2})
+assert({"a": 1, "a": 2} == {"a": 2})
+assert(str({"a": 1}) == '{"a": 1}')
+copy = counts
+assert(remove(copy, "red"))
+assert(not remove(copy, "absent"))
+copy["red"] = 7
+assert(keys(copy) == ["blue", "green", "red"])
+assert(counts["red"] == 3)
+assert(get(copy, "missing", 9) == 9 and len(copy) == 3)
+snapshot_before_argument = {"a": true}
+assert(get(snapshot_before_argument, "a", remove(snapshot_before_argument, "a")))
+assert(snapshot_before_argument == {})
+visited: list[str] = []
+for key in counts:
+    append(visited, key)
+    remove(counts, key)
+assert(visited == ["red", "blue", "green"] and counts == {})
+nested: dict[str, list[dict[int, bool]]] = {"root": [{1: true}]}
+independent = nested
+independent["root"][0][2] = false
+assert(2 not in nested["root"][0])
+append(independent["root"], {3: false})
+assert(len(nested["root"]) == 1)
+try:
+    nested["absent"][0][2] = true
+    assert(false)
+except err:
+    assert(err.code == "R4011")
+assert("absent" not in nested)
+try:
+    nested["absent"]
+    assert(false)
+except err:
+    assert(err.code == "R4011")
+
+fn mark(log: list[str]) -> str:
+    print("key")
+    return "k"
+
+fn value() -> int:
+    print("value")
+    return 1
+
+ordered = {mark([]): value()}
+ordered[mark([])] = value()
+assert(ordered["k"] == 1)
+print("dictionaries ok")

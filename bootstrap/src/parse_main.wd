@@ -1,0 +1,30 @@
+import parser as parser
+import syntax_wire as wire
+import std.io as io
+
+record Reply:
+    format: int
+    code: str
+    message: str
+    offset: int
+    line: int
+    column: int
+    events: list[wire.Event]
+
+paths = args()
+if len(paths) == 0:
+    print("usage: wood-bootstrap-parse SOURCE.wd [SOURCE.wd ...]")
+    exit(2)
+status = 0
+for path in paths:
+    source = ""
+    with io.open(path,"r") as input:
+        source = io.read_all(input,16777216)
+    result = parser.parse(source)
+    events: list[wire.Event] = []
+    if result.code == "":
+        events = wire.events(result.tree)
+    else:
+        status = 1
+    print(json_dump(Reply(1,result.code,result.message,result.offset,result.line,result.column,events)))
+exit(status)

@@ -1,0 +1,30 @@
+{
+  "owner": "wood",
+  "name": "audio",
+  "package": "wood_audio",
+  "tier": "official",
+  "description": "WAV files, audio buffers, mixing and Windows device playback.",
+  "readme": "# wood_audio 0.1.0\n\nAudio for Wood applications. Listed in the catalog as `wood@audio`.\n\n```sh\nwood add wood@audio\n```\n\n```wood\nimport audio.buffer as audio\nimport audio.wav as wav\n\nchord = audio.mix(audio.tone(440.0, 0.5), audio.tone(660.0, 0.5))\nwav.save(\"chord.wav\", audio.normalize(chord, 0.8))\n```\n\n## Modules\n\n| Module | Purpose | Platform |\n| --- | --- | --- |\n| `buffer` | Interleaved float buffers: tones, silence, gain, mix, fade, resample, mono mixdown | Pure Wood, everywhere |\n| `wav` | Read 8/16/32-bit PCM and 32-bit float WAV; write 8/16/32-bit PCM | Pure Wood, everywhere |\n| `device` | Blocking playback, device counts and explicit recording | Windows x86-64 with the adapter |\n\nDecoders reject truncated or inconsistent files instead of trusting their headers.\n\n## Device I/O\n\n`device` needs the small C17 adapter in `native/`. It loads `winmm.dll` at use, so it\nneeds no Windows SDK import library. Build it once and link it explicitly:\n\n```powershell\ncmake -G Ninja -S native -B build/audio -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release\ncmake --build build/audio\nwood build . -o player.exe --link-library build/audio/wood_audio.lib\n```\n\nPrograms that import only `buffer` and `wav` need no adapter.\n\n## Status and limits\n\nExperimental. Exercised on one Windows 11 host: opening the output device and playing\na real clip to completion at volume 0. **Recording is implemented but has not been\nexercised**; it only ever runs when an application calls `device.record`. Playback\nblocks the caller, with no streaming, pause or device selection. There is no Linux\ndevice backend, and MP3, FLAC and other compressed formats are not supported.\n`resample` uses linear interpolation, which suits utilities rather than mastering.\n\nLicensed MIT OR Apache-2.0.\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_audio/README.md",
+  "categories": [
+    "audio"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import audio.buffer as audio\nimport audio.wav as wav\n\nchord = audio.mix(audio.tone(440.0, 0.5), audio.tone(660.0, 0.5))\nwav.save(\"chord.wav\", audio.normalize(chord, 0.8))\n",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "published": "2026-11-01",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_audio-0.1.0.woodpkg",
+        "sha256": "2d867552432092b2d2d0f3fb7affe60ea304eb38f4cd1306d2f3faa05e8efa54"
+      }
+    }
+  ]
+}

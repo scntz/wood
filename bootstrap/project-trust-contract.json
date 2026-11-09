@@ -1,0 +1,50 @@
+{
+  "format": 1,
+  "stage": "hosted-project-trust",
+  "compiler_entry": "src/compiler_main.wd",
+  "inventory_entry": "src/project_main.wd",
+  "compiler_version": "0.4.0",
+  "lock_format": 1,
+  "python_required": false,
+  "production_replacement": false,
+  "policy": {
+    "compiler": "Verify wood.lock when present; optional final --locked requires a project and lock",
+    "inventory": "Read-only deps-compatible JSON; verifies lock only with --locked",
+    "inspection": "frontend.load, body_semantics.load and existing inspection tools do not verify locks"
+  },
+  "pinned": [
+    "exact captured manifest bytes for all packages",
+    "every transitive dependency .wd source, including unused modules",
+    "all supplied standard-library module bytes",
+    "compiler language version and relative dependency graph"
+  ],
+  "not_pinned": [
+    "root application source bytes",
+    "runtime prelude",
+    "native libraries, headers and C++ toolchain",
+    "package author identity"
+  ],
+  "limits": {
+    "packages": 128,
+    "manifest_bytes": 1048576,
+    "lock_bytes": 16777216,
+    "source_file_bytes": 16777216,
+    "dependency_source_bytes": 134217728,
+    "files_per_dependency": 4096,
+    "traversal_entries_per_dependency": 65536
+  },
+  "compatibility": {
+    "manifest_snapshot": "Package and Result record layouts unchanged; project.resolve retains required-entry behavior",
+    "loaded_bytes": "Verify module.source, never a fresh disk read; configuration uses captured manifest resolution",
+    "driver_errors": "D5001, exit 2, no emitted output",
+    "source_errors": "existing frontend codes, exit 1",
+    "existing_output": "guarded; not an atomic exclusive create"
+  },
+  "limitations": [
+    "No hosted lock writer or general production-driver command parity",
+    "Entry traversal budget is an additional hosted bound; production limits .wd files but not nonsource entries",
+    "No filesystem transaction against concurrent hostile changes",
+    "Explicit bundle/runtime inputs remain trusted",
+    "C++23 host toolchain still required"
+  ]
+}

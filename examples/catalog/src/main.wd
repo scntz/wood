@@ -1,0 +1,11 @@
+from report import summarize
+
+if len(args()) != 2:
+    eprint("usage: catalog input.json report.json")
+    exit(2)
+try:
+    report = summarize(read_text(args()[0]))
+    write_text(args()[1], json_dump(report) + "\n")
+except err:
+    eprint(err.code, err.message)
+    exit(1)

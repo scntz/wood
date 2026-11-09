@@ -1,0 +1,18 @@
+# Summarize a newline-delimited integer file, ignoring empty lines and comments.
+# wood examples/text_report.wd -- input.txt report.txt
+arguments = args()
+assert(len(arguments) == 2, "usage: text_report input.txt output.txt")
+values: list[int] = []
+for line in split(read_text(arguments[0]), "\n"):
+    item = strip(line)
+    if item != "" and not starts_with(item, "#"):
+        append(values, int(item))
+
+total = 0
+for value in values:
+    total = total + value
+report = ["count: " + str(len(values)), "sum: " + str(total)]
+if len(values) > 0:
+    append(report, "mean: " + str(total / len(values)))
+write_text(arguments[1], join(report, "\n") + "\n")
+print("wrote", arguments[1])

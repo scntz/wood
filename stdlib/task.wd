@@ -1,0 +1,24 @@
+# Joinable native threads with immutable JSON messages; no shared mutable heap.
+fn spawn(work: fn(json) -> json, payload: json) -> task:
+    return task_spawn(work, payload)
+
+fn spawn_io(work: fn(stream, json) -> json, connection: stream, payload: json) -> task:
+    return task_spawn_io(work, connection, payload)
+
+fn wait(work: task, timeout_ms: int) -> json:
+    return task_wait(work, timeout_ms)
+
+fn done(work: task) -> bool:
+    return task_done(work)
+
+fn cancel(work: task):
+    task_cancel(work)
+
+fn cancelled() -> bool:
+    return task_cancelled()
+
+fn checkpoint():
+    task_checkpoint()
+
+fn close(work: task):
+    task_close(work)

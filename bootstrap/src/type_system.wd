@@ -1,0 +1,134 @@
+# Semantic types are interned values. Syntax arena IDs never enter this arena.
+record Type:
+    kind: str
+    name: str
+    element: int
+    key: int
+    parameters: list[int]
+    declaration: int
+
+record Pool:
+    types: list[Type]
+    identities: dict[str,int]
+    limit: int
+
+    fn intern(mut self, kind: str, name: str = "", element: int = -1, key: int = -1, parameters: list[int] = [], declaration: int = 0) -> int:
+        if kind == "Optional" and self.types[element].kind in ["Optional","None"]:
+            return element
+        pieces = [kind,str(len(name))+":"+name,str(declaration),str(element),str(key)]
+        for parameter in parameters:
+            append(pieces,str(parameter))
+        identity = join(pieces,"|")
+        if identity in self.identities:
+            return self.identities[identity]
+        if len(self.types) >= self.limit:
+            raise "bootstrap semantic type budget exceeded"
+        index = len(self.types)
+        append(self.types,Type(kind,name,element,key,parameters,declaration))
+        self.identities[identity] = index
+        return index
+
+    fn substitute(mut self, value: int, arguments: dict[str,int]) -> int:
+        node = self.types[value]
+        if node.kind in ["Named","Parameter","Signature"] and node.name in arguments:
+            return arguments[node.name]
+        element = node.element
+        key = node.key
+        if element >= 0:
+            element = self.substitute(element,arguments)
+        if key >= 0:
+            key = self.substitute(key,arguments)
+        parameters: list[int] = []
+        for item in node.parameters:
+            append(parameters,self.substitute(item,arguments))
+        return self.intern(node.kind,node.name,element,key,parameters,node.declaration)
+
+    fn abstract(self, value: int) -> bool:
+        node = self.types[value]
+        if node.kind in ["Parameter","Signature","Projection"]:
+            return true
+        if node.element >= 0 and self.abstract(node.element):
+            return true
+        if node.key >= 0 and self.abstract(node.key):
+            return true
+        for parameter in node.parameters:
+            if self.abstract(parameter):
+                return true
+        return false
+
+    fn assignable(self, target: int, value: int) -> bool:
+        if target == value:
+            return true
+        left = self.types[target]
+        right = self.types[value]
+        if left.kind == "Callable" and right.kind in ["Function","Callable","Closure"] and left.element == right.element and left.parameters == right.parameters:
+            return true
+        if left.kind == "Float" and right.kind == "Int":
+            return true
+        return left.kind == "Optional" and (right.kind == "None" or (right.kind != "Optional" and self.assignable(left.element,value)))
+
+    fn depth_valid(self, value: int) -> bool:
+        pending = [(value,0)]
+        while len(pending) > 0:
+            item = pop(pending)
+            node = self.types[item[0]]
+            depth = item[1]
+            if node.kind == "Record" and len(node.parameters) == 0:
+                continue
+            if node.kind not in ["List","Array","Dict","Function","Tuple","Optional","Record","Callable","Closure","Step","Cursor","Projection","Signature"]:
+                continue
+            if depth >= 64:
+                return false
+            if node.element >= 0:
+                append(pending,(node.element,depth+1))
+            for parameter in node.parameters:
+                append(pending,(parameter,depth+1))
+        return true
+
+    fn display(self, value: int) -> str:
+        node = self.types[value]
+        kind = node.kind
+        if kind in ["Named","Parameter"]:
+            return node.name
+        if kind in ["Function","Callable","Closure","Signature"]:
+            name = "fn"
+            if kind == "Callable":
+                name = "callable"
+            elif kind == "Closure":
+                name = "closure"
+            elif kind == "Signature":
+                name = node.name
+            parts: list[str] = []
+            for item in node.parameters:
+                append(parts,self.display(item))
+            return name+"("+join(parts,", ")+") -> "+self.display(node.element)
+        if kind in ["List","Array","Step","Cursor"]:
+            names = {"List":"list","Array":"array","Step":"step","Cursor":"cursor"}
+            return names[kind]+"["+self.display(node.element)+"]"
+        if kind == "Dict":
+            return "dict["+self.display(node.key)+", "+self.display(node.element)+"]"
+        if kind == "Projection":
+            return self.display(node.element)+"."+node.name
+        if kind == "Optional":
+            return self.display(node.element)+" | None"
+        if kind == "Tuple" or kind == "Record":
+            parts: list[str] = []
+            for item in node.parameters:
+                append(parts,self.display(item))
+            if kind == "Record":
+                if len(parts) == 0:
+                    return node.name
+                return node.name+"["+join(parts,", ")+"]"
+            if len(parts) == 0:
+                return "tuple[()]"
+            return "tuple["+join(parts,", ")+"]"
+        names = {"Int":"int","Float":"float","Bool":"bool","Str":"str","Void":"void","Error":"error","Json":"json","Stream":"stream","Database":"database","Statement":"statement","Transaction":"transaction","TlsContext":"tls_context","PythonObject":"py_object","Task":"task","None":"None","Range":"range"}
+        if kind in names:
+            return names[kind]
+        return "unknown"
+
+fn pool(limit: int = 1048576) -> Pool:
+    result = Pool([],{},limit)
+    result.intern("Unknown")
+    result.intern("Void")
+    return result

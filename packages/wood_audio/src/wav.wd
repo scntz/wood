@@ -1,0 +1,115 @@
+# RIFF/WAVE reading (8/16/32-bit PCM, 32-bit float) and writing (8/16/32-bit PCM).
+import buffer as audio
+
+fn _u16(text: str, at: int) -> int:
+    return byte_value(text[at])+byte_value(text[at+1])*256
+
+fn _u32(text: str, at: int) -> int:
+    return _u16(text, at)+_u16(text, at+2)*65536
+
+fn _le(value: int, width: int) -> str:
+    pieces: list[str] = []
+    remaining = value
+    for i in range(width):
+        append(pieces, byte_string(remaining%256))
+        remaining = remaining//256
+    return join(pieces, "")
+
+fn _power_of_two(exponent: int) -> float:
+    result = 1.0
+    for i in range(exponent if exponent >= 0 else -exponent):
+        result = result*2.0 if exponent >= 0 else result/2.0
+    return result
+
+fn _float32(text: str, at: int) -> float:
+    bits = _u32(text, at)
+    negative = bits >= 2147483648
+    exponent = (bits//8388608)%256
+    fraction = bits%8388608
+    if exponent == 255:
+        raise "WAV contains a non-finite sample"
+    value = 0.0
+    if exponent == 0:
+        value = float(fraction)/8388608.0*_power_of_two(-126)
+    else:
+        value = (1.0+float(fraction)/8388608.0)*_power_of_two(exponent-127)
+    return -value if negative else value
+
+fn decode(text: str) -> audio.Buffer:
+    if len(text) < 12 or text[0:4] != "RIFF" or text[8:12] != "WAVE":
+        raise "not a RIFF/WAVE file"
+    at = 12
+    format = 0
+    channels = 0
+    rate = 0
+    bits = 0
+    data_at = -1
+    data_size = 0
+    while at+8 <= len(text):
+        name = text[at:at+4]
+        size = _u32(text, at+4)
+        body = at+8
+        if size > len(text)-body:
+            raise "truncated WAV chunk"
+        if name == "fmt ":
+            if size < 16:
+                raise "invalid WAV format chunk"
+            format = _u16(text, body)
+            channels = _u16(text, body+2)
+            rate = _u32(text, body+4)
+            bits = _u16(text, body+14)
+            if format == 65534 and size >= 26:
+                format = _u16(text, body+24)
+        elif name == "data":
+            data_at = body
+            data_size = size
+        at = body+size+size%2
+    if channels == 0 or data_at < 0:
+        raise "WAV lacks format or data chunks"
+    if rate < 1 or rate > 768000 or channels > 8:
+        raise "unsupported WAV sample rate or channel count"
+    if not ((format == 1 and bits in [8,16,32]) or (format == 3 and bits == 32)):
+        raise "unsupported WAV sample format"
+    width = bits//8
+    if data_size%(width*channels) != 0:
+        raise "WAV data is not a whole number of frames"
+    samples: list[float] = []
+    for i in range(data_size//width):
+        position = data_at+i*width
+        if format == 3:
+            append(samples, _float32(text, position))
+        elif bits == 8:
+            append(samples, (float(byte_value(text[position]))-128.0)/128.0)
+        elif bits == 16:
+            value = _u16(text, position)
+            append(samples, float(value-65536 if value >= 32768 else value)/32768.0)
+        else:
+            value = _u32(text, position)
+            append(samples, float(value-4294967296 if value >= 2147483648 else value)/2147483648.0)
+    return audio.Buffer(rate, channels, samples)
+
+fn encode(buffer: audio.Buffer, bits: int = 16) -> str:
+    if bits not in [8,16,32]:
+        raise "WAV output supports 8, 16 or 32-bit PCM"
+    width = bits//8
+    pieces: list[str] = []
+    for sample in buffer.samples:
+        value = 1.0 if sample > 1.0 else (-1.0 if sample < -1.0 else sample)
+        if bits == 8:
+            append(pieces, byte_string(int(value*127.0+128.0)))
+        elif bits == 16:
+            level = int(value*32767.0)
+            append(pieces, _le(level+65536 if level < 0 else level, 2))
+        else:
+            level = int(value*2147483647.0)
+            append(pieces, _le(level+4294967296 if level < 0 else level, 4))
+    data = join(pieces, "")
+    block = buffer.channels*width
+    header = "RIFF"+_le(36+len(data), 4)+"WAVEfmt "+_le(16, 4)+_le(1, 2)+_le(buffer.channels, 2)+_le(buffer.rate, 4)+_le(buffer.rate*block, 4)+_le(block, 2)+_le(bits, 2)+"data"+_le(len(data), 4)
+    return header+data
+
+fn load(file: str) -> audio.Buffer:
+    return decode(read_text(file))
+
+fn save(file: str, buffer: audio.Buffer, bits: int = 16):
+    write_text(file, encode(buffer, bits))

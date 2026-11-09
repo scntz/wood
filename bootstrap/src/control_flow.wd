@@ -1,0 +1,192 @@
+# Structural exits, not expression typing. The masks match the production
+# analyzer: Next=1, Returned=2, Broken=4, Continued=8, Raised=16.
+import syntax as ast
+import sources as src
+import lexer as lx
+
+record Function:
+    statement: int
+    exits: int
+    return_check_deferred: bool
+
+record Result:
+    statements: list[int]
+    functions: list[Function]
+    script: int
+    visits: int
+    diagnostic: src.Diagnostic
+
+record Analyzer:
+    tree: ast.Tree
+    file: str
+    source: int
+    statements: list[int]
+    functions: list[Function]
+    visited_functions: dict[int,bool]
+    problem: src.Diagnostic | None
+    visits: int
+    limit: int
+    depth: int
+    return_kinds: dict[int,str]
+    expression_depth: int
+    closure_depth: int
+    # The loop depth where the finally block being checked starts, or -1; return, break and continue cannot leave it.
+    finally_loops: int
+
+    fn fail(mut self, code: str, message: str, token: lx.Token):
+        self.problem = src.located(code,message,self.file,self.source,token)
+        raise "bootstrap control flow rejection"
+
+    fn budget(mut self, token: lx.Token):
+        self.visits += 1
+        if self.visits > self.limit:
+            self.fail("B3302","control flow visit budget exceeded",token)
+
+    fn expression(mut self, value: int):
+        if value < 0:
+            return
+        node = self.tree.expressions[value]
+        self.budget(node.token)
+        self.expression_depth += 1
+        if self.expression_depth > 256:
+            self.fail("E2002","expression nesting exceeds 256 levels",node.token)
+        if node.function >= 0:
+            self.closure_depth += 1
+            if self.closure_depth > 64:
+                self.fail("E2002","closure nesting exceeds 64 levels",node.token)
+            self.function(node.function)
+            self.closure_depth -= 1
+        for child in node.children:
+            self.expression(child)
+        self.expression_depth -= 1
+
+    fn function(mut self, value: int):
+        if value in self.visited_functions:
+            return
+        self.visited_functions[value] = true
+        stmt = self.tree.statements[value]
+        if stmt.external or len(stmt.type_parameters) > 0:
+            return
+        self.budget(stmt.token)
+        # Closure loops and function contexts start afresh, never inherit the
+        # enclosing loop's break/continue privileges.
+        saved_expression_depth = self.expression_depth
+        saved_finally = self.finally_loops
+        self.expression_depth = 0
+        self.finally_loops = -1
+        flow = self.block(stmt.body,true,0)
+        self.expression_depth = saved_expression_depth
+        self.finally_loops = saved_finally
+        kind = self.tree.types[stmt.return_type].kind
+        if value in self.return_kinds:
+            kind = self.return_kinds[value]
+        deferred = kind == "Unknown"
+        if not deferred and kind != "Void" and (flow & 1) != 0:
+            self.fail("E3013","function '"+stmt.name+"' does not return a value on every path",stmt.token)
+        append(self.functions,Function(value,flow,deferred))
+
+    fn block(mut self, statements: list[int], in_function: bool, loops: int) -> int:
+        flow = 1
+        self.depth += 1
+        if self.depth > 256:
+            token = src.origin()
+            if len(statements) > 0:
+                token = self.tree.statements[statements[0]].token
+            self.fail("E2002","statement nesting exceeds 256 levels",token)
+        for value in statements:
+            stmt = self.tree.statements[value]
+            if stmt.kind in ["Function","Record","Import"]:
+                continue
+            self.budget(stmt.token)
+            if (flow & 1) == 0:
+                self.fail("E3008","unreachable statement",stmt.token)
+            exits = self.statement(value,in_function,loops)
+            self.statements[value] = exits
+            flow = (flow & ~1) | exits
+        self.depth -= 1
+        return flow
+
+    fn statement(mut self, value: int, in_function: bool, loops: int) -> int:
+        stmt = self.tree.statements[value]
+        if stmt.kind == "Return" and not in_function:
+            self.fail("E3011","return is only allowed inside a function",stmt.token)
+        if stmt.kind == "Return" and self.finally_loops >= 0:
+            self.fail("E3011","return cannot leave a finally block",stmt.token)
+        if stmt.kind in ["Break","Continue"]:
+            if loops == 0:
+                self.fail("E3012","break and continue require an enclosing loop",stmt.token)
+            if loops == self.finally_loops:
+                self.fail("E3012","break and continue cannot leave a finally block",stmt.token)
+            if stmt.kind == "Break":
+                return 4
+            return 8
+        for expression in stmt.expressions:
+            self.expression(expression)
+        if stmt.kind == "Return":
+            return 2
+        if stmt.kind == "Raise":
+            return 16
+        if stmt.kind == "Expression":
+            expr = self.tree.expressions[stmt.expressions[0]]
+            if expr.kind == "Call" and expr.token.text == "exit":
+                return 16
+        if stmt.kind == "If":
+            body = self.block(stmt.body,in_function,loops)
+            other = 1
+            if len(stmt.otherwise) > 0:
+                other = self.block(stmt.otherwise,in_function,loops)
+            return body | other
+        if stmt.kind in ["While","For"]:
+            return 1 | (self.block(stmt.body,in_function,loops+1) & 2)
+        if stmt.kind == "With":
+            return self.block(stmt.body,in_function,loops)
+        if stmt.kind == "Try":
+            body = self.block(stmt.body,in_function,loops)
+            handler = self.block(stmt.otherwise,in_function,loops)
+            return (body & ~16) | handler
+        if stmt.kind == "Finally":
+            body = self.block(stmt.body,in_function,loops)
+            outer = self.finally_loops
+            self.finally_loops = loops
+            cleanup = self.block(stmt.otherwise,in_function,loops)
+            self.finally_loops = outer
+            # A finally block that always raises ends every path; otherwise the paths are the body's.
+            return body | (cleanup & ~1) if (cleanup & 1) != 0 else cleanup
+        return 1
+
+fn check(tree: ast.Tree, file: str = "", source: int = 0, limit: int = 1048576, return_kinds: dict[int,str] = {}) -> Result:
+    if limit < 1 or limit > 1048576:
+        return Result([],[],0,0,src.Diagnostic("B3301","invalid semantic visit budget",file,source,0,0,0))
+    masks: list[int] = []
+    for statement in tree.statements:
+        append(masks,0)
+    analyzer = Analyzer(tree,file,source,masks,[],{},None,0,limit,0,return_kinds,0,0,-1)
+    try:
+        # Same eager function/script order as the production analyzer; methods
+        # are checked after scripts. Generic templates await instantiation.
+        methods: list[int] = []
+        for value in tree.roots:
+            stmt = tree.statements[value]
+            if stmt.kind == "Function":
+                analyzer.function(value)
+            elif stmt.kind == "Record" and len(stmt.type_parameters) == 0:
+                for method in stmt.body:
+                    append(methods,method)
+        script = analyzer.block(tree.roots,false,0)
+        for method in methods:
+            try:
+                analyzer.function(method)
+            except err:
+                if analyzer.problem is not None:
+                    for root in tree.roots:
+                        record = tree.statements[root]
+                        if record.kind == "Record" and method in record.body:
+                            problem = unwrap(analyzer.problem)
+                            problem.message += "\n  while checking method "+record.name+"."+tree.statements[method].name
+                            analyzer.problem = problem
+                raise err
+        return Result(analyzer.statements,analyzer.functions,script,analyzer.visits,src.success())
+    except err:
+        if analyzer.problem is not None:
+            return Result([],[],0,analyzer.visits,unwrap(analyzer.problem))
+        raise err

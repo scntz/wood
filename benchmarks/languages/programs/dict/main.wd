@@ -1,0 +1,12 @@
+fn run(n: int, distinct: int) -> int:
+    counts: dict[str, int] = {}
+    for i in range(n):
+        key = "key" + str(i % distinct)
+        counts[key] = get(counts, key, 0) + 1
+    total = 0
+    for key in counts:
+        total = total + counts[key]
+    return total + len(counts)
+
+arguments = args()
+print(run(int(arguments[0]), int(arguments[1])))

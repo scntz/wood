@@ -1,0 +1,35 @@
+# Small installer-only bindings; the application GUI package stays unchanged.
+import installer._native as native
+import gui.widgets as gui
+
+extern fn wood_setup_ui_run(title: str, context: str, body: fn(int) -> int, mut output: array[int]) -> int
+extern fn wood_setup_ui_control(window: int, control: int, kind: int, text: str, x: int, y: int, width: int, height: int) -> int
+extern fn wood_setup_ui_state(window: int, control: int, action: int, value: int) -> int
+extern fn wood_setup_ui_progress(done: int, total: int, operation: str) -> int
+extern fn wood_setup_browse(window: int, control: int) -> int
+extern fn wood_setup_message(value: str, question: int) -> int
+
+fn _check(status: int, operation: str) -> int:
+    if status < 0:
+        raise "setup: " + operation + " failed (native status " + str(status) + ")"
+    return status
+
+fn state(window: gui.Window, control: int, action: int, value: int = 0) -> int:
+    return _check(wood_setup_ui_state(window.token(), control, action, value), "update setup control")
+
+fn checkbox(window: gui.Window, control: int, text: str, x: int, y: int, width: int):
+    _check(wood_setup_ui_control(window.token(), control, 5, text, x, y, width, 28), "create setup choice")
+
+fn bar(window: gui.Window, control: int, x: int, y: int, width: int):
+    _check(wood_setup_ui_control(window.token(), control, 6, "", x, y, width, 24), "create setup progress")
+
+fn progress(done: int, total: int, operation: str) -> bool:
+    return _check(wood_setup_ui_progress(done, total, operation), "update installation progress") == 1
+
+fn run(title: str, context: str, body: fn(int) -> int) -> int:
+    output = array_full(1, 0)
+    _check(wood_setup_ui_run(title, context, body, output), "open setup wizard")
+    return output[0]
+
+fn message(text: str, question: bool = false) -> bool:
+    return _check(wood_setup_message(text, 1 if question else 0), "show setup message") == 1

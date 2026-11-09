@@ -1,0 +1,15 @@
+fn run(n: int, rounds: int) -> int:
+    total = 0
+    for round in range(rounds):
+        parts: list[str] = []
+        for i in range(n):
+            append(parts, str(i * 7 + round))
+        text = join(parts, ",")
+        fields = split(text, ",")
+        for field in fields:
+            total = total + int(field)
+        total = total + len(text)
+    return total
+
+arguments = args()
+print(run(int(arguments[0]), int(arguments[1])))

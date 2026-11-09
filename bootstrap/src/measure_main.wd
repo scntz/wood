@@ -1,0 +1,35 @@
+# Lex+parse only: I/O, warmup and JSON serialization are outside the timed loop.
+import parser as parser
+import std.io as io
+import std.time as time
+
+record Measurement:
+    iterations: int
+    source_bytes: int
+    roots: int
+    elapsed_ns: int
+
+fn root_count(source: str) -> int:
+    result = parser.parse(source)
+    if result.code != "":
+        raise result.code + ": " + result.message
+    return len(result.tree.roots)
+
+arguments = args()
+if len(arguments) != 2:
+    print("usage: wood-bootstrap-measure ITERATIONS SOURCE.wd")
+    exit(2)
+iterations = int(arguments[0])
+if iterations < 1 or iterations > 10000:
+    print("iterations must be between 1 and 10000")
+    exit(2)
+source = ""
+with io.open(arguments[1],"r") as input:
+    source = io.read_all(input,16777216)
+root_count(source)
+roots = 0
+started = time.perf_counter_ns()
+for iteration in range(iterations):
+    roots += root_count(source)
+elapsed = time.perf_counter_ns() - started
+print(json_dump(Measurement(iterations,len(source),roots,elapsed)))

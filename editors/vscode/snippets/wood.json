@@ -1,0 +1,27 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2:value: int}) -> ${3:int}:", "    ${0:return value}"],
+    "description": "A function"
+  },
+  "Record": {
+    "prefix": "record",
+    "body": ["record ${1:Name}:", "    ${2:field}: ${3:int}", "", "    fn ${4:method}(self) -> ${5:int}:", "        ${0:return self.$2}"],
+    "description": "A record with a method"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": ["for ${1:item} in ${2:items}:", "    $0"],
+    "description": "A for loop"
+  },
+  "Try": {
+    "prefix": "try",
+    "body": ["try:", "    ${1:pass}", "except err:", "    ${0:raise}"],
+    "description": "Handle an error"
+  },
+  "With": {
+    "prefix": "with",
+    "body": ["with ${1:io.open(path, \"r\")} as ${2:input}:", "    $0"],
+    "description": "Use a resource and close it"
+  }
+}

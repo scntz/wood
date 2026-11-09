@@ -1,0 +1,22 @@
+# Used only with the copied, throw-injected analyzer in method-lowering-fault.cmake.
+import parser as parser
+import modules as mod
+import bindings as bind
+import frontend as frontend
+import body_semantics as semantic
+
+text = "record R:\n    value:int\n    fn read(self)->int:\n        return self.value\nitem=R(3)\nitem.read()\n"
+parsed = parser.parse(text)
+assert(parsed.code == "")
+graph = mod.Compilation([mod.Unit("fault.wd",text,0,parsed.tree,[])],0)
+bound = bind.bind(graph)
+input = frontend.Result([],graph,bound,bound.diagnostic)
+snapshot = input
+caught = false
+try:
+    semantic.analyze(input)
+except err:
+    caught = err.code == "R4010" and err.message == "checkpoint construction fault"
+assert(caught,"construction error was not propagated")
+assert(input == snapshot,"caller snapshot was changed")
+print("checkpoint restoration and original error propagation passed")

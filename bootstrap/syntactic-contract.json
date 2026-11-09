@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "stage": "syntax-before-name-resolution",
+  "entry": "parser.parse(source, max_nodes=262144)",
+  "production_replacement": false,
+  "python_required": false,
+  "expressions": ["Integer", "Float", "String", "Bool", "Name", "Unary", "Binary", "Call", "Invoke", "List", "Dict", "Index", "Member", "Slice", "CompareChain", "Conditional", "ListComprehension", "DictComprehension", "Tuple", "None", "TypeApply", "Closure"],
+  "unemitted_expression_kinds": ["None"],
+  "statements": ["Assign", "IndexAssign", "AugAssign", "Expression", "If", "While", "For", "Return", "Break", "Continue", "Pass", "Function", "Record", "Import", "Try", "Raise", "With", "Finally"],
+  "types": ["Unknown", "Int", "Float", "Bool", "Str", "Void", "List", "Error", "Dict", "Named", "Record", "Json", "Function", "Stream", "Database", "Statement", "Transaction", "TlsContext", "Task", "Tuple", "Optional", "None", "Parameter", "Closure", "Callable", "Step", "Cursor", "Range", "Projection", "Signature", "Array"],
+  "parse_time_type_kinds": ["Unknown", "Int", "Float", "Bool", "Str", "Void", "List", "Error", "Dict", "Named", "Json", "Function", "Tuple", "Optional", "Callable", "Signature"],
+  "diagnostics": ["E2001", "E2002", "E2003", "E2004", "E2006", "E2010", "E2011", "E2012", "E3020", "E3023", "E3027", "E3028"],
+  "bootstrap_only_diagnostics": {"B2001": "invalid syntax node budget", "B2002": "syntax node budget exceeded"},
+  "instrumented_frontend_stack": {"msvc_reserve_bytes": 8388608, "scope": "parser sanitizer test executable; normal production driver unchanged"},
+  "limits": {"default_nodes": 262144, "minimum_nodes": 2, "maximum_nodes": 1048576, "expression_depth": 256, "conditional_depth": 256, "type_depth": 64, "parameters": 255, "arguments": 255, "tuple_elements": 255, "comparison_operators": 255, "type_parameters": 32, "type_arguments": 32, "comprehension_clauses": 64, "index_axes": 8},
+  "arena": {
+    "storage": ["types", "expressions", "statements", "roots"],
+    "absent_node": -1,
+    "unknown_type": 0,
+    "void_type": 1,
+    "allocation_order_is_abi": false,
+    "failure_tree": "all arenas and roots empty",
+    "positions": "zero-based byte offsets; one-based physical lines and byte columns; source identity belongs to caller",
+    "ownership": "Wood snapshot/value semantics; children are indices, never native pointers"
+  },
+  "wire": {
+    "format": 1,
+    "encoding": "one JSON object per source; ordered prefix events; all values lowercase hexadecimal bytes",
+    "event_fields": ["tag", "value_hex", "offset", "line", "column"],
+    "non_location_coordinates": [0, 0, 0],
+    "stmt_order": ["stmt", "name", "module", "relative", "flags", "type_parameters", "mutable_captures", "imports", "return_type", "annotation", "parameters", "expressions", "body", "otherwise"],
+    "stmt_flags": ["external", "method", "mutating", "inferred_return", "expression_body"],
+    "parameter_order": ["parameter", "mode", "mutable_borrow", "type", "default_value"],
+    "expr_order": ["expr", "text", "keywords", "operators", "clauses", "children", "type_arguments", "function"],
+    "type_order": ["type", "name", "element", "key", "type_parameters"],
+    "list_encoding": "tag with decimal length followed by that many entries",
+    "null_encoding": "expr, stmt or type event with value null and zero coordinates",
+    "semantic_fields_included": false
+  }
+}

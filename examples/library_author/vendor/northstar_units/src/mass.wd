@@ -1,0 +1,2 @@
+fn kilograms(grams: int) -> float:
+    return grams / 1000.0

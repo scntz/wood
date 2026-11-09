@@ -1,0 +1,2 @@
+# The integration harness supplies spaces, empty arguments, Unicode and quotes.
+print(json_dump(args()))

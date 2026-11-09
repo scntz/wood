@@ -1,0 +1,49 @@
+# Optional LLVM-native CPython bridge. Importing this module never starts Python.
+fn import_module(name: str) -> py_object:
+    return py_import(name)
+
+fn attr(object: py_object, name: str) -> py_object:
+    return py_attr(object, name)
+
+fn call(object: py_object, arguments: list[py_object] = [], keywords: dict[str,py_object] = {}) -> py_object:
+    return py_call(object, arguments, keywords)
+
+# JSON-compatible native values are copied. Native tuples become Python lists;
+# use tuple() when Python tuple identity/semantics matter. No raw pointers escape.
+fn value[T](object: T) -> py_object:
+    return py_value(json(object))
+
+fn to_json(object: py_object) -> json:
+    return py_json(object)
+
+fn tuple(objects: list[py_object]) -> py_object:
+    return py_tuple(objects)
+
+fn bytes(object: str) -> py_object:
+    return py_bytes(object)
+
+fn to_bytes(object: py_object) -> str:
+    return py_to_bytes(object)
+
+fn to_int(object: py_object) -> int:
+    return py_int(object)
+
+fn to_float(object: py_object) -> float:
+    return py_float(object)
+
+fn to_bool(object: py_object) -> bool:
+    return py_bool(object)
+
+fn text(object: py_object) -> str:
+    return py_text(object)
+
+fn close(object: py_object):
+    py_close(object)
+
+fn closed(object: py_object) -> bool:
+    return py_closed(object)
+
+# Normally automatic at program exit. Explicit shutdown requires all live
+# objects closed and workers joined, and cannot be followed by reinitialization.
+fn shutdown():
+    py_finish()

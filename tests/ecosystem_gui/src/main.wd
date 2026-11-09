@@ -1,0 +1,21 @@
+import gui.widgets as gui
+import checks as checks
+
+token = gui.run("Wood GUI contracts", 400, 320, "context\0🌳", checks.controls)
+assert(not gui.post(token, 1, "late message"))
+caught = false
+try:
+    gui.Window(token).text(2)
+except err:
+    caught = err.code == "R4010"
+assert(caught)
+for i in range(8):
+    caught = false
+    try:
+        gui.run("Failure cleanup", 320, 200, "", checks.fail)
+    except err:
+        caught = err.code == "R4010" and err.message == "expected GUI callback failure"
+    assert(caught)
+    id = gui.run("Fresh lifecycle", 320, 200, "", checks.empty)
+    assert(not gui.post(id, 1))
+print("native GUI ownership and queue contracts passed")

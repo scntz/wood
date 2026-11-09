@@ -1,0 +1,23 @@
+# Concurrent file processing with isolated dictionaries and ordered JSON results.
+# wood run examples/parallel_word_counts.wd -- first.txt second.txt
+import std.task as tasks
+import std.io as io
+import std.iter as it
+fn count(message: json) -> json:
+    counts: dict[str,int] = {}
+    with io.open(json_str(message),"r") as input:
+        for line in it.lines(input,1048576):
+            for word in split(strip(line)," "):
+                if word != "":
+                    counts[word] = get(counts,word,0)+1
+    return json(counts)
+files = args()
+totals: dict[str,int] = {}
+for start in range(0,len(files),8):
+    jobs = [tasks.spawn(count,json(path)) for path in files[start:start+8]]
+    for job in jobs:
+        with job as owned:
+            result = json_dict(tasks.wait(owned,30000))
+            for word in result:
+                totals[word] = get(totals,word,0)+json_int(result[word])
+print(json_dump(totals))

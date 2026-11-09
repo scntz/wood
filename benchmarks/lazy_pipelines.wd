@@ -1,0 +1,35 @@
+import std.iter as it
+import std.time as time
+
+fn pipeline(count: int, rounds: int) -> int:
+    checksum = 0
+    for round in range(rounds):
+        scale = round % 7 + 1
+        values = it.take(it.map(it.filter(range(count), fn(x) => x % 3 == 0), fn(x) => x * scale + 1), count // 4)
+        checksum += it.fold(values, 0, fn(total,value) => total + value)
+    return checksum
+
+fn capture_calls(count: int, rounds: int) -> int:
+    text = "native wood" * 128
+    callback = fn(x: int) => len(text) + x
+    checksum = 0
+    for round in range(rounds):
+        for item in range(count):
+            checksum += callback(item % 256)
+    return checksum
+
+arguments = args()
+count = int(arguments[1])
+rounds = int(arguments[2])
+if count < 4 or rounds < 1 or count > 10000000 or rounds > 100:
+    raise "unsupported benchmark size"
+started = time.perf_counter_ns()
+checksum = 0
+if arguments[0] == "pipeline":
+    checksum = pipeline(count, rounds)
+elif arguments[0] == "capture":
+    checksum = capture_calls(count, rounds)
+else:
+    raise "expected pipeline or capture workload"
+elapsed = time.perf_counter_ns() - started
+print(json_dump({"checksum": checksum, "elapsed_ns": elapsed}))

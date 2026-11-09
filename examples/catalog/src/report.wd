@@ -1,0 +1,17 @@
+from schema.models import Product, catalog_from_json
+
+record StockReport:
+    items: int
+    units: int
+    inventory_value: float
+    products: dict[str, Product]
+
+fn summarize(text: str) -> StockReport:
+    products = catalog_from_json(json_parse(text))
+    units = 0
+    value = 0.0
+    for sku in products:
+        product = products[sku]
+        units = units + product.quantity
+        value = value + product.unit_price * product.quantity
+    return StockReport(len(products), units, value, products)

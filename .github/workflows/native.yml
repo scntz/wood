@@ -1,0 +1,167 @@
+name: llvm-native
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5f2b24d7a1ba8805ae38aaf04a19ac6c12cd2672
+          path: out/abi4-baseline
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - name: Native installation, differential, PE ABI and bootstrap qualification
+        shell: pwsh
+        run: ./.github/native-windows.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-llvm-native-validation
+          if-no-files-found: warn
+          path: |
+            out/native-windows/native-results.xml
+            out/native-windows/tests/Testing/Temporary/LastTest.log
+            out/native-windows/pe-*/run-*/commands.json
+            out/native-windows/pe-*/run-*/validation.txt
+            out/native-windows/wood-native-windows-x86_64.tar.gz
+            out/native-windows/wood-native-windows-x86_64.tar.gz.sha256
+            out/native-windows/sqlite3.sha256
+            out/native-windows/dependencies/x64-windows/bin/*.dll
+            out/native-windows/dependencies/x64-windows/share/sqlite3/copyright
+  linux-native:
+    runs-on: ubuntu-24.04
+    container: debian:13-slim
+    timeout-minutes: 150
+    steps:
+      - name: Native validation prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git cmake ninja-build g++ clang-19 llvm-19 libclang-rt-19-dev libsqlite3-0 libssl3t64
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the previously qualified ABI-4 runtime source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5f2b24d7a1ba8805ae38aaf04a19ac6c12cd2672
+          path: out/abi4-baseline
+          persist-credentials: false
+      - name: Build the independent reference and temporary hosted seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B out/reference -G Ninja -DCMAKE_BUILD_TYPE=Release -DWOOD_PYTHON_TESTS=OFF
+          cmake --build out/reference --parallel 2
+          ctest --test-dir out/reference --output-on-failure -R '^(embedded_text|embedded_assets|compiler|process)$'
+          out/reference/wood build bootstrap/src/native_main.wd -O0 --timeout-ms 1800000 -o out/hosted-native-seed
+      - name: Prepare matching ABI-4 runtime and installed native driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -DREFERENCE="$PWD/out/reference/wood" -DOUTPUT="$PWD/out/assets" -P tools/prepare-native-assets.cmake
+          cmake -DCLANG=/usr/bin/clang-19 -DTARGET=linux-x86_64 -DOUTPUT="$PWD/out/managed.o" -P tools/prepare-native-runtime.cmake
+          cmake -DCLANG=/usr/bin/clang-19 -DTARGET=linux-x86_64 -DOUTPUT="$PWD/out/managed-legacy.o" -P out/abi4-baseline/tools/prepare-native-runtime.cmake
+          cmake -DEMITTER="$PWD/out/hosted-native-seed" -DASSETS="$PWD/out/assets" -DRUNTIME_OBJECT="$PWD/out/managed.o" -DTARGET=linux-x86_64 -DLLVM_DIR=/usr/lib/llvm-19/bin -DLINKER=/usr/bin/ld -DPREFIX="$PWD/out/native-install" -P tools/install-native.cmake
+      - name: Differential, sanitizer, CLI, install and three-stage bootstrap gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/native -B out/native-tests -G Ninja \
+            -DINSTALLED_CLI="$PWD/out/native-install/bin/wood" \
+            -DEMITTER="$PWD/out/hosted-native-seed" -DSTDLIB="$PWD/out/assets/stdlib.json" \
+            -DRUNTIME_OBJECT="$PWD/out/managed.o" -DPRODUCTION="$PWD/out/reference/wood" \
+            -DLEGACY_RUNTIME_OBJECT="$PWD/out/managed-legacy.o" \
+            -DCLANG=/usr/bin/clang-19 -DLLC=/usr/lib/llvm-19/bin/llc \
+            -DOPT=/usr/lib/llvm-19/bin/opt -DLINKER=/usr/bin/ld \
+            -DDRIVER_PROCESS_FIXTURE="$PWD/out/reference/wood_process_tests" \
+            -DNETWORK_TEST="$PWD/out/reference/wood_network_app_tests" \
+            -DBACKEND_TEST="$PWD/out/reference/wood_backend_tests" \
+            -DOUTPUT_FIXTURE="$PWD/out/reference/wood_output_fixture" \
+            -DENABLE_NATIVE_BOOTSTRAP=ON
+          # RLIMIT_NPROC deliberately does not constrain root. Run the real
+          # OS thread-start failure fixture as an unprivileged container user,
+          # preserving its assertion instead of skipping or mocking failure.
+          chown -R 65534:65534 "$PWD/out"
+          setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/tmp \
+            ctest --test-dir out/native-tests --parallel 1 --output-on-failure --output-junit "$PWD/out/native-results.xml"
+          epoch=$(git -c safe.directory="$PWD" show -s --format=%ct HEAD)
+          cmake -DPREFIX="$PWD/out/native-install" -DOUTPUT="$PWD/out/wood-native-linux-x86_64.tar.gz" -DSOURCE_DATE_EPOCH="$epoch" -DPORTABLE_NATIVE_TOOLS=ON -P tools/package-native.cmake
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: linux-llvm-native-validation
+          if-no-files-found: warn
+          path: |
+            out/native-results.xml
+            out/native-tests/Testing/Temporary/LastTest.log
+            out/wood-native-linux-x86_64.tar.gz
+            out/wood-native-linux-x86_64.tar.gz.sha256
+  linux-package-consumer:
+    needs: linux-native
+    runs-on: ubuntu-24.04
+    container: debian:13-slim
+    timeout-minutes: 45
+    steps:
+      - name: Install only native package consumption prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates cmake binutils llvm-19 libsqlite3-0 libssl3t64
+          for compiler in c++ g++ clang++; do
+            if command -v "$compiler"; then echo "Unexpected C++ compiler: $compiler"; exit 1; fi
+          done
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: linux-llvm-native-validation
+          path: downloaded
+      - name: Verify relocated package and real native applications
+        shell: bash
+        env:
+          CXX: deliberately-missing
+          WOOD_REQUIRE_TLS_TESTS: '1'
+        run: |
+          set -euo pipefail
+          cd downloaded
+          sha256sum -c wood-native-linux-x86_64.tar.gz.sha256
+          mkdir 'relocated package'
+          tar -xzf wood-native-linux-x86_64.tar.gz -C 'relocated package'
+          prefix="$PWD/relocated package/wood-native"
+          cmake -DPREFIX="$prefix" -DTEST_DIR="$PWD/consumer-data" -DLLVM_DIR=/usr/lib/llvm-19/bin -DLINKER=/usr/bin/ld -P "$prefix/share/wood/tools/qualify-native-consumer.cmake"
+          dpkg-query -W libc6 llvm-19 binutils libsqlite3-0 libssl3t64 > consumer-data/packages.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: linux-native-clean-consumer
+          path: downloaded/consumer-data
+          if-no-files-found: warn
+  windows-package-consumer:
+    needs: windows-native
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-llvm-native-validation
+          path: out/download
+      - name: Verify relocated native package with C++ absent from PATH
+        shell: pwsh
+        run: ./.github/native-consumer.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-native-clean-consumer
+          path: out/consumer-validation.txt
+          if-no-files-found: warn

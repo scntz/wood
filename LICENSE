@@ -1,0 +1,13 @@
+Wood is copyright (c) 2026 Wood contributors.
+
+Wood source code, runtime, standard library, examples and documentation are
+available under either of these licenses, at your option:
+
+  * MIT License (LICENSE-MIT)
+  * Apache License, Version 2.0 (LICENSE-APACHE)
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+Preserve the applicable copyright and license notices when redistributing.
+This license choice does not relicense external dependencies. See
+THIRD_PARTY_NOTICES.md for the dependency and distribution inventory.

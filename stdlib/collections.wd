@@ -1,0 +1,154 @@
+fn sorted_int(values: list[int]) -> list[int]:
+    # Stable bottom-up merge sort. The input is an independent value.
+    count = len(values)
+    source = values
+    target = values
+    width = 1
+    while width < count:
+        left = 0
+        while left < count:
+            middle = count
+            if width <= count - left:
+                middle = left + width
+            end = count
+            if width <= count - middle:
+                end = middle + width
+            a = left
+            b = middle
+            output = left
+            while output < end:
+                if b >= end or (a < middle and source[a] <= source[b]):
+                    target[output] = source[a]
+                    a = a + 1
+                else:
+                    target[output] = source[b]
+                    b = b + 1
+                output = output + 1
+            left = end
+        previous = source
+        source = target
+        target = previous
+        if width > count // 2:
+            width = count
+        else:
+            width = width * 2
+    return source
+
+fn binary_search(values: list[int], needle: int) -> int:
+    # Input must be sorted ascending. Return the first match, or -1.
+    low = 0
+    high = len(values)
+    while low < high:
+        middle = low + (high - low) // 2
+        if values[middle] < needle:
+            low = middle + 1
+        else:
+            high = middle
+    if low < len(values) and values[low] == needle:
+        return low
+    return -1
+
+# Native value collections. Copies isolate later collection mutations.
+record Stack[T]:
+    items: list[T]
+
+    fn push(mut self, value: T):
+        append(self.items, value)
+
+    fn pop(mut self) -> T:
+        return pop(self.items)
+
+    fn peek(self) -> T | None:
+        if len(self.items) == 0:
+            return None
+        return self.items[-1]
+
+    fn size(self) -> int:
+        return len(self.items)
+
+    fn clear(mut self):
+        self.items = []
+
+record Queue[T]:
+    incoming: list[T]
+    outgoing: list[T]
+
+    fn push(mut self, value: T):
+        append(self.incoming, value)
+
+    fn pop(mut self) -> T:
+        if len(self.outgoing) == 0:
+            while len(self.incoming) != 0:
+                append(self.outgoing, pop(self.incoming))
+        return pop(self.outgoing)
+
+    fn peek(self) -> T | None:
+        if len(self.outgoing) != 0:
+            return self.outgoing[-1]
+        if len(self.incoming) != 0:
+            return self.incoming[0]
+        return None
+
+    fn size(self) -> int:
+        return len(self.incoming) + len(self.outgoing)
+
+    fn clear(mut self):
+        self.incoming = []
+        self.outgoing = []
+
+record Heap[T]:
+    items: list[T]
+    before: fn(T, T) -> bool
+
+    fn _sift_down(mut self, start: int):
+        index = start
+        count = len(self.items)
+        while index < count // 2:
+            child = index * 2 + 1
+            if child + 1 < count and self.before(self.items[child + 1], self.items[child]):
+                child += 1
+            if not self.before(self.items[child], self.items[index]):
+                break
+            saved = self.items[index]
+            self.items[index] = self.items[child]
+            self.items[child] = saved
+            index = child
+
+    fn push(mut self, value: T):
+        append(self.items, value)
+        index = len(self.items) - 1
+        while index > 0:
+            parent = (index - 1) // 2
+            if not self.before(self.items[index], self.items[parent]):
+                break
+            saved = self.items[index]
+            self.items[index] = self.items[parent]
+            self.items[parent] = saved
+            index = parent
+
+    fn pop(mut self) -> T:
+        # The builtin supplies the same empty-pop diagnostic as native lists.
+        last = pop(self.items)
+        if len(self.items) == 0:
+            return last
+        first = self.items[0]
+        self.items[0] = last
+        self._sift_down(0)
+        return first
+
+    fn peek(self) -> T | None:
+        if len(self.items) == 0:
+            return None
+        return self.items[0]
+
+    fn size(self) -> int:
+        return len(self.items)
+
+    fn clear(mut self):
+        self.items = []
+
+fn heap[T](items: list[T], before: fn(T, T) -> bool) -> Heap[T]:
+    result = Heap(items, before)
+    for index in range(len(items) // 2 - 1, -1, -1):
+        result._sift_down(index)
+    return result

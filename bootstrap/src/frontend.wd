@@ -1,0 +1,34 @@
+# Authoritative bootstrap stage boundary: module loading + binding, not typing.
+import project as project
+import modules as mod
+import bindings as bind
+import sources as src
+
+record Result:
+    packages: list[project.Package]
+    compilation: mod.Compilation
+    bindings: bind.Result
+    diagnostic: src.Diagnostic
+
+fn rejected(diagnostic: src.Diagnostic) -> Result:
+    return Result([],mod.Compilation([],0),bind.Result([],[],1,diagnostic),diagnostic)
+
+fn load(input: str, standards: dict[str,str]) -> Result:
+    return load_configured(project.resolve(input),standards,input)
+
+fn load_configured(configured: project.Result, standards: dict[str,str], input: str = "") -> Result:
+    if configured.diagnostic.code != "":
+        return rejected(configured.diagnostic)
+    loaded = mod.Result(mod.Compilation([],0),src.success())
+    try:
+        loaded = mod.load(configured.entry,configured.packages,standards)
+    except err:
+        if err.code == "R4008" or err.code == "R4016" or (err.code == "R4010" and (starts_with(err.message,"file exceeds size limit: ") or starts_with(err.message,"cannot read '"))):
+            return rejected(src.Diagnostic("D5001",err.message,input,0,0,0,0))
+        raise err
+    if loaded.diagnostic.code != "":
+        return rejected(loaded.diagnostic)
+    bound = bind.bind(loaded.compilation)
+    if bound.diagnostic.code != "":
+        return rejected(bound.diagnostic)
+    return Result(configured.packages,loaded.compilation,bound,src.success())

@@ -1,0 +1,63 @@
+import std.math as math
+import std.stats as stats
+import std.collections as collections
+import std.functional as functional
+import std.iter as it
+
+assert(math.gcd(0,0) == 0 and math.gcd(-54,24) == 6)
+assert(math.lcm(-6,8) == 24 and math.lcm(0,8) == 0)
+assert(math.pow_int(0,0) == 1 and math.pow_int(-3,3) == -27)
+assert(math.clamp_int(2,3,5) == 3 and math.clamp_int(8,3,5) == 5)
+assert(stats.sum_int([]) == 0 and stats.sum_int([1,-2,4]) == 3)
+assert(stats.mean([2.0,4.0]) == 3.0 and stats.variance([2.0,4.0]) == 1.0)
+for mode in range(7):
+    caught = false
+    try:
+        if mode == 0:
+            math.pow_int(2,-1)
+        elif mode == 1:
+            math.clamp_int(1,3,2)
+        elif mode == 2:
+            stats.mean([])
+        elif mode == 3:
+            stats.variance([])
+        elif mode == 4:
+            stats.sum_int([9223372036854775807,1])
+        elif mode == 5:
+            math.gcd(-9223372036854775807-1,0)
+        else:
+            math.pow_int(2,63)
+    except err:
+        assert(err.code == ("R4010" if mode < 4 else "R4001"))
+        caught = true
+    assert(caught)
+
+# Deterministic small permutations exercise merge boundaries and heap parity.
+fn less(a: int,b: int) -> bool:
+    return a < b
+for size in range(20):
+    source = [(i*7)%11 - 5 for i in range(size)]
+    snapshot = source
+    ordered = collections.sorted_int(source)
+    assert(source == snapshot)
+    assert(len(ordered) == size)
+    for i in range(1,size):
+        assert(ordered[i-1] <= ordered[i])
+    heap = collections.heap(source, less)
+    assert([heap.pop() for i in range(size)] == ordered)
+    assert(heap.size() == 0)
+    for value in ordered:
+        found = collections.binary_search(ordered,value)
+        assert(ordered[found] == value)
+        assert(found == 0 or ordered[found-1] != value)
+empty: list[int] = []
+assert(functional.first([1,2]) == 1 and functional.first(empty) is None)
+assert(functional.lookup({"a":1},"a") == 1)
+assert(functional.lookup({"a":1},"b") is None)
+assert(functional.partition(fn(x:int) => x%2 == 0,[1,2,3,4]) == ([2,4],[1,3]))
+assert(it.collect(it.chain([1,2],[3])) == [1,2,3])
+assert(it.collect(it.zip([1,2],["a"])) == [(1,"a")])
+assert(it.collect(it.drop(it.take(range(10),5),2)) == [2,3,4])
+assert(it.all(empty,fn(x:int) => x > 0))
+assert(not it.any(empty,fn(x:int) => x > 0))
+print("stdlib contracts passed")

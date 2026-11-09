@@ -1,0 +1,404 @@
+{
+  "schema_version": 1,
+  "scope": "Current README and docs root guides: every Wood fenced block explicitly classified; reports/releases are historical evidence, not executable example suites.",
+  "modules": [
+    {
+      "name": "binary",
+      "contract": "stdlib.md#binary-integer-formats",
+      "summary": "Endian-explicit signed and nonnegative integer wire formats.",
+      "tests": "tests/binary.wd"
+    },
+    {
+      "name": "collections",
+      "contract": "generic-records.md#reusable-native-collections",
+      "summary": "Stable integer sorting/search and generic Stack, Queue and Heap.",
+      "tests": "tests/generic_records.wd"
+    },
+    {
+      "name": "csv",
+      "contract": "stdlib.md#csv",
+      "summary": "Whole-document quoted CSV parsing, serialization and header tables.",
+      "tests": "tests/csv.wd"
+    },
+    {
+      "name": "env",
+      "contract": "stdlib.md#environment-configuration",
+      "summary": "Read-only owned environment values, distinguishing absence from empty strings.",
+      "tests": "tests/environment.wd"
+    },
+    {
+      "name": "fs",
+      "contract": "stdlib.md#native-filesystem-and-paths",
+      "summary": "Bounded filesystem listing, traversal and explicit creation/removal.",
+      "tests": "tests/native_services.wd"
+    },
+    {
+      "name": "functional",
+      "contract": "stdlib.md#reusable-native-algorithms-stdfunctional",
+      "summary": "Eager callback-first type-safe collection algorithms.",
+      "tests": "tests/functional.wd"
+    },
+    {
+      "name": "geometry",
+      "contract": "native-computing.md#linear-algebra-and-geometry",
+      "summary": "Triangle meshes, finite geometry, transforms and bounded OBJ I/O.",
+      "tests": "tests/obj_import.wd"
+    },
+    {
+      "name": "http",
+      "contract": "networking.md#stdhttp",
+      "summary": "Bounded synchronous connection-close HTTP messages and endpoints.",
+      "tests": "tests/http.wd"
+    },
+    {
+      "name": "https",
+      "contract": "backend.md#tls-and-https",
+      "summary": "Verified HTTPS over optional OpenSSL 3 streams.",
+      "tests": "tests/backend.cmake"
+    },
+    {
+      "name": "io",
+      "contract": "networking.md#stdio",
+      "summary": "Scoped binary file streams and bounded copying.",
+      "tests": "tests/streams.wd"
+    },
+    {
+      "name": "iter",
+      "contract": "closures-iterators.md#stditer-api",
+      "summary": "Lazy source-first adapters, owned cursor protocols and consumers.",
+      "tests": "tests/closures_iterators.wd"
+    },
+    {
+      "name": "linalg",
+      "contract": "native-computing.md#linear-algebra-and-geometry",
+      "summary": "Vec3 arithmetic, affine transforms and partial-pivoted linear solves.",
+      "tests": "tests/native_computing.wd"
+    },
+    {
+      "name": "math",
+      "contract": "stdlib.md#embedded-modules",
+      "summary": "Checked integer GCD, LCM, power and clamping.",
+      "tests": "tests/stdlib_contracts.wd"
+    },
+    {
+      "name": "net",
+      "contract": "networking.md#stdnet",
+      "summary": "Synchronous deadline-bound TCP connections/listeners and half-close.",
+      "tests": "tests/networking.cmake"
+    },
+    {
+      "name": "num",
+      "contract": "native-computing.md",
+      "summary": "Fixed-shape typed numeric arrays, views, conversions and kernels.",
+      "tests": "tests/native_computing.wd"
+    },
+    {
+      "name": "path",
+      "contract": "stdlib.md#native-filesystem-and-paths",
+      "summary": "Host path assembly, canonical identities and link-aware containment.",
+      "tests": "tests/native_services.wd"
+    },
+    {
+      "name": "python",
+      "contract": "python-distribution.md",
+      "summary": "EXPERIMENTAL LLVM-only CPython 3.14 interoperability; explicit managed objects and conversions.",
+      "tests": "tests/native_python.wd"
+    },
+    {
+      "name": "random",
+      "contract": "stdlib.md#secure-randomness",
+      "summary": "OS-backed cryptographic bytes and unbiased bounded integers; no insecure fallback.",
+      "tests": "tests/random.wd"
+    },
+    {
+      "name": "sqlite",
+      "contract": "backend.md#sqlite",
+      "summary": "Prepared statements, bounded JSON rows and rollback scopes; optional SQLite.",
+      "tests": "tests/sqlite.wd"
+    },
+    {
+      "name": "stats",
+      "contract": "stdlib.md#embedded-modules",
+      "summary": "Checked integer totals and binary64 online/scaled statistics.",
+      "tests": "tests/statistics_edges.wd"
+    },
+    {
+      "name": "task",
+      "contract": "backend.md#native-tasks",
+      "summary": "Joinable threads, immutable JSON messages and explicit socket handoff.",
+      "tests": "tests/tasks.wd"
+    },
+    {
+      "name": "time",
+      "contract": "stdlib.md#native-time",
+      "summary": "Blocking sleep and monotonic elapsed-time counters.",
+      "tests": "tests/time.wd"
+    },
+    {
+      "name": "tls",
+      "contract": "backend.md#tls-and-https",
+      "summary": "Verified TLS clients, server contexts and stream handoff; optional OpenSSL.",
+      "tests": "tests/backend.cmake"
+    },
+    {
+      "name": "utf8",
+      "contract": "stdlib.md#bytes-and-utf-8",
+      "summary": "Strict Unicode scalar decoding/encoding over byte strings.",
+      "tests": "tests/utf8.wd"
+    }
+  ],
+  "snippets": {
+    "README.md": [
+      {
+        "mode": "run",
+        "stdout": "1400\n"
+      },
+      {
+        "mode": "run",
+        "stdout": "book 2400\nchecked book\nshop.unknown_item no price for lamp\nchecked lamp\n4 5\n"
+      },
+      {
+        "mode": "run",
+        "stdout": "hello, wood\n"
+      }
+    ],
+    "docs/installation.md": [
+      {
+        "mode": "run",
+        "stdout": "hello, wood\n"
+      }
+    ],
+    "docs/agents.md": [
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/backend.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "check",
+        "reason": "Requires public network, OpenSSL and a live trusted HTTPS endpoint; not contacted by docs tests."
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/bootstrap-compiler.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run",
+        "requires_ffi": true,
+        "after": "assert(num.to_list(data) == [2.0, 4.0, 6.0])\n"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/closures-iterators.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/errors.md": [
+      {
+        "mode": "run",
+        "after": "write_text(\"count.txt\", \"42\" + byte_string(10))\nassert(read_count(\"count.txt\") == 42)\nassert(read_count(\"missing-count.txt\") == 0)\n"
+      },
+      {
+        "mode": "run",
+        "stdout": "asked for a name\n"
+      },
+      {
+        "mode": "run",
+        "stdout": "opening missing.txt\ndone with missing.txt\n\n"
+      },
+      {
+        "mode": "run",
+        "args": [
+          "input.txt"
+        ],
+        "stdout": "sample input\n\n"
+      }
+    ],
+    "docs/generic-records.md": [
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/language.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run",
+        "after": "assert(read_text(\"output.bin\") == read_text(\"input.bin\"))\n"
+      }
+    ],
+    "docs/native-computing.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run",
+        "requires_ffi": true,
+        "after": "data = array_from_list([1.0, 2.0, 3.0])\nassert(library_sum(data) == 6.0)\nsaved = data\nlibrary_scale(data, 2.0)\nassert(array_to_list(saved) == [1.0, 2.0, 3.0])\nassert(array_to_list(data) == [2.0, 4.0, 6.0])\n"
+      }
+    ],
+    "docs/native-ffi.md": [
+      {
+        "mode": "run",
+        "requires_ffi": true
+      }
+    ],
+    "docs/obj.md": [
+      {
+        "mode": "run",
+        "after": "roundtrip = geo.read_obj(\"output.obj\")\nassert(roundtrip.triangles == result.triangles)\nassert(num.shape(roundtrip.vertices) == num.shape(result.vertices))\nassert(num.close(geo.area(roundtrip), geo.area(result)))\n"
+      }
+    ],
+    "docs/libraries.md": [
+      {
+        "mode": "run",
+        "library_fixture": true,
+        "stdout": "1.5\n"
+      }
+    ],
+    "docs/projects.md": [
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/return-inference.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/stdlib.md": [
+      {
+        "mode": "run",
+        "stdin": "alpha\n\nlast",
+        "stdout": "alpha\n\nlast\n"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/tutorial.md": [
+      {
+        "mode": "run",
+        "stdout": "hello, Wood\n"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run",
+        "args": [
+          "10",
+          "20",
+          "-6"
+        ],
+        "stdout": "sum: 24\n"
+      },
+      {
+        "mode": "run",
+        "args": [
+          "10",
+          "20",
+          "-6"
+        ],
+        "stdout": "[-6, 10, 20] 24\n"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/types-and-calls.md": [
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      },
+      {
+        "mode": "run"
+      }
+    ],
+    "docs/troubleshooting.md": [
+      {
+        "mode": "reject",
+        "code": "E3002"
+      },
+      {
+        "mode": "run"
+      }
+    ]
+  }
+}

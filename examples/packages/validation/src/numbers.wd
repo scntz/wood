@@ -1,0 +1,9 @@
+from rules.bounds import nonnegative
+
+fn measurements(text: str) -> list[int]:
+    result: list[int] = []
+    for line in split(text, "\n"):
+        item = strip(line)
+        if item != "" and not starts_with(item, "#"):
+            append(result, nonnegative(int(item)))
+    return result

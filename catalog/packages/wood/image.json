@@ -1,0 +1,31 @@
+{
+  "owner": "wood",
+  "name": "image",
+  "package": "wood_image",
+  "tier": "official",
+  "description": "PNG and BMP codecs, resizing, cropping, 2D drawing and 3D mesh rendering in pure Wood.",
+  "readme": "# wood_image 0.2.0\n\nImage decoding, encoding, pixel operations, 2D drawing and 3D mesh rendering in pure wood. Listed in the\ncatalog as `wood@image`. It needs no native library and works on every supported\nplatform.\n\n```sh\nwood add wood@image\n```\n\n```wood\nimport image.image as img\nimport image.codecs as codecs\n\npicture = codecs.load(\"photo.png\")\ncodecs.save(\"thumbnail.png\", img.resize(img.grayscale(picture), 160, 100))\n```\n\n## Modules\n\n| Module | Purpose |\n| --- | --- |\n| `image` | RGBA8 `Image`, `crop`, bilinear `resize`, `grayscale`, `invert`, flips, `fill_rect`, `draw_line`, `fill_circle`, alpha `blit` |\n| `codecs` | PNG read/write, BMP read/write, PPM write; `load` detects the format and `save` follows the extension |\n| `scene` | Draws a `std.geometry` mesh with perspective, a depth buffer and one directional light: `render`, `framing`, `camera`, `style` |\n\n## Formats\n\n| Format | Read | Write |\n| --- | --- | --- |\n| PNG | 8-bit grayscale, gray+alpha, RGB, RGBA and palette, all filters | RGBA with stored (uncompressed) deflate |\n| BMP | Uncompressed 24 and 32-bit, bottom-up | 24-bit |\n| PPM | No | Binary P6 |\n\nPNG chunks are checksum-verified and inflate output is bounded by the declared image\nsize, so a hostile file cannot cause unbounded allocation.\n\n## Status and limits\n\nExperimental. Interoperability was checked against Python's `zlib`: PNGs written here\ndecompress correctly, and a PNG with dynamic Huffman codes and all five filters decoded\nwith no mismatched bytes. Output PNGs are valid but large because they are not\ncompressed. Interlaced PNG, 16-bit PNG, JPEG, GIF and color management are not\nsupported. Processing is single-threaded and suited to images of moderate size.\n\nLicensed MIT OR Apache-2.0.\n\n## 3D meshes\n\n`std.geometry` loads, builds and transforms meshes, and `scene` draws them to an image:\n\n```wood\nimport image.codecs as codecs\nimport image.scene as scene\nimport std.geometry as geo\n\nmesh = geo.torus(64, 32)\ncodecs.save(\"torus.png\", scene.render(mesh, 640, 480, scene.framing(mesh), scene.style()))\n```\n\nIt is a software renderer for previews, thumbnails and tools, not real-time graphics. Triangles that cross the camera plane are\nleft out rather than clipped, and there are no textures or smooth shading. See [the example](../../examples/mesh_render/src/main.wd).\n",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/scntz/wood",
+  "docs": "https://github.com/scntz/wood/blob/main/packages/wood_image/README.md",
+  "categories": [
+    "images",
+    "graphics"
+  ],
+  "platforms": [
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "example": "import image.image as img\nimport image.codecs as codecs\n\npicture = codecs.load(\"photo.png\")\ncodecs.save(\"thumb.png\", img.resize(img.grayscale(picture), 160, 100))\n",
+  "versions": [
+    {
+      "version": "0.2.0",
+      "published": "2026-11-03",
+      "source": {
+        "type": "archive",
+        "url": "https://github.com/scntz/wood/releases/download/v1.1.0/wood_image-0.2.0.woodpkg",
+        "sha256": "e33e595c5abd22ff0842e59542eb8c4b09da3124dcf847e3c2a2f9c71d1e44c6"
+      }
+    }
+  ]
+}

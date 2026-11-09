@@ -1,0 +1,12 @@
+# A unique temporary argument must not acquire an extra owner across the call.
+# Windows cannot unlink an open stream, making early finalization observable.
+fn discard(handle: stream, first: str, second: str):
+    handle = stream_open(second,"w")
+    assert(fs_remove(first))
+
+arguments = args()
+assert(len(arguments)==2)
+discard(stream_open(arguments[0],"w"),arguments[0],arguments[1])
+assert(not path_exists(arguments[0]))
+assert(fs_remove(arguments[1]))
+print("native compiler resource lifetime passed")

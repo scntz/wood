@@ -1,0 +1,15 @@
+# Native steady-clock timing. Both counter families share one process-local epoch.
+fn sleep(seconds: float):
+    time_sleep(seconds)
+
+fn monotonic() -> float:
+    return time_monotonic()
+
+fn monotonic_ns() -> int:
+    return time_monotonic_ns()
+
+fn perf_counter() -> float:
+    return time_monotonic()
+
+fn perf_counter_ns() -> int:
+    return time_monotonic_ns()

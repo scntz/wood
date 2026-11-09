@@ -1,0 +1,140 @@
+record Box[T]:
+    items: list[T]
+    fn push(mut self, value: T):
+        append(self.items,value)
+    fn last(self):
+        return self.items[-1]
+record State:
+    items: list[int]
+    fn read(self, ignored: int):
+        return self.items[0]
+    fn change(mut self):
+        self.items[0] = 99
+        return 0
+
+fn label(index: int):
+    return "symbol-" + str(index)
+fn escaped(index: int):
+    temporary = label(index) + "-tail"
+    return temporary[1:-1]
+fn collect(limit: int):
+    values: list[str] = []
+    for i in range(limit):
+        append(values,label(i))
+    return values
+fn changed(values: list[str]):
+    values[0] = "parameter"
+    return values
+fn fail():
+    temporary = "owned-" + str(42)
+    raise temporary
+fn evaluate(mutator: fn() -> int):
+    return mutator()
+
+assert(label(17) == "symbol-17" and escaped(17) == "ymbol-17-tai")
+assert("ab"*3 == "ababab" and 3*"xy" == "xyxyxy")
+assert("x"*-4 == "" and "abc"[::-1] == "cba")
+assert("abc"[::(-9223372036854775808)] == "c")
+assert(int("+42") == 42 and int("-9223372036854775808") == -9223372036854775808)
+assert(str(-9223372036854775808) == "-9223372036854775808")
+assert(byte_value(byte_string(0)) == 0 and byte_value(byte_string(255)) == 255)
+assert(strip(" \t\r\nword"+byte_string(11)+byte_string(12)) == "word")
+assert(find("ababa","ba") == 1 and find("abc","") == 0 and find("abc","zz") == -1)
+assert(starts_with("prefix","pre") and ends_with("prefix","fix"))
+assert(not starts_with("a","ab") and not ends_with("a","ab"))
+assert(replace("abba","b","X") == "aXXa")
+try:
+    replace("ab","","-")
+    assert(false)
+except err:
+    assert(err.code == "R4009" and err.message == "replacement pattern cannot be empty")
+assert(join(split("a::b::::","::"),"|") == "a|b||")
+values = collect(12)
+snapshot = values
+values[0] = "changed"
+append(values,label(12))
+assert(snapshot[0] == "symbol-0" and len(snapshot) == 12 and len(values) == 13)
+assert(changed(snapshot)[0] == "parameter" and snapshot[0] == "symbol-0")
+assert(values[-1] == "symbol-12")
+assert(values[1:4] == ["symbol-1","symbol-2","symbol-3"])
+assert(values[:2]*2 == ["changed","symbol-1","changed","symbol-1"])
+assert([1,2]+[3] == [1,2,3] and [1,2][::-1] == [2,1])
+assert("symbol-5" in values and "missing" not in values)
+assert("mbol" in values[1] and "longer" not in "x")
+mapping = {"one": ["a"],"two": ["b"],"one": ["updated"]}
+saved_map = mapping
+mapping["one"][0] += "-new"
+mapping["three"] = ["c"]
+assert(saved_map["one"] == ["updated"] and len(saved_map) == 2)
+assert(mapping["one"] == ["updated-new"] and len(mapping) == 3)
+assert(keys(mapping) == ["one","two","three"])
+assert(values(mapping) == [["updated-new"],["b"],["c"]])
+assert(mapping == {"three":["c"],"two":["b"],"one":["updated-new"]})
+assert(get(mapping,"absent",["default"]) == ["default"])
+assert("one" in mapping and "absent" not in mapping)
+ordered: dict[int,int] = {}
+for i in range(1000):
+    ordered[i] = i*2
+assert(ordered[999] == 1998 and len(ordered) == 1000)
+seen: list[int] = []
+for key in ordered:
+    append(seen,key)
+    if key == 0:
+        ordered[-1] = -2
+assert(len(seen) == 1000 and seen[0] == 0 and seen[-1] == 999)
+boolean_keys = {false: "no",true: "yes"}
+assert(boolean_keys[false] == "no" and boolean_keys[true] == "yes")
+state = State([1])
+assert(state.read(state.change()) == 1 and state.items[0] == 99)
+assert(state.read(0) == 99)
+box = Box(["first"])
+old_box = box
+box.push("second")
+assert(box.last() == "second" and old_box.items == ["first"])
+nested = [Box(["a"]),Box(["b"])]
+old_nested = nested
+nested[0].push("c")
+assert(nested[0].items == ["a","c"] and old_nested[0].items == ["a"])
+selected = nested[0].items
+nested[0].items[0] += "-changed"
+assert(selected[0] == "a" and nested[0].items[0] == "a-changed")
+count = 0
+for value in values:
+    count += 1
+    if count == 1:
+        append(values,"during iteration")
+assert(count == 13 and len(values) == 14)
+text = "abc"
+copy = text
+count = 0
+for byte in text:
+    text += byte
+    count += 1
+assert(count == 3 and copy == "abc" and text == "abcabc")
+for i in range(1000):
+    try:
+        temporary = ["iteration-"+str(i)]
+        if i%3 == 0:
+            continue
+        if i%3 == 1:
+            raise temporary[0]
+    except err:
+        assert(err.message == "iteration-"+str(i))
+try:
+    fail()
+except err:
+    saved = err
+    assert(saved.message == "owned-42")
+try:
+    invalid = values[999]
+except err:
+    assert(err.code == "R4006")
+try:
+    invalid = int("+-1")
+except err:
+    assert(err.code == "R4003" and err.message == "invalid decimal integer sign")
+try:
+    invalid = split("text","")
+except err:
+    assert(err.code == "R4009")
+print("native managed values passed",len(values),box.last())

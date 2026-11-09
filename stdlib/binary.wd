@@ -1,0 +1,66 @@
+# Fixed-width integer wire formats; no host-endian or native-layout assumptions.
+fn _width(width: int):
+    if width < 1 or width > 8:
+        raise "binary integer width must be in 1..8 bytes"
+
+fn _little(order: str) -> bool:
+    if order != "little" and order != "big":
+        raise "byte order must be little or big"
+    return order == "little"
+
+fn _pack(value: int, width: int, order: str, signed: bool) -> str:
+    _width(width)
+    little = _little(order)
+    negative = value < 0
+    if negative and not signed:
+        raise "unsigned binary integer cannot be negative"
+    pieces: list[str] = []
+    last = 0
+    for i in range(width):
+        last = value & 255
+        append(pieces, byte_string(last))
+        value = value >> 8
+    if signed:
+        if (negative and (value != -1 or last < 128)) or (not negative and (value != 0 or last >= 128)):
+            raise "signed binary integer does not fit requested width"
+    elif value != 0:
+        raise "unsigned binary integer does not fit requested width"
+    if not little:
+        reversed: list[str] = []
+        for i in range(width - 1, -1, -1):
+            append(reversed, pieces[i])
+        return join(reversed, "")
+    return join(pieces, "")
+
+fn pack_int(value: int, width: int, order: str) -> str:
+    return _pack(value, width, order, true)
+
+fn pack_uint(value: int, width: int, order: str) -> str:
+    return _pack(value, width, order, false)
+
+fn _unpack(text: str, order: str, signed: bool) -> int:
+    width = len(text)
+    _width(width)
+    little = _little(order)
+    first = 0
+    if little:
+        first = byte_value(text[width - 1])
+    else:
+        first = byte_value(text[0])
+    if not signed and width == 8 and first >= 128:
+        raise "unsigned binary integer exceeds Wood int range"
+    result = 0
+    if signed and first >= 128:
+        result = -1
+    for i in range(width):
+        index = i
+        if little:
+            index = width - 1 - i
+        result = (result << 8) | byte_value(text[index])
+    return result
+
+fn unpack_int(text: str, order: str) -> int:
+    return _unpack(text, order, true)
+
+fn unpack_uint(text: str, order: str) -> int:
+    return _unpack(text, order, false)

@@ -1,0 +1,40 @@
+import std.csv as csv
+
+assert(csv.parse("", ",") == [])
+assert(csv.parse("\n", ",") == [[]])
+assert(csv.parse('""\r\n', ",") == [[""]])
+assert(csv.parse('a,b\r\n1,"two\nlines"\n3,"quote""here"', ",") == [["a", "b"], ["1", "two\nlines"], ["3", 'quote"here']])
+assert(csv.parse("a,,\r\n", ",") == [["a", "", ""]])
+rows: list[list[str]] = [[], [""], ["a", "b,c", 'd"e', "\r\n", "á😀", "\0"]]
+assert(csv.parse(csv.dump(rows, ","), ",") == rows)
+assert(csv.read_table("name,value\na,1\nb,2", ",") == [{"name": "a", "value": "1"}, {"name": "b", "value": "2"}])
+errors = 0
+for invalid in ['"unfinished', 'bad"quote', '"closed"junk']:
+    try:
+        csv.parse(invalid, ",")
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+        errors = errors + 1
+for invalid in ["a,a\nx,y", "a,b\nx", ""]:
+    try:
+        csv.read_table(invalid, ",")
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+        errors = errors + 1
+assert(errors == 6)
+for invalid_delimiter in ["", ",,", '"', "\n", "\0"]:
+    try:
+        csv.parse("text", invalid_delimiter)
+        assert(false)
+    except err:
+        assert(err.code == "R4010")
+assert(slice("abcdef", -4, -1) == "cde")
+assert(slice("abc", -9223372036854775808, 9223372036854775807) == "abc")
+assert(slice([1, 2, 3], 2, 1) == [])
+original = [[1], [2]]
+copy = slice(original, 0, 1)
+copy[0][0] = 99
+assert(original[0][0] == 1)
+print("csv and slicing ok")

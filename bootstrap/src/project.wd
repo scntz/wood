@@ -1,0 +1,198 @@
+# Existing format-1 local project conventions; no registry or lock-file writer.
+import std.path as path
+import std.fs as fs
+import sources as src
+import lexer as lx
+
+record Package:
+    root: str
+    source_root: str
+    entry: str
+    test_root: str
+    name: str
+    version: str
+    dependencies: dict[str,int]
+
+record Result:
+    packages: list[Package]
+    entry: str
+    diagnostic: src.Diagnostic
+
+record Snapshot:
+    configured: Result
+    manifests: dict[str,str]
+
+fn kind(file: str) -> str:
+    result = fs.kind(file)
+    if result == "symlink" and path_exists(file):
+        return fs.kind(path.resolve(file))
+    return result
+
+fn discover(start: str) -> str:
+    directory = path.absolute(start)
+    if kind(directory) != "directory":
+        directory = path.parent(directory)
+    while true:
+        candidate = path.combine(directory,"wood.json")
+        if kind(candidate) == "file":
+            return candidate
+        parent = path.parent(directory)
+        if parent == directory:
+            return ""
+        directory = parent
+    return ""
+
+fn identifier(name: str) -> bool:
+    if len(name) == 0 or not lx.alpha(name[0]):
+        return false
+    for c in name:
+        if not lx.alpha(c) and not lx.digit(c):
+            return false
+    return true
+
+fn version(text: str) -> bool:
+    pieces = split(text,".")
+    if len(pieces) != 3:
+        return false
+    for piece in pieces:
+        if len(piece) == 0 or (len(piece) > 1 and piece[0] == "0"):
+            return false
+        for c in piece:
+            if not lx.digit(c):
+                return false
+    return true
+
+fn object(value: json) -> dict[str,json]:
+    if json_kind(value) != "dict":
+        raise "expected JSON object"
+    return json_dict(value)
+
+fn member(value: dict[str,json], name: str) -> json:
+    if name not in value:
+        raise "missing field '" + name + "'"
+    return value[name]
+
+fn string(value: json) -> str:
+    if json_kind(value) != "str":
+        raise "expected JSON string"
+    return json_str(value)
+
+fn fields(value: dict[str,json], allowed: list[str]):
+    for name in value:
+        if name not in allowed:
+            raise "unknown manifest field '" + name + "'"
+
+fn inside(root: str, child: str) -> str:
+    if "\0" in child or path.is_absolute(child):
+        raise "manifest paths must be relative and contain no NUL"
+    result = path.resolve(path.combine(root,child),true)
+    if not path.within(result,root):
+        raise "manifest path escapes package: " + child
+    return result
+
+record Resolver:
+    packages: list[Package]
+    known: dict[str,int]
+    active: list[int]
+    manifests: dict[str,str]
+
+    fn load(mut self, file: str) -> int:
+        file = path.resolve(file)
+        key = path.identity(file)
+        if key in self.known:
+            existing = self.known[key]
+            if existing in self.active:
+                raise "cyclic package dependency: " + file
+            return existing
+        if len(self.packages) >= 128:
+            raise "package graph exceeds 128 packages"
+        text = src.read(file,1048576)
+        data: dict[str,json] = {}
+        try:
+            data = object(json_parse(text))
+            fields(data,["format","name","version","source","entry","tests","dependencies","python"])
+        except err:
+            raise file + ": " + err.message
+        format = member(data,"format")
+        if json_kind(format) != "int":
+            raise "expected JSON integer"
+        if json_int(format) != 1:
+            raise "unsupported wood.json format"
+        name = string(member(data,"name"))
+        release = string(member(data,"version"))
+        if not identifier(name) or name == "std":
+            raise "package name must be an identifier other than std"
+        if not version(release):
+            raise "package version must be exact MAJOR.MINOR.PATCH without leading zeros"
+        root = path.resolve(path.parent(file))
+        self.manifests[root] = text
+        source_root = inside(root,string(member(data,"source")))
+        if kind(source_root) != "directory":
+            raise "package source directory does not exist"
+        entry = ""
+        test_root = ""
+        if "entry" in data:
+            entry = inside(source_root,string(data["entry"]))
+        if "tests" in data:
+            test_root = inside(root,string(data["tests"]))
+            if kind(test_root) != "directory":
+                raise "tests directory does not exist"
+        if "python" in data:
+            # Exact versions for the optional python@ provider; never read by the compiler.
+            for package in object(data["python"]):
+                string(object(data["python"])[package])
+        index = len(self.packages)
+        self.known[key] = index
+        append(self.packages,Package(root,source_root,entry,test_root,name,release,{}))
+        append(self.active,index)
+        if "dependencies" in data:
+            # json_dict exposes the native JSON object's sorted key order.
+            for alias in object(data["dependencies"]):
+                if not identifier(alias) or alias == "std":
+                    raise "dependency alias must be an identifier other than std"
+                spec = object(object(data["dependencies"])[alias])
+                fields(spec,["path","version","source"])
+                if "source" in spec:
+                    string(spec["source"])
+                dependency_path = string(member(spec,"path"))
+                # Reuse native host syntax; relative dependency paths may escape
+                # the owning package, unlike source/entry/test paths.
+                if "\0" in dependency_path or path.is_absolute(dependency_path):
+                    raise "dependency paths must be relative"
+                target = self.load(path.combine(path.combine(root,dependency_path),"wood.json"))
+                required = string(member(spec,"version"))
+                if required != self.packages[target].version:
+                    raise "dependency '"+alias+"' version mismatch; expected "+required+", found "+self.packages[target].version
+                self.packages[index].dependencies[alias] = target
+        pop(self.active)
+        return index
+
+fn snapshot(input: str, require_entry: bool = true) -> Snapshot:
+    resolver = Resolver([],{},[],{})
+    entry = ""
+    try:
+        absolute = path.absolute(input)
+        script = path.name(absolute) != ".wd" and ends_with(path.name(absolute),".wd")
+        manifest = absolute
+        if script or kind(absolute) == "directory":
+            manifest = discover(absolute)
+        if manifest != "" and path.name(manifest) == "wood.json":
+            resolver.load(manifest)
+            entry = absolute
+            if not script:
+                entry = resolver.packages[0].entry
+                if entry == "" and require_entry:
+                    raise "project has no entry file"
+        elif script:
+            # Standalone files use their canonical parent as the sole root.
+            entry = path.resolve(absolute)
+            root = path.resolve(path.parent(entry))
+            append(resolver.packages,Package(root,root,entry,"","","",{}))
+        else:
+            raise "no wood.json project found; provide a .wd file or run 'wood init PATH'"
+        return Snapshot(Result(resolver.packages,entry,src.success()),resolver.manifests)
+    except err:
+        return Snapshot(Result([],"",src.Diagnostic("D5001",err.message,input,0,0,0,0)),{})
+
+fn resolve(input: str) -> Result:
+    return snapshot(input).configured

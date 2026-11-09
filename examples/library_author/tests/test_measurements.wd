@@ -1,0 +1,14 @@
+import measurements as measurements
+
+values = [measurements.Reading("first", 1000), measurements.Reading("second", 2000)]
+assert(measurements.mean_kilograms(values) == 1.5)
+assert(values[0].grams == 1000)
+empty: list[measurements.Reading] = []
+caught = false
+try:
+    measurements.mean_kilograms(empty)
+except err:
+    assert(err.message == "measurements: at least one reading is required")
+    caught = true
+assert(caught)
+print("measurement library passed")

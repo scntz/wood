@@ -1,0 +1,42 @@
+# Native CSV -> validated records -> JSON. No Python or third-party runtime.
+import std.csv as csv
+
+record Sale:
+    category: str
+    total_cents: int
+
+fn parse_sale(fields: list[str]) -> Sale:
+    if len(fields) != 3:
+        raise "each sale needs category, quantity and unit_cents"
+    category = strip(fields[0])
+    quantity = int(fields[1])
+    unit_cents = int(fields[2])
+    if category == "" or not (1 <= quantity <= 1000000) or not (0 <= unit_cents <= 1000000000):
+        raise "invalid category, quantity or unit price"
+    return Sale(category, quantity * unit_cents)
+
+fn summarize(sales: list[Sale]) -> json:
+    totals: dict[str,int] = {}
+    counts: dict[str,int] = {}
+    total = 0
+    for sale in sales:
+        totals[sale.category] = get(totals, sale.category, 0)
+        totals[sale.category] += sale.total_cents
+        counts[sale.category] = get(counts, sale.category, 0) + 1
+        total += sale.total_cents
+    categories = [json({"category": json(category), "total_cents": json(totals[category]),
+                       "entries": json(counts[category])})
+                  for category in totals]
+    return json({"total_cents": json(total), "categories": json(categories),
+                 "high_value_cents": json([sale.total_cents for sale in sales if sale.total_cents >= 10000])})
+
+arguments = args()
+if len(arguments) != 2:
+    raise "usage: wood sales_report.wd -- input.csv output.json"
+rows = csv.parse(read_text(arguments[0]), ",")
+if len(rows) == 0:
+    raise "sales CSV needs a header"
+if rows[0] != ["category", "quantity", "unit_cents"]:
+    raise "expected CSV header: category,quantity,unit_cents"
+sales = [parse_sale(fields) for fields in rows[1:]]
+write_text(arguments[1], json_dump(summarize(sales)) + "\n")

@@ -1,0 +1,36 @@
+# Hosted compiler entry: all frontend and emission policy is implemented in Wood.
+# The host C++ compiler is invoked separately on this tool's emitted source.
+import body_semantics as semantic
+import emit_cpp as backend
+import project as project
+import project_trust as trust
+import sources as src
+
+arguments = args()
+if len(arguments) != 4 and len(arguments) != 5:
+    eprint("usage: wood-bootstrap-compiler STDLIB.json RUNTIME.hpp INPUT OUTPUT.cpp [--locked]")
+    exit(2)
+required = len(arguments) == 5
+if required and arguments[4] != "--locked":
+    eprint("unknown option: "+arguments[4])
+    exit(2)
+if path_exists(arguments[3]):
+    eprint("output already exists: "+arguments[3])
+    exit(2)
+standards: dict[str,str] = {}
+bundle = project.object(json_parse(src.read(arguments[0],16777216)))
+for name in bundle:
+    standards[name] = project.string(bundle[name])
+result = semantic.analyze(trust.load(arguments[2],standards,required))
+if result.diagnostic.code != "":
+    eprint(json_dump(result.diagnostic))
+    if result.diagnostic.code == "D5001":
+        exit(2)
+    exit(1)
+for type in result.signatures.pool.types:
+    if type.kind == "PythonObject":
+        eprint(json_dump(src.Diagnostic("B3501","optional Python interoperability requires the LLVM backend",arguments[2],0,0,0,0)))
+        exit(1)
+runtime = src.read(arguments[1],16777216)
+output = backend.emit(result,runtime)
+write_text(arguments[3],output)

@@ -1,0 +1,13 @@
+total = 0
+for i in range(10, 0, -1):
+    if i == 8:
+        continue
+    if i < 5:
+        break
+    total = total + i
+assert(total == 37)
+print("total:", total)
+
+average: float = total
+average = average / 5
+print("average:", average)
